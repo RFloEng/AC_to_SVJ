@@ -1,0 +1,16 @@
+{
+  "name": "MX-5 ND2 Club",
+  "brand": "Mazda",
+  "year": 2024,
+  "class": "Roadster",
+  "tags": ["rwd", "roadster", "manual"],
+  "description": "Reference template for AC→SVJ converter smoke test.",
+  "specs": {
+    "bhp": "181 bhp",
+    "torque": "205 Nm",
+    "topspeed": "219 km/h",
+    "acceleration": "6.5 s",
+    "weight": "1077 kg",
+    "pwratio": "5.95 kg/bhp"
+  }
+}

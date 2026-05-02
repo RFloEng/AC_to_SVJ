@@ -1,0 +1,39 @@
+# Changelog
+
+All notable changes are documented here.
+
+## [0.9.0-beta] — 2026-05-02
+
+Initial public beta release.
+
+### Suspension geometry
+- All six AC suspension `TYPE` codes covered: MacPherson, double-wishbone,
+  multi-link, solid-axle, trailing-arm, semi-trailing-arm.
+- Correct lateral coordinate convention for chassis-side pickups (`WBCAR_*`,
+  `LINK_*_CAR`, `PANHARD_CAR`, `WATTS_CAR`, `TRAIL_CAR`, `SEMI_TRAIL_CAR`):
+  the AC X component is an inboard-positive offset from the wheel centre —
+  the same convention as `WBTYRE_*`. Verified against MX-5 ND (DWB V-shape,
+  strut inclination 14.9° on Audi TT Cup, F2004 keel geometry).
+- Correct vertical (Z) reference: `chassis_z_offset = -rolling_radius`.
+
+### Powertrain & vehicle
+- Real `power.lut` / `coast_curve.lut` parsing.
+- Turbos, BOV, engine damage, driver aids (autoblip, autoclutch, ABS, TC).
+- Wheelbase from `suspensions.ini [BASIC]`; CG from `CG_LOCATION` fraction.
+
+### Tyres
+- Pacejka MF 5.2 fitter per axle/compound with R² / RMSE metrics.
+- Multi-compound `[FRONT_N]/[REAR_N]`, thermal blocks, pressure model,
+  relaxation length, rolling resistance, camber thrust, speed sensitivity.
+
+### Aero
+- `aerodynamics.components[]` per SVJ 0.95; wing AoA-CL/CD LUTs; DRS.
+
+### UI (Gradio)
+- Tab 1: upload files. Tab 2: single car directory. Tab 4: Tire Lab.
+- Tab 3 (batch): scan folder → tick-list of cars → convert selected.
+  Output ZIP named `ac_svj_batch_<date>_conv<ver>_svj<ver>.zip`.
+
+### Quality
+- `smoke_test.py` with 62 structural checks including DWB V-shape geometry.
+- `examples/mx5_nd_club.svj.json` reference output from real Kunos car data.
