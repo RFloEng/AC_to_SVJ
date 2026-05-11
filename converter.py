@@ -1,7 +1,22 @@
 """
 AC → SVJ Converter  v0.99
-SVJ spec:       https://github.com/RFloEng/SVJ-standard-vehicle-json  (v0.95 target)
+SVJ spec:       https://github.com/RFloEng/SVJ-standard-vehicle-json  (v0.97 target)
 Converter repo: https://github.com/RFloEng/AC_to_SVJ
+
+SVJ 0.97 target update (converter v0.9.1)
+-----------------------------------------
+ • `_metadata.version` bumped to "0.97". The schema enum no longer accepts
+   "0.95"; valid values are "0.96" and "0.97". All existing physics output
+   is fully backward-compatible — no fields removed or renamed.
+ • `_metadata.coordinate_system` now accepts either a named string
+   ("SAE_J670", "ISO_8855", "OpenDRIVE") or a custom axis-spec object
+   {up, forward, handedness}. This converter continues to emit "SAE_J670"
+   which remains valid under the new oneOf schema.
+ • `_metadata.units` now accepts "SI" | "meters" | "millimeters" (glTF
+   pipeline convenience). This converter continues to emit "SI".
+ • New optional `assets.meshes` block and `visual` bindings on chassis /
+   suspension corners (glTF node references). Not emitted here — AC has no
+   glTF mesh source; consumers can add them post-conversion.
 
 v0.99 highlights (vs v0.98)
 ---------------------------
@@ -79,14 +94,22 @@ from ac_parsers import (
 )
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench,
-    build_svj_pacejka_block, BenchResult,
+    build_svj_pacejka_block, build_svj_mf62_block,
+    build_svj_pacejka_blocks, BenchResult,
 )
+try:
+    from kn5_reader import (scan_kn5_nodes, map_ac_nodes_to_svj,
+                            find_car_kn5, find_car_kn5_lods,
+                            kn5_to_glb, kn5_all_lods_to_glbs)
+    _KN5_AVAILABLE = True
+except ImportError:
+    _KN5_AVAILABLE = False
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-SVJ_VERSION = "0.95"
+SVJ_VERSION = "0.97"
 SVJ_SPEC    = "SVJ"
-CONV_VER    = "0.9.0"
+CONV_VER    = "0.9.1"
 REPO_URL    = "https://github.com/RFloEng/SVJ-standard-vehicle-json"
 CONV_REPO   = "https://github.com/RFloEng/AC_to_SVJ"
 
@@ -702,19 +725,25 @@ def build_corner(corner_id: str, susp_axle: dict,
 
 # ─── Pacejka fit per axle (per compound when multi) ──────────────────────────
 
-def fit_tyre_axle_section(tyres_ini_dict: dict, section: str, axle: str,
-                          log: list) -> tuple[Optional[dict], Optional[BenchResult]]:
+def fit_tyre_axle_section(
+        tyres_ini_dict: dict, section: str, axle: str, log: list,
+) -> tuple[Optional[dict], Optional[dict], Optional[BenchResult]]:
+    """
+    Returns (mf52_block, mf62_block, BenchResult).
+    Both blocks are None when the section has no usable AC parameters.
+    """
     p = parse_tyre_section(tyres_ini_dict, section=section, axle=axle)
     if p.source == "defaults":
-        log.append(f"  ⚠ {axle} [{section}]: no usable params — Pacejka block omitted")
-        return None, None
+        log.append(f"  ⚠ {axle} [{section}]: no usable params — Pacejka blocks omitted")
+        return None, None, None
     result = run_bench(p)
     log.append(
-        f"  ✓ {axle} [{section}]: MF5.2 fit from {p.source}  "
+        f"  ✓ {axle} [{section}]: MF5.2/MF6.2 fit from {p.source}  "
         f"lat R²={result.fit_lateral['r2']:.4f}  "
         f"long R²={result.fit_longitudinal['r2']:.4f}"
     )
-    return build_svj_pacejka_block(result), result
+    mf52, mf62 = build_svj_pacejka_blocks(result)
+    return mf52, mf62, result
 
 
 # ─── Main SVJ builder ────────────────────────────────────────────────────────
@@ -723,17 +752,21 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               lut_files: Optional[dict] = None,
               data_dir: Optional[Path] = None,
               ctrl_files: Optional[dict] = None,
+              glb_output_dir: Optional[Path] = None,
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
 
     Parameters
     ----------
-    ini_files  : dict[str, str]   filename (lower) → text
-    cm_meta    : dict             parsed ui_car.json
-    lut_files  : dict[str, list]  optional pre-parsed LUTs (by filename)
-    data_dir   : Path             optional; used by engine parser to resolve .lut
-    ctrl_files : dict[str, str]   controller ini texts (ctrl_ABS.ini, ctrl_TC.ini, …)
+    ini_files      : dict[str, str]   filename (lower) → text
+    cm_meta        : dict             parsed ui_car.json
+    lut_files      : dict[str, list]  optional pre-parsed LUTs (by filename)
+    data_dir       : Path             optional; used by engine parser to resolve .lut
+    ctrl_files     : dict[str, str]   controller ini texts (ctrl_ABS.ini, ctrl_TC.ini, …)
+    glb_output_dir : Path             optional; when set, kn5_to_glb() writes
+                                      <glb_output_dir>/meshes/<car>.glb alongside
+                                      the JSON so callers can package or serve it.
     """
     log: list[str] = []
     ctrl_files = ctrl_files or {}
@@ -786,13 +819,18 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
 
     car_name  = cm.get("name") or cB.get("SCREEN_NAME") or cB.get("NAME") or "Unknown"
     brand     = cm.get("brand") or cB.get("BRAND") or ""
+    # CM often stores the full "Brand Model Year" string in name; strip the leading
+    # brand prefix so vehicle_info.model doesn't duplicate the make field.
+    _model = car_name
+    if brand and _model.lower().startswith(brand.lower()):
+        _model = _model[len(brand):].strip()
     year      = cm.get("year")
     car_class = cm.get("class")
     tags      = cm.get("tags", [])
     desc      = cm.get("description", "")
     cm_bhp    = parse_cm_num("bhp")
 
-    log.append(f"✓ Car: {(brand + ' ') if brand else ''}{car_name}")
+    log.append(f"✓ Car: {(brand + ' ') if brand else ''}{_model}")
     if cm:
         log.append("✓ Content Manager metadata loaded")
 
@@ -880,13 +918,13 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     pacejka_rear  = None
 
     def tire_set_name(section: str, suffix: str, tw, asp, rim_r):
-        rim_in = round(rim_r * 2 / 0.0254)
+        rim_in = round(rim_r * 2 / 0.0254) - 1  # Kunos: RIM_RADIUS=(nominal_in+1)*0.0254/2
         label = suffix if suffix else ""
         return f"tire_{section.lower()}{label}_{round(tw*1000)}_{round(asp*100)}r{rim_in}"
 
     def tire_set_obj(tw, asp, rim_rv, label, compound_suffix):
-        rim_in  = round(rim_rv * 2 / 0.0254)
-        rim_d   = round(rim_rv * 2, 4)
+        rim_in  = round(rim_rv * 2 / 0.0254) - 1  # Kunos +1 inch convention
+        rim_d   = round(rim_in * 0.0254, 4)           # nominal diameter (m)
         overall = round(rim_d + 2 * tw * asp, 4)
         return {
             "description":    f"AC-derived tire {round(tw*1000)}/{round(asp*100)}R{rim_in} "
@@ -900,11 +938,11 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 "overall_diameter":  overall,
                 "section_height":    round(tw * asp, 4),
             },
-            "rim": {"diameter": round(rim_rv * 2, 4),
+            "rim": {"diameter": round(rim_in * 0.0254, 4),
                     "width_nominal": round(tw, 4)},
             "pressure": 210000.0,
             "_est": True,
-            "_note": "Tire dimensions from tyres.ini. See models.pacejka_mf52 for force model.",
+            "_note": "Tire dimensions from tyres.ini. See pacejka (MF62) and pacejka_mf52 for force models.",
         }
 
     log.append("─── Tire Lab (tyres.ini → Pacejka MF 5.2) ──────────────")
@@ -926,18 +964,18 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         tw_r  = _f(tr.get("WIDTH") or tr.get("TYRE_WIDTH"),  0.205)
         rad_r = _f(tr.get("RADIUS") or tr.get("TYRE_RADIUS"), 0.306)
         rim_r = _f(tr.get("RIM_RADIUS"), 0.191)
-        asp_f = round((rad_f - rim_f) / tw_f, 3) if tw_f > 0 else 0.45
-        asp_r = round((rad_r - rim_r) / tw_r, 3) if tw_r > 0 else 0.45
+        asp_f = round((rad_f - (rim_f - 0.0127)) / tw_f, 3) if tw_f > 0 else 0.45
+        asp_r = round((rad_r - (rim_r - 0.0127)) / tw_r, 3) if tw_r > 0 else 0.45
 
         name_f = tire_set_name("front", suffix, tw_f, asp_f, rim_f)
         name_r = tire_set_name("rear",  suffix, tw_r, asp_r, rim_r)
 
-        # Pacejka fit
-        pf_block, br_f = fit_tyre_axle_section(t, f_sec, f"front{suffix}", log)
-        pr_block, br_r = fit_tyre_axle_section(t, r_sec, f"rear{suffix}",  log)
+        # Pacejka fit — returns (mf52, mf62, BenchResult)
+        pf52, pf62, br_f = fit_tyre_axle_section(t, f_sec, f"front{suffix}", log)
+        pr52, pr62, br_r = fit_tyre_axle_section(t, r_sec, f"rear{suffix}",  log)
         if pair_idx == 0:
-            pacejka_front = pf_block
-            pacejka_rear  = pr_block
+            pacejka_front    = pf62  # MF62 is now the primary reference
+            pacejka_rear     = pr62
             ts_front_default = name_f
             ts_rear_default  = name_r
             rolling_radius_f = rad_f
@@ -959,11 +997,17 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         if xtra_f: front_obj.update(xtra_f)
         if xtra_r: rear_obj.update(xtra_r)
 
-        # Embed pacejka
-        if pf_block:
-            front_obj.setdefault("models", {})["pacejka_mf52"] = pf_block
-        if pr_block:
-            rear_obj.setdefault("models", {})["pacejka_mf52"] = pr_block
+        # Embed both Pacejka models.
+        # SVJ schema-standard key: `pacejka` → MF62 (richer model, includes
+        # combined-slip weights and AC camber mapping via pVy3).
+        # Additional key: `pacejka_mf52` → MF52 pure-slip subset for
+        # simulators that only support the older format.
+        if pf62:
+            front_obj["pacejka"]      = pf62
+            front_obj["pacejka_mf52"] = pf52
+        if pr62:
+            rear_obj["pacejka"]      = pr62
+            rear_obj["pacejka_mf52"] = pr52
 
         tire_sets[name_f] = front_obj
         if name_r != name_f:
@@ -1181,7 +1225,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
             },
         },
         "vehicle_info": {
-            "make": brand or None, "model": car_name, "year": year or None,
+            "make": brand or None, "model": _model, "year": year or None,
             "variant": car_class or None, "drive_type": layout,
         },
         "chassis": {
@@ -1336,6 +1380,87 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
 
     if x_ac:
         svj["x_assettocorsa"] = x_ac
+
+    # ── KN5 visual bindings (SVJ 0.97 assets.meshes + visual) ────────────────
+    # When a KN5 file is present alongside the car data, scan its node tree
+    # and emit the assets.meshes manifest plus visual bindings on chassis and
+    # each suspension corner.  The GLB lives at  meshes/<car_name>.glb  (the
+    # conventional output path when kn5_to_glb() is used from the CLI or
+    # Tire Lab tab).  LOD B/C/D GLBs (when present) are also exported.
+    # All fields are optional in the schema — if no KN5 is found the block is
+    # omitted and the SVJ is still fully valid.
+    if _KN5_AVAILABLE and data_dir is not None:
+        car_path = data_dir.parent
+        kn5_lods = find_car_kn5_lods(car_path)   # [("A", path), ("B", path), ...]
+        if not kn5_lods:
+            log.append(f"ℹ KN5 not found in {car_path} — visual bindings and GLB skipped")
+        else:
+            kn5_path = kn5_lods[0][1]            # LOD A is always first
+            try:
+                node_names = scan_kn5_nodes(kn5_path)
+                body_map   = map_ac_nodes_to_svj(node_names)  # {svj_id: ac_name}
+                glb_uri    = f"meshes/{kn5_path.stem}.glb"
+                mesh_id    = kn5_path.stem.lower().replace("-", "_").replace(" ", "_")
+
+                # Build assets.meshes list — LOD A first, then B/C/D entries
+                mesh_entries = [
+                    {
+                        "id":          mesh_id,
+                        "uri":         glb_uri,
+                        "description": f"Converted from {kn5_path.name} (LOD A)",
+                    }
+                ]
+                for lod_label, lod_path in kn5_lods[1:]:
+                    lod_id  = lod_path.stem.lower().replace("-", "_").replace(" ", "_")
+                    lod_uri = f"meshes/{lod_path.stem}.glb"
+                    mesh_entries.append({
+                        "id":          lod_id,
+                        "uri":         lod_uri,
+                        "description": f"Converted from {lod_path.name} (LOD {lod_label})",
+                        "lod":         lod_label,
+                    })
+
+                svj["assets"] = {"meshes": mesh_entries}
+
+                # chassis visual binding (always points at LOD A mesh)
+                if "chassis" in body_map:
+                    svj["chassis"]["visual"] = {
+                        "mesh_ref": mesh_id,
+                        "node":     f"SVJ::body::chassis",
+                    }
+
+                # suspension corner visual bindings (upright per corner)
+                _CORNER_MAP = {
+                    "FL": "upright_fl",
+                    "FR": "upright_fr",
+                    "RL": "upright_rl",
+                    "RR": "upright_rr",
+                }
+                for corner, svj_id in _CORNER_MAP.items():
+                    if svj_id in body_map and corner in svj.get("suspension", {}):
+                        svj["suspension"][corner]["visual"] = {
+                            "mesh_ref": mesh_id,
+                            "node":     f"SVJ::body::{svj_id}",
+                        }
+
+                lod_labels = [lbl for lbl, _ in kn5_lods]
+                log.append(
+                    f"✓ KN5 visual bindings: {len(body_map)} nodes mapped "
+                    f"from {kn5_path.name} (LODs: {', '.join(lod_labels)}) → {glb_uri}"
+                )
+
+                # ── GLB export (only when caller supplies an output dir) ───
+                if glb_output_dir is not None:
+                    try:
+                        _glb_dir = glb_output_dir / "meshes"
+                        exported = kn5_all_lods_to_glbs(car_path, _glb_dir)
+                        for lbl, out_p in exported.items():
+                            log.append(f"✓ GLB LOD {lbl} written → meshes/{out_p.name}")
+                    except Exception as _glb_err:
+                        log.append(f"⚠ GLB export failed: {_glb_err}")
+
+            except Exception as _kn5_err:
+                log.append(f"⚠ KN5 scan skipped ({kn5_path.name}): {_kn5_err}")
 
     log.append(f"✓ SVJ v{SVJ_VERSION} output built (converter v{CONV_VER})")
     return svj, log, bench_results
@@ -1493,7 +1618,7 @@ def _tire_summary_text(bench: dict) -> str:
     return "\n".join(parts)
 
 
-def convert_single_dir(car_folder: str):
+def convert_single_dir(car_folder: str, convert_glb: bool = False):
     car_folder = (car_folder or "").strip()
     if not car_folder:
         return "Enter a folder path.", None, None, None, None, "No tire data."
@@ -1521,29 +1646,75 @@ def convert_single_dir(car_folder: str):
         return (f"No AC data files found in {car_path}.\n{note}",
                 None, None, None, None, "No tire data.")
 
-    svj, log, bench = build_svj(ini_files, cm_meta, data_dir=data_dir,
-                                ctrl_files=ctrl_files)
-    svj = _clean(svj)
-    br = bench.get("front") or next(iter(bench.values()), None)
-    return (
-        "\n".join(log) + f"\n\n{'─'*60}\n{json.dumps(svj, indent=2)}",
-        _tmp_write(svj, _car_stem(svj, car_path.name)),
-        _png_to_pil(br.lateral_png)      if br else None,
-        _png_to_pil(br.longitudinal_png) if br else None,
-        _png_to_pil(br.mu_vs_fz_png)     if br else None,
-        _tire_summary_text(bench),
-    )
+    # When GLB export is requested, provide a temp dir for kn5_to_glb output.
+    import shutil
+    _glb_tmp: Optional[str] = None
+    glb_output_dir: Optional[Path] = None
+    if convert_glb:
+        if not _KN5_AVAILABLE:
+            return ("⚠ kn5_reader could not be imported — GLB export unavailable.",
+                    None, None, None, None, "")
+        try:
+            import pygltflib  # noqa: F401
+        except ImportError:
+            return ("⚠ pygltflib is not installed.\n"
+                    "Run:  pip install pygltflib\n"
+                    "then restart the converter.",
+                    None, None, None, None, "")
+        _glb_tmp = tempfile.mkdtemp(prefix="ac_svj_glb_")
+        glb_output_dir = Path(_glb_tmp)
+
+    try:
+        svj, log, bench = build_svj(ini_files, cm_meta, data_dir=data_dir,
+                                    ctrl_files=ctrl_files,
+                                    glb_output_dir=glb_output_dir)
+        svj = _clean(svj)
+        stem = _car_stem(svj, car_path.name)
+        br = bench.get("front") or next(iter(bench.values()), None)
+
+        # Package output: ZIP (SVJ + GLB) if a GLB was produced, else plain SVJ.
+        glb_files = (
+            list((glb_output_dir / "meshes").glob("*.glb"))
+            if glb_output_dir and (glb_output_dir / "meshes").is_dir()
+            else []
+        )
+        if glb_files:
+            _zip_name = f"{stem}.zip"
+            zip_path  = str(Path(tempfile.gettempdir()) / _zip_name)
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(f"{stem}.svj.json", json.dumps(svj, indent=2))
+                for _glb in glb_files:
+                    zf.write(str(_glb), f"meshes/{_glb.name}")
+            out_file = zip_path
+            log.append(f"✓ Output packaged as {_zip_name} (SVJ + GLB)")
+        else:
+            out_file = _tmp_write(svj, stem)
+
+        return (
+            "\n".join(log) + f"\n\n{'─'*60}\n{json.dumps(svj, indent=2)}",
+            out_file,
+            _png_to_pil(br.lateral_png)      if br else None,
+            _png_to_pil(br.longitudinal_png) if br else None,
+            _png_to_pil(br.mu_vs_fz_png)     if br else None,
+            _tire_summary_text(bench),
+        )
+    finally:
+        if _glb_tmp:
+            shutil.rmtree(_glb_tmp, ignore_errors=True)
 
 
 def scan_batch_folder(collection_folder: str):
     """
-    Scan `collection_folder` for convertible AC car subdirs and return a
-    populated CheckboxGroup update (all cars pre-ticked) plus a status line.
+    Scan `collection_folder` for convertible AC car subdirs and return:
+      - list-of-[bool, str] rows for the Dataframe (all pre-ticked)
+      - same list stored in State (used for name filtering)
+      - status markdown string
     Called by the Scan button in tab 3 of the Gradio UI.
     """
     root = Path((collection_folder or "").strip())
     if not root or not root.is_dir():
-        return gr.update(choices=[], value=[]), f"❌ Directory not found: {collection_folder}"
+        empty = []
+        return empty, empty, f"❌ Directory not found: {collection_folder}"
 
     subdirs       = sorted([d for d in root.iterdir() if d.is_dir()])
     car_dirs      = [d.name for d in subdirs if (d / "data").is_dir()]
@@ -1551,50 +1722,119 @@ def scan_batch_folder(collection_folder: str):
                      if not (d / "data").is_dir() and (d / "data.acd").is_file()]
 
     if not car_dirs and not needs_unpack:
-        return gr.update(choices=[], value=[]), "No AC car folders found (no data/ subdirs)."
+        empty = []
+        return empty, empty, "No AC car folders found (no data/ subdirs)."
 
+    rows  = [[True, name] for name in car_dirs]
     parts = [f"✓ **{len(car_dirs)}** convertible car(s) found"]
     if needs_unpack:
         parts.append(
             f"⚠ **{len(needs_unpack)}** car(s) have encrypted `data.acd` — "
             "unpack in Content Manager first"
         )
-    return (
-        gr.update(choices=car_dirs, value=car_dirs),   # all pre-ticked
-        "  ·  ".join(parts),
-    )
+    return rows, rows, "  ·  ".join(parts)
 
 
-def convert_batch(collection_folder: str, include_plots: bool = True,
-                  selected_cars: list[str] | None = None,
+def _df_to_rows(df_data):
+    """Normalise Gradio Dataframe input to list-of-lists (handles pandas DF or list)."""
+    try:
+        import pandas as pd
+        if isinstance(df_data, pd.DataFrame):
+            return df_data.values.tolist()
+    except ImportError:
+        pass
+    return df_data if df_data else []
+
+
+def filter_batch_cars(all_rows, filter_text: str):
+    """
+    Filter the full car list by name substring (case-insensitive).
+    Returns a filtered list-of-[bool, str] rows for the Dataframe.
+    `all_rows` may be a list-of-lists (from gr.State) or a pandas DataFrame.
+    """
+    rows = _df_to_rows(all_rows)
+    ft = (filter_text or "").strip().lower()
+    if not ft:
+        return rows
+    return [row for row in rows if ft in str(row[1]).lower()]
+
+
+def select_all_batch(df_data):
+    """Tick every car in the current dataframe view."""
+    return [[True, row[1]] for row in _df_to_rows(df_data)]
+
+
+def deselect_all_batch(df_data):
+    """Untick every car in the current dataframe view."""
+    return [[False, row[1]] for row in _df_to_rows(df_data)]
+
+
+def convert_batch(collection_folder: str, output_folder: str = "",
+                  include_plots: bool = True,
+                  convert_glb: bool = False,
+                  selected_cars=None,
                   progress=gr.Progress()):
     """
-    Convert every AC car subfolder of `collection_folder` into .svj.json,
-    plus (if include_plots) an AC-vs-Pacejka tire comparison PNG set per car,
-    plus a batch_summary.csv with per-car fit quality.
+    Convert every selected AC car subfolder of `collection_folder`.
+
+    Writes output directly to `output_folder` (auto-named sibling of the
+    input if left blank):
+        <out>/<car_name>/<stem>.svj.json
+        <out>/<car_name>/conversion_log.txt
+        <out>/<car_name>/<stem>.tires_*.png      (when include_plots)
+        <out>/<car_name>/meshes/<stem>.glb        (when convert_glb and KN5 found)
+        <out>/batch_summary.csv
+        <out>/skipped.txt                         (when encrypted cars present)
+
+    Returns (log_text, path_to_batch_summary_csv).
     """
     root = Path((collection_folder or "").strip())
     if not root or not root.is_dir():
         return f"Directory not found: {root}", None
 
-    # Two buckets: cars with unpacked data/ (we can convert) and cars with
-    # only data.acd (we tell the user to unpack). Mod cars at the root that
-    # have neither are skipped silently.
-    all_subdirs    = sorted([d for d in root.iterdir() if d.is_dir()])
-    car_dirs       = [d for d in all_subdirs if (d / "data").is_dir()]
+    # ── Output folder ─────────────────────────────────────────────────────────
+    from datetime import datetime
+    import shutil as _shutil
+    _stamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _out_name = f"ac_svj_batch_{_stamp}_conv{CONV_VER}_svj{SVJ_VERSION}"
+    if output_folder and output_folder.strip():
+        out_root = Path(output_folder.strip())
+    else:
+        # Default: a new subfolder alongside the cars/ collection
+        out_root = root.parent / _out_name
+    try:
+        out_root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return f"Cannot create output folder {out_root}: {e}", None
+
+    # ── GLB dependency check ──────────────────────────────────────────────────
+    if convert_glb:
+        if not _KN5_AVAILABLE:
+            return "⚠ kn5_reader could not be imported — GLB export unavailable.", None
+        try:
+            import pygltflib  # noqa: F401
+        except ImportError:
+            return ("⚠ pygltflib is not installed.\n"
+                    "Run:  pip install pygltflib\n"
+                    "then restart the converter."), None
+
+    # ── Car selection ─────────────────────────────────────────────────────────
+    all_subdirs  = sorted([d for d in root.iterdir() if d.is_dir()])
+    car_dirs     = [d for d in all_subdirs if (d / "data").is_dir()]
     if selected_cars is not None:
-        car_dirs = [d for d in car_dirs if d.name in selected_cars]
-    needs_unpack   = [d for d in all_subdirs
-                      if not (d / "data").is_dir() and (d / "data.acd").is_file()]
+        rows = _df_to_rows(selected_cars)
+        selected_set = {str(row[1]) for row in rows if row[0]}
+        car_dirs = [d for d in car_dirs if d.name in selected_set]
+    needs_unpack = [d for d in all_subdirs
+                    if not (d / "data").is_dir() and (d / "data.acd").is_file()]
 
     if not car_dirs and not needs_unpack:
         return "No AC car folders found (subdirs with data/ or data.acd).", None
 
-    from datetime import datetime
-    _stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _zip_name = f"ac_svj_batch_{_stamp}_conv{CONV_VER}_svj{SVJ_VERSION}.zip"
-    zip_tmp = str(Path(tempfile.gettempdir()) / _zip_name)
-    all_log = [f"Found {len(car_dirs)} unpacked car(s) in {root.name}"]
+    all_log = [
+        f"Found {len(car_dirs)} unpacked car(s) in {root.name}",
+        f"Output → {out_root}",
+    ]
     if needs_unpack:
         all_log.append(
             f"⚠ {len(needs_unpack)} car(s) ship with encrypted data.acd "
@@ -1602,98 +1842,137 @@ def convert_batch(collection_folder: str, include_plots: bool = True,
             f"Tools → Unpack Data on each one, then re-run batch."
         )
     all_log.append("")
-    ok = errors = 0
-    skipped: list[str] = []  # cars that needed unpack — listed in skipped.txt
 
-    # CSV header — appended to in the loop
+    ok = errors = 0
+    skipped: list[str] = []
+
     csv_rows = [
         "car_folder,svj_model,make,drive,compound,axle,"
         "lat_R2,lat_RMSE_N,long_R2,long_RMSE_N,Fz0_N"
     ]
 
-    with zipfile.ZipFile(zip_tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-        for i, car_path in enumerate(car_dirs):
-            progress((i + 1) / len(car_dirs), desc=f"Converting {car_path.name}…")
-            try:
-                ini_files, cm_meta, ctrl_files, data_dir = read_car_directory(car_path)
-                svj, car_log, bench = build_svj(ini_files, cm_meta,
-                                                data_dir=data_dir,
-                                                ctrl_files=ctrl_files)
-                svj = _clean(svj)
-                stem = _car_stem(svj, car_path.name)
-                base = f"{car_path.name}/{stem}"
+    for i, car_path in enumerate(car_dirs):
+        progress((i + 1) / len(car_dirs), desc=f"Converting {car_path.name}…")
 
-                # SVJ
-                zf.writestr(f"{base}.svj.json", json.dumps(svj, indent=2))
-                # Per-car log
-                zf.writestr(f"{car_path.name}/conversion_log.txt", "\n".join(car_log))
+        car_out = out_root / car_path.name
+        car_out.mkdir(parents=True, exist_ok=True)
 
-                # Tire plots (one set per axle/compound result)
-                if include_plots and bench:
-                    for axle_key, br in bench.items():
-                        tag = axle_key.replace(" ", "_")
-                        zf.writestr(f"{base}.tires_{tag}_lateral.png",
-                                    br.lateral_png)
-                        zf.writestr(f"{base}.tires_{tag}_longitudinal.png",
-                                    br.longitudinal_png)
-                        zf.writestr(f"{base}.tires_{tag}_mu_vs_fz.png",
-                                    br.mu_vs_fz_png)
+        # Temp dir for GLB (cleaned up per car regardless of success)
+        _glb_tmp: Optional[str] = None
+        glb_output_dir: Optional[Path] = None
+        if convert_glb and _KN5_AVAILABLE:
+            _glb_tmp = tempfile.mkdtemp(prefix="ac_svj_glb_")
+            glb_output_dir = Path(_glb_tmp)
 
-                        # CSV row per axle
-                        make = svj.get("vehicle_info", {}).get("make") or ""
-                        drive = svj.get("vehicle_info", {}).get("drive_type") or ""
-                        # axle_key like "front", "front_1", "rear_2"
-                        parts = axle_key.split("_", 1)
-                        axle = parts[0]
-                        compound = parts[1] if len(parts) > 1 else "0"
-                        csv_rows.append(
-                            f"{car_path.name},{stem},{make},{drive},{compound},{axle},"
-                            f"{br.fit_lateral['r2']:.4f},{br.fit_lateral['rmse_N']:.1f},"
-                            f"{br.fit_longitudinal['r2']:.4f},"
-                            f"{br.fit_longitudinal['rmse_N']:.1f},"
-                            f"{br.params.FZ0:.0f}"
-                        )
-                all_log.append(f"✓ {car_path.name} ({len(bench)} tire fit(s))")
-                ok += 1
-            except Exception as ex:
-                all_log.append(f"✗ {car_path.name}: {ex}")
-                errors += 1
+        try:
+            ini_files, cm_meta, ctrl_files, data_dir = read_car_directory(car_path)
+            svj, car_log, bench = build_svj(ini_files, cm_meta,
+                                            data_dir=data_dir,
+                                            ctrl_files=ctrl_files,
+                                            glb_output_dir=glb_output_dir)
+            svj = _clean(svj)
+            stem = _car_stem(svj, car_path.name)
 
-        # Process the cars-needing-unpack: log each one to the live log AND
-        # to a skipped.txt file inside the ZIP so the user can see exactly
-        # which cars need Content Manager attention.
-        for d in needs_unpack:
-            all_log.append(
-                f"⊘ {d.name}: skipped — encrypted data.acd "
-                f"(open in Content Manager → Tools → Unpack Data)"
+            # SVJ JSON
+            (car_out / f"{stem}.svj.json").write_text(
+                json.dumps(svj, indent=2), encoding="utf-8"
             )
-            skipped.append(d.name)
-        if skipped:
-            zf.writestr(
-                "skipped.txt",
-                "These cars ship with an encrypted data.acd and were not "
-                "converted. To convert them:\n"
-                "  1. Open Content Manager\n"
-                "  2. For each car below, right-click → Tools → Unpack Data\n"
-                "  3. Re-run the batch conversion.\n\n"
-                + "\n".join(skipped) + "\n"
+            # Per-car conversion log
+            (car_out / "conversion_log.txt").write_text(
+                "\n".join(car_log), encoding="utf-8"
             )
 
-        # Drop the CSV summary into the ZIP
-        zf.writestr("batch_summary.csv", "\n".join(csv_rows))
+            # GLB — copy from temp dir into car_out/meshes/
+            if glb_output_dir and (glb_output_dir / "meshes").is_dir():
+                mesh_out = car_out / "meshes"
+                mesh_out.mkdir(exist_ok=True)
+                for _glb in (glb_output_dir / "meshes").glob("*.glb"):
+                    _shutil.copy2(str(_glb), str(mesh_out / _glb.name))
+
+            # Tire plots + CSV rows
+            if include_plots and bench:
+                for axle_key, br in bench.items():
+                    tag = axle_key.replace(" ", "_")
+                    (car_out / f"{stem}.tires_{tag}_lateral.png").write_bytes(br.lateral_png)
+                    (car_out / f"{stem}.tires_{tag}_longitudinal.png").write_bytes(br.longitudinal_png)
+                    (car_out / f"{stem}.tires_{tag}_mu_vs_fz.png").write_bytes(br.mu_vs_fz_png)
+
+                    make  = svj.get("vehicle_info", {}).get("make") or ""
+                    drive = svj.get("vehicle_info", {}).get("drive_type") or ""
+                    parts = axle_key.split("_", 1)
+                    axle, compound = parts[0], (parts[1] if len(parts) > 1 else "0")
+                    csv_rows.append(
+                        f"{car_path.name},{stem},{make},{drive},{compound},{axle},"
+                        f"{br.fit_lateral['r2']:.4f},{br.fit_lateral['rmse_N']:.1f},"
+                        f"{br.fit_longitudinal['r2']:.4f},"
+                        f"{br.fit_longitudinal['rmse_N']:.1f},"
+                        f"{br.params.FZ0:.0f}"
+                    )
+
+            # Surface any GLB-related messages from the per-car log
+            if convert_glb:
+                for _line in car_log:
+                    if "GLB" in _line:
+                        all_log.append(f"    {_line}")
+            glb_note = ""
+            if convert_glb:
+                glb_written = (
+                    glb_output_dir is not None
+                    and (glb_output_dir / "meshes").is_dir()
+                    and any((glb_output_dir / "meshes").glob("*.glb"))
+                )
+                glb_note = "  ✓ GLB" if glb_written else "  ⚠ no GLB"
+            all_log.append(f"✓ {car_path.name} ({len(bench)} tire fit(s)){glb_note}")
+            ok += 1
+        except Exception as ex:
+            all_log.append(f"✗ {car_path.name}: {ex}")
+            errors += 1
+        finally:
+            if _glb_tmp:
+                _shutil.rmtree(_glb_tmp, ignore_errors=True)
+
+    # Skipped (encrypted) cars
+    for d in needs_unpack:
+        all_log.append(
+            f"⊘ {d.name}: skipped — encrypted data.acd "
+            f"(open in Content Manager → Tools → Unpack Data)"
+        )
+        skipped.append(d.name)
+    if skipped:
+        (out_root / "skipped.txt").write_text(
+            "These cars ship with an encrypted data.acd and were not converted.\n"
+            "To convert them:\n"
+            "  1. Open Content Manager\n"
+            "  2. For each car below, right-click → Tools → Unpack Data\n"
+            "  3. Re-run the batch conversion.\n\n"
+            + "\n".join(skipped) + "\n",
+            encoding="utf-8",
+        )
+
+    # Batch summary CSV
+    csv_path = out_root / "batch_summary.csv"
+    csv_path.write_text("\n".join(csv_rows), encoding="utf-8")
 
     all_log.append(
-        f"\nDone: {ok} converted, {errors} errored, {len(skipped)} skipped (needs unpack)."
+        f"\nDone: {ok} converted, {errors} errored, {len(skipped)} skipped."
     )
-    all_log.append(f"Output: {Path(zip_tmp).name}")
-    all_log.append("ZIP contents per car:")
-    all_log.append("  {car_name}/{stem}.svj.json              — converted vehicle")
-    all_log.append("  {car_name}/{stem}.tires_*_lateral.png    — AC vs Pacejka Fy")
-    all_log.append("  {car_name}/{stem}.tires_*_longitudinal.png — AC vs Pacejka Fx")
-    all_log.append("  {car_name}/{stem}.tires_*_mu_vs_fz.png   — peak μ vs load")
-    all_log.append("  {car_name}/conversion_log.txt            — per-car log")
-    all_log.append("  batch_summary.csv                        — fit-quality table")
-    return "\n".join(all_log), zip_tmp
+    all_log.append(f"Output folder: {out_root}")
+    all_log.append("Per-car subfolder contents:")
+    all_log.append("  <car_name>/<stem>.svj.json          — converted vehicle")
+    if include_plots:
+        all_log.append("  <car_name>/<stem>.tires_*.png       — AC vs Pacejka plots")
+    if convert_glb and _KN5_AVAILABLE:
+        all_log.append("  <car_name>/meshes/<stem>.glb         — SAE J670 3D mesh (when KN5 found)")
+    all_log.append("  <car_name>/conversion_log.txt        — per-car log")
+    all_log.append(f"  batch_summary.csv                    — fit-quality table → {csv_path}")
+
+    # Gradio's gr.File can only serve files from the CWD or system temp.
+    # Copy the CSV to a temp file so it can be downloaded from any output folder.
+    import tempfile as _tf
+    _tmp = _tf.NamedTemporaryFile(suffix="_batch_summary.csv", delete=False)
+    _tmp.close()
+    _shutil.copy2(str(csv_path), _tmp.name)
+    return "\n".join(all_log), _tmp.name
 
 
 def run_lab_from_values(fz0, dy0, dy1, ls_expy, dx0, dx1, ls_expx,
@@ -1709,43 +1988,98 @@ def run_lab_from_values(fz0, dy0, dy1, ls_expy, dx0, dx1, ls_expx,
         source="manual",
     )
     br = run_bench(p)
-    block = build_svj_pacejka_block(br)
+    mf52, mf62 = build_svj_pacejka_blocks(br)
     summary = (
         f"Lateral   R² = {br.fit_lateral['r2']:.4f}   "
         f"RMSE = {br.fit_lateral['rmse_N']:.1f} N\n"
         f"Longitudinal R² = {br.fit_longitudinal['r2']:.4f}   "
         f"RMSE = {br.fit_longitudinal['rmse_N']:.1f} N\n"
-        f"\n{json.dumps(block, indent=2)}"
+        f"\n── MF 5.2 (pacejka_mf52) ──\n{json.dumps(mf52, indent=2)}"
+        f"\n\n── MF 6.2 (pacejka) ──\n{json.dumps(mf62, indent=2)}"
     )
     return (_png_to_pil(br.lateral_png),
             _png_to_pil(br.longitudinal_png),
             _png_to_pil(br.mu_vs_fz_png),
+            _png_to_pil(br.mf62_camber_png)  if br.mf62_camber_png  else None,
+            _png_to_pil(br.mf62_lateral_png) if br.mf62_lateral_png else None,
             summary)
 
 
 def run_lab_from_tyres_ini(tyres_file):
     if tyres_file is None:
-        return None, None, None, "Upload a tyres.ini file."
+        return None, None, None, None, None, "Upload a tyres.ini file."
     text = Path(tyres_file.name).read_text(encoding="utf-8", errors="replace")
     parsed = parse_ini(text)
     p = parse_tyre_section(parsed, section="FRONT", axle="front")
     if p.source == "defaults":
-        return (None, None, None,
+        return (None, None, None, None, None,
                 "No AC tyre parameters found. File must have FRONT section with "
                 "DY0, DY1, DX0, DX1, FZ0, LS_EXPY, …")
     br = run_bench(p)
-    block = build_svj_pacejka_block(br)
+    mf52, mf62 = build_svj_pacejka_blocks(br)
     summary = (
         f"Params source: {p.source}\n"
         f"Lateral   R² = {br.fit_lateral['r2']:.4f}   "
         f"RMSE = {br.fit_lateral['rmse_N']:.1f} N\n"
         f"Longitudinal R² = {br.fit_longitudinal['r2']:.4f}   "
         f"RMSE = {br.fit_longitudinal['rmse_N']:.1f} N\n"
-        f"\n{json.dumps(block, indent=2)}"
+        f"\n── MF 5.2 (pacejka_mf52) ──\n{json.dumps(mf52, indent=2)}"
+        f"\n\n── MF 6.2 (pacejka) ──\n{json.dumps(mf62, indent=2)}"
     )
     return (_png_to_pil(br.lateral_png),
             _png_to_pil(br.longitudinal_png),
             _png_to_pil(br.mu_vs_fz_png),
+            _png_to_pil(br.mf62_camber_png)  if br.mf62_camber_png  else None,
+            _png_to_pil(br.mf62_lateral_png) if br.mf62_lateral_png else None,
+            summary)
+
+
+def run_lab_from_car_folder(car_folder: str):
+    """
+    Tire Lab entry point for a full AC car folder path.
+    Locates data/tyres.ini (or data.acd) automatically — same logic as
+    read_car_directory — so you can paste a path straight from the batch list.
+    """
+    _NONE6 = (None, None, None, None, None, "")
+    if not car_folder or not car_folder.strip():
+        return (*_NONE6[:-1], "Enter an AC car folder path.")
+    car_path = Path(car_folder.strip())
+    if not car_path.exists():
+        return (*_NONE6[:-1], f"Folder not found: {car_path}")
+
+    # Locate tyres.ini — prefer unpacked data/, fall back to data.acd
+    tyres_ini = car_path / "data" / "tyres.ini"
+    if not tyres_ini.exists():
+        return (*_NONE6[:-1],
+                f"data/tyres.ini not found in {car_path}.\n"
+                "If the car uses data.acd, unpack it first via AC Content Manager "
+                "(Tools → Unpack Data).")
+
+    text   = tyres_ini.read_text(encoding="utf-8", errors="replace")
+    parsed = parse_ini(text)
+    p      = parse_tyre_section(parsed, section="FRONT", axle="front")
+    if p.source == "defaults":
+        return (*_NONE6[:-1],
+                f"No usable AC tyre parameters in {tyres_ini}.\n"
+                "The file must have a [FRONT] section with DY0, DX0, FZ0, …")
+
+    br = run_bench(p)
+    mf52, mf62 = build_svj_pacejka_blocks(br)
+    summary = (
+        f"Car: {car_path.name}\n"
+        f"Params source: {p.source}\n"
+        f"Lateral   R² = {br.fit_lateral['r2']:.4f}   "
+        f"RMSE = {br.fit_lateral['rmse_N']:.1f} N\n"
+        f"Longitudinal R² = {br.fit_longitudinal['r2']:.4f}   "
+        f"RMSE = {br.fit_longitudinal['rmse_N']:.1f} N\n"
+        f"\n── MF 5.2 (pacejka_mf52) ──\n{json.dumps(mf52, indent=2)}"
+        f"\n\n── MF 6.2 (pacejka) ──\n{json.dumps(mf62, indent=2)}"
+    )
+    return (_png_to_pil(br.lateral_png),
+            _png_to_pil(br.longitudinal_png),
+            _png_to_pil(br.mu_vs_fz_png),
+            _png_to_pil(br.mf62_camber_png)  if br.mf62_camber_png  else None,
+            _png_to_pil(br.mf62_lateral_png) if br.mf62_lateral_png else None,
             summary)
 
 
@@ -1755,124 +2089,136 @@ def build_ui():
     with gr.Blocks(title=f"AC → SVJ Converter v{CONV_VER}") as app:
         gr.Markdown(
             f"# AC → SVJ Converter  v{CONV_VER}\n"
-            f"Outputs **[SVJ v{SVJ_VERSION}]({REPO_URL})** — SAE J670 axes, SI units. Source: [{CONV_REPO}]({CONV_REPO})\n\n"
-            f"**v{CONV_VER} adds:** real `power.lut`/`coast_curve.lut` parsing, "
-            f"turbos, BOV, damage, driver aids, suspension hardpoints, wings & DRS, "
-            f"multi-compound tyres with thermal, and controller files (ABS, TC, …). "
-            f"See `AC Data Audit v{CONV_VER}.md` for the full field map.\n"
+            f"Outputs **[SVJ v{SVJ_VERSION}]({REPO_URL})** — SAE J670 axes, SI units. "
+            f"Source: [{CONV_REPO}]({CONV_REPO})\n"
         )
         with gr.Tabs():
-            with gr.TabItem("1 · Upload files"):
-                gr.Markdown(
-                    "Drop all AC data files **and** any .lut files referenced by "
-                    "`engine.ini` (`power.lut`, `coast_curve.lut`), plus `ui_car.json`."
-                )
-                fi = gr.File(label="Drop files", file_count="multiple",
-                             file_types=[".ini", ".json", ".lut"])
-                fb = gr.Button("Convert", variant="primary")
-                with gr.Row():
-                    ft = gr.Textbox(label="Log / SVJ output", lines=22, max_lines=50)
-                    ff = gr.File(label="Download .svj.json")
-                gr.Markdown("### Tire Lab — AC vs Pacejka for this car")
-                with gr.Row():
-                    fi_lat  = gr.Image(label="Lateral", type="pil", height=380)
-                    fi_long = gr.Image(label="Longitudinal", type="pil", height=380)
-                with gr.Row():
-                    fi_mu   = gr.Image(label="Peak μ vs Fz", type="pil", height=340)
-                    fi_sum  = gr.Textbox(label="Fit summary", lines=14, max_lines=30)
-                fb.click(convert_uploaded_files, [fi],
-                         [ft, ff, fi_lat, fi_long, fi_mu, fi_sum])
 
-            with gr.TabItem("2 · Single car directory"):
-                gr.Markdown(
-                    "Full path to a car folder (e.g. `C:/assettocorsa/content/cars/ks_mazda_mx5`). "
-                    "All `data/*.ini`, `data/*.lut`, `data/ctrl_*.ini`, and `ui/ui_car.json` are "
-                    "read automatically."
-                )
-                di = gr.Textbox(label="Car folder path", placeholder="C:/…/ks_mazda_mx5")
-                db = gr.Button("Convert", variant="primary")
-                with gr.Row():
-                    dt = gr.Textbox(label="Log / SVJ output", lines=22, max_lines=50)
-                    df = gr.File(label="Download .svj.json")
-                gr.Markdown("### Tire Lab — AC vs Pacejka for this car")
-                with gr.Row():
-                    d_lat  = gr.Image(label="Lateral", type="pil", height=380)
-                    d_long = gr.Image(label="Longitudinal", type="pil", height=380)
-                with gr.Row():
-                    d_mu  = gr.Image(label="Peak μ vs Fz", type="pil", height=340)
-                    d_sum = gr.Textbox(label="Fit summary", lines=14, max_lines=30)
-                db.click(convert_single_dir, [di],
-                         [dt, df, d_lat, d_long, d_mu, d_sum])
-
-            with gr.TabItem("3 · Batch collection"):
+            # ── Tab 1: Batch conversion ──────────────────────────────────────
+            with gr.TabItem("1 · Batch conversion"):
                 gr.Markdown(
                     "Point at a folder of AC cars (e.g. "
                     "`C:/assettocorsa/content/cars`). "
-                    "**Scan** to list all cars, tick the ones you want, then "
-                    "**Convert selected**. Output ZIP contains, per car: "
-                    "the `.svj.json`, three tire comparison PNGs, "
-                    "`conversion_log.txt`, plus a root-level `batch_summary.csv`."
+                    "**Scan** to list cars, filter/tick the ones you want, then "
+                    "**Convert selected**. Files are written directly to the output "
+                    "folder — one subfolder per car containing the `.svj.json`, "
+                    "tire PNGs, and an optional `.glb` per LOD, plus "
+                    "`batch_summary.csv` at the root."
                 )
                 with gr.Row():
                     bi = gr.Textbox(label="cars/ folder path",
                                     placeholder="C:/Games/assettocorsa/content/cars",
                                     scale=4)
                     bs = gr.Button("Scan folder", scale=1)
+                b_out = gr.Textbox(
+                    label="Output folder  (leave blank → auto-named sibling of the input folder)",
+                    placeholder="C:/…/my_svj_output  — created if it doesn't exist",
+                )
                 b_status = gr.Markdown("")
-                b_cars = gr.CheckboxGroup(
-                    label="Cars to convert  (all pre-ticked after scan)",
-                    choices=[], value=[],
+                b_all_rows = gr.State([])
+                with gr.Row():
+                    b_filter = gr.Textbox(
+                        label="Filter cars by name",
+                        placeholder="type to narrow the list…",
+                        scale=4,
+                    )
+                    with gr.Column(scale=1, min_width=160):
+                        b_sel_all  = gr.Button("✓ Select all",   size="sm")
+                        b_sel_none = gr.Button("✗ Deselect all", size="sm")
+                b_df = gr.Dataframe(
+                    headers=["Convert", "Car folder"],
+                    datatype=["bool", "str"],
+                    column_count=(2, "fixed"),
+                    label="Cars to convert  (all pre-ticked after scan — click cells to toggle)",
+                    interactive=True,
+                    value=[],
                 )
                 with gr.Row():
                     bp = gr.Checkbox(label="Include AC↔Pacejka tire comparison PNGs",
                                      value=True)
+                    b_glb = gr.Checkbox(
+                        label="Convert KN5 → GLB  (one per LOD found — A, B, C)",
+                        value=False,
+                        info="Requires pygltflib. Writes meshes/<stem>.glb per car subfolder.",
+                    )
                     bb = gr.Button("Convert selected", variant="primary")
                 with gr.Row():
                     bt  = gr.Textbox(label="Log", lines=25, max_lines=50)
-                    bff = gr.File(label="Download ZIP")
-                bs.click(scan_batch_folder, [bi], [b_cars, b_status])
-                bb.click(convert_batch, [bi, bp, b_cars], [bt, bff])
+                    bff = gr.File(label="Open batch_summary.csv")
+                bs.click(scan_batch_folder, [bi], [b_df, b_all_rows, b_status])
+                b_filter.change(filter_batch_cars, [b_all_rows, b_filter], [b_df])
+                b_sel_all.click(select_all_batch,   [b_df], [b_df])
+                b_sel_none.click(deselect_all_batch, [b_df], [b_df])
+                bb.click(convert_batch, [bi, b_out, bp, b_glb, b_df], [bt, bff])
 
-            with gr.TabItem("4 · Tire Lab"):
+            # ── Tab 2: Tire Lab ──────────────────────────────────────────────
+            with gr.TabItem("2 · Tire Lab"):
                 gr.Markdown(
-                    "Standalone Pacejka bench. Upload tyres.ini or dial parameters manually."
+                    "Standalone Pacejka bench. Upload a `tyres.ini` to fit from "
+                    "real AC data, or dial parameters manually.\n\n"
+                    "**MF 5.2** plots (left column) show pure-slip lateral & longitudinal "
+                    "fits. **MF 6.2** plots (right column) add camber sensitivity — "
+                    "both the per-Fz overlay and the camber thrust / sensitivity panels."
                 )
                 with gr.Row():
+                    # ── Left: inputs ─────────────────────────────────────────
                     with gr.Column(scale=1):
-                        gr.Markdown("**A · From tyres.ini**")
+                        gr.Markdown("**A · From car folder**")
+                        cf_path = gr.Textbox(
+                            label="Car folder path",
+                            placeholder="C:/assettocorsa/content/cars/ks_mazda_mx5",
+                            info="Paste any path from the batch list — reads data/tyres.ini automatically.",
+                        )
+                        cf_btn  = gr.Button("Fit from folder", variant="primary")
+                        gr.Markdown("---\n**B · From tyres.ini file**")
                         t_file = gr.File(label="tyres.ini", file_types=[".ini"])
-                        t_btn  = gr.Button("Fit from file", variant="primary")
-                        gr.Markdown("**B · Manual parameters**")
-                        fz0    = gr.Number(label="FZ0 (N)",     value=3500.0)
-                        dy0    = gr.Number(label="DY0",          value=1.55)
-                        dy1    = gr.Number(label="DY1",          value=-0.10)
-                        lsepy  = gr.Number(label="LS_EXPY",      value=0.85)
-                        dx0    = gr.Number(label="DX0",          value=1.60)
-                        dx1    = gr.Number(label="DX1",          value=-0.08)
-                        lsepx  = gr.Number(label="LS_EXPX",      value=0.90)
-                        k_a    = gr.Number(label="K_a",          value=22.0)
-                        k_k    = gr.Number(label="K_k",          value=18.0)
-                        flex_  = gr.Number(label="FLEX",         value=0.00018)
-                        camb   = gr.Number(label="CAMBER_GAIN",  value=1.10)
-                        kin    = gr.Number(label="KINETIC_RATIO",value=0.92)
-                        pnow   = gr.Number(label="Pressure now (psi)", value=27.0)
-                        pref   = gr.Number(label="Pressure ref (psi)", value=27.0)
-                        m_btn  = gr.Button("Run bench", variant="primary")
-                    with gr.Column(scale=2):
-                        l_lat  = gr.Image(label="Lateral (AC solid, MF dashed)",
-                                          type="pil", height=400)
-                        l_long = gr.Image(label="Longitudinal (AC solid, MF dashed)",
-                                          type="pil", height=400)
-                        l_mu   = gr.Image(label="Peak μ vs Fz",
-                                          type="pil", height=400)
-                        l_sum  = gr.Textbox(label="Fit summary",
-                                            lines=14, max_lines=30)
-                t_btn.click(run_lab_from_tyres_ini, [t_file],
-                            [l_lat, l_long, l_mu, l_sum])
+                        t_btn  = gr.Button("Fit from file")
+                        gr.Markdown("---\n**C · Manual parameters**")
+                        fz0   = gr.Number(label="FZ0 (N)",            value=3500.0)
+                        dy0   = gr.Number(label="DY0",                 value=1.55)
+                        dy1   = gr.Number(label="DY1",                 value=-0.10)
+                        lsepy = gr.Number(label="LS_EXPY",             value=0.85)
+                        dx0   = gr.Number(label="DX0",                 value=1.60)
+                        dx1   = gr.Number(label="DX1",                 value=-0.08)
+                        lsepx = gr.Number(label="LS_EXPX",             value=0.90)
+                        k_a   = gr.Number(label="K_a",                 value=22.0)
+                        k_k   = gr.Number(label="K_k",                 value=18.0)
+                        flex_ = gr.Number(label="FLEX",                value=0.00018)
+                        camb  = gr.Number(label="CAMBER_GAIN",         value=1.10)
+                        kin   = gr.Number(label="KINETIC_RATIO",       value=0.92)
+                        pnow  = gr.Number(label="Pressure now (psi)",  value=27.0)
+                        pref  = gr.Number(label="Pressure ref (psi)",  value=27.0)
+                        m_btn = gr.Button("Run bench", variant="primary")
+                        l_sum = gr.Textbox(label="Fit summary (MF52 + MF62 JSON)",
+                                           lines=18, max_lines=40)
+                    # ── Right: plots ─────────────────────────────────────────────────────
+                    with gr.Column(scale=3):
+                        gr.Markdown("#### MF 5.2 — pure slip")
+                        with gr.Row():
+                            l_lat  = gr.Image(label="Lateral — AC vs MF 5.2",
+                                              type="pil", height=360)
+                            l_long = gr.Image(label="Longitudinal — AC vs MF 5.2",
+                                              type="pil", height=360)
+                        with gr.Row():
+                            l_mu   = gr.Image(label="Peak μ vs Fz",
+                                              type="pil", height=360)
+
+                        gr.Markdown("#### MF 6.2 — with camber")
+                        with gr.Row():
+                            l_mf62_lat = gr.Image(
+                                label="Lateral — AC vs MF 6.2 (all Fz / camber angles)",
+                                type="pil", height=360)
+                            l_mf62_cam = gr.Image(
+                                label="Camber sensitivity & thrust — AC vs MF 6.2",
+                                type="pil", height=360)
+
+                lab_outputs = [l_lat, l_long, l_mu, l_mf62_cam, l_mf62_lat, l_sum]
+                cf_btn.click(run_lab_from_car_folder, [cf_path], lab_outputs)
+                t_btn.click(run_lab_from_tyres_ini,  [t_file],   lab_outputs)
                 m_btn.click(run_lab_from_values,
                             [fz0, dy0, dy1, lsepy, dx0, dx1, lsepx,
                              k_a, k_k, flex_, camb, kin, pnow, pref],
-                            [l_lat, l_long, l_mu, l_sum])
+                            lab_outputs)
     return app
 
 

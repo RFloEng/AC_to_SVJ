@@ -2,6 +2,76 @@
 
 All notable changes are documented here.
 
+## [0.9.1] — 2026-05-07
+
+### SVJ target: 0.97
+
+The converter now targets SVJ standard **v0.97**. The schema enum no longer
+accepts `"0.95"`; valid values are `"0.96"` and `"0.97"`. All existing physics
+output is fully backward-compatible — no fields removed or renamed.
+
+### New: KN5 → GLB conversion (`kn5_reader.py`)
+
+A new module, `kn5_reader.py`, parses the Assetto Corsa binary `.kn5` 3-D
+model format and exports it as a **GLB** (binary glTF) file in the
+**SAE J670** coordinate frame (X-forward, Y-right, Z-down) — the same
+frame used for all physics data.
+
+Key details:
+
+- Pure-Python parser; no external C tools required.  Uses `pygltflib>=1.15`
+  (added to `requirements.txt`).
+- Reads node tree, geometry (positions, normals, UVs, indices), textures,
+  and materials.  Supports KN5 versions 5 and 6.
+- Coordinate transform matches `ac_to_svj()` exactly:
+  `SAE = (AC.Z, AC.X, −AC.Y)`.  Triangle winding is reversed to preserve
+  front-face orientation when switching from left-handed (AC) to
+  right-handed (SAE J670).
+- Node-name heuristic maps AC node names (`BODY`, `WHEEL_LF`, `UPRIGHT_LF`, …)
+  to SVJ body IDs (`chassis`, `upright_fl`, …).
+- DDS textures are converted to PNG on the fly via Pillow before embedding.
+- KN5 materials are mapped to glTF PBR:
+  `ksAmbient/ksDiffuse` → `baseColorFactor`, `ksSpecular` → `roughnessFactor`.
+- `find_car_kn5()` locates the primary LOD (largest `.kn5` whose stem matches
+  the car folder name; falls back to any `.kn5` in the car root).
+
+Public API:
+
+```python
+from kn5_reader import parse_kn5, scan_kn5_nodes, map_ac_nodes_to_svj, \
+                       kn5_to_glb, find_car_kn5
+```
+
+### New: `assets.meshes` + `visual` bindings (SVJ 0.97)
+
+When a KN5 file is detected alongside the car data, `build_svj()` now emits:
+
+- **`assets.meshes`** — manifest block referencing the GLB URI
+  (`meshes/<car>.glb`).
+- **`chassis.visual`** — `{mesh_ref, node: "SVJ::body::chassis"}`.
+- **`suspension.<corner>.visual`** — per-corner upright bindings using
+  `SVJ::body::upright_fl/fr/rl/rr` naming.
+
+All fields are optional in the schema; if no KN5 is present, the SVJ is
+still fully valid.
+
+### Gradio UI changes
+
+- **Tab 2 (single car)**: new checkbox *"Convert KN5 → GLB (embeds SAE J670
+  3D mesh)"*.  When checked, the output file changes from `.svj.json` to a
+  `.zip` containing both the SVJ JSON and the `meshes/*.glb` file.
+- **Tab 3 (batch)**: new checkbox *"Convert KN5 → GLB (SAE J670 3D mesh per
+  car)"*.  When checked, each car's subfolder in the output ZIP gains a
+  `meshes/<car>.glb` entry (when a KN5 file is available).
+
+### Other
+
+- `_metadata.version` bumped to `"0.97"`.
+- `pygltflib>=1.15` added to `requirements.txt`.
+- README: SVJ version reference updated to 0.97.
+
+---
+
 ## [0.9.0-beta] — 2026-05-02
 
 Initial public beta release.

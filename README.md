@@ -7,7 +7,7 @@
 > **Repository:** https://github.com/RFloEng/AC_to_SVJ
 
 Converts **Assetto Corsa** car data into the
-[SVJ v0.95 standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
+[SVJ v0.97 standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
 — SAE J670 axes, SI units — and runs a virtual Pacejka MF 5.2 bench on every
 tyre section.
 

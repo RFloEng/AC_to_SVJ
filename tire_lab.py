@@ -1,6 +1,6 @@
 """
-tire_lab.py  —  AC tyre model  ⇆  Pacejka MF 5.2 virtual bench
-================================================================
+tire_lab.py  —  AC tyre model  ⇆  Pacejka MF 5.2 / MF 6.2 virtual bench
+=========================================================================
 
 Used by:
   - The AC → SVJ converter (batch-fills Pacejka coefficients per axle)
@@ -8,9 +8,22 @@ Used by:
 
 Public API
 ----------
-    params   = parse_tyre_section(text)          # tyres.ini text → ACTyreParams
-    result   = run_bench(params)                 # runs sweep + fit + plots
-    payload  = build_svj_pacejka_block(result)   # → dict for SVJ tires.sets.*
+    params            = parse_tyre_section(ini_dict)   # tyres.ini → ACTyreParams
+    result            = run_bench(params)               # sweep + fit + plots
+    mf52, mf62        = build_svj_pacejka_blocks(result)  # two SVJ pacejka dicts
+    mf52              = build_svj_pacejka_block(result)   # backward-compat alias
+
+MF 5.2 vs MF 6.2 output
+------------------------
+Both blocks use the same fitted lateral (pCy1/pDy1-2/pEy1-2/pKy1-2) and
+longitudinal (pCx1/pDx1-2/pEx1-4/pKx1-3) coefficients.
+
+MF62 extends MF52 with:
+  Lateral   — pDy3=0, pEy3-5=0, pKy3-7 (camber stiffness), pHy1-3=0,
+               pVy3 = −CAMBER_GAIN (AC camber thrust → MF vertical shift),
+               pVy4=0, pPy1-2=0 (pressure terms; AC uses a scalar multiplier)
+  Longitudinal — pDx3=0, pHx1-2=0, pVx1-2=0, pPx1-4=0
+  Combined  — rBx/rBy/rCx/rCy typical defaults (not fitted from AC data)
 
 The bench is intentionally self-contained; no dependency on Gradio.
 """
@@ -192,6 +205,32 @@ def mf_long(kappa, Fz, Fz0, theta):
     return D * np.sin(C * np.arctan(Bx - E * (Bx - np.arctan(Bx))))
 
 
+def mf62_fy(alpha, Fz, Fz0, lat_params: dict, gamma):
+    """
+    MF 6.2 lateral force — same pure-slip shape as MF52 but with camber
+    vertical shift SVy = Fz * pVy3 * gamma  (pVy4 = pDy3 = 0 in our mapping).
+
+    lat_params : dict with keys pCy1, pDy1, pDy2, pEy1, pEy2, pKy1, pKy2, pVy3
+    """
+    alpha = np.asarray(alpha, float)
+    Fz    = np.asarray(Fz, float)
+    gamma = np.asarray(gamma, float)
+    pCy1 = lat_params["pCy1"]; pDy1 = lat_params["pDy1"]; pDy2 = lat_params["pDy2"]
+    pEy1 = lat_params["pEy1"]; pEy2 = lat_params["pEy2"]
+    pKy1 = lat_params["pKy1"]; pKy2 = lat_params["pKy2"]
+    pVy3 = lat_params.get("pVy3", 0.0)
+    dfz  = (Fz - Fz0) / Fz0
+    C    = pCy1
+    D    = (pDy1 + pDy2 * dfz) * Fz
+    K    = pKy1 * Fz0 * np.sin(2.0 * np.arctan(Fz / (np.maximum(pKy2, 1e-3) * Fz0)))
+    B    = K / np.maximum(C * D, 1e-3)
+    E    = np.clip(pEy1 + pEy2 * dfz, -10.0, 0.99)
+    Bx   = B * alpha
+    Fy0  = D * np.sin(C * np.arctan(Bx - E * (Bx - np.arctan(Bx))))
+    SVy  = Fz * pVy3 * gamma          # camber vertical shift
+    return Fy0 + SVy
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4.  Sweep + fit
 # ─────────────────────────────────────────────────────────────────────────────
@@ -363,24 +402,170 @@ def plot_mu_vs_fz_png(fit_y, fit_x, p: ACTyreParams) -> bytes:
     return buf.getvalue()
 
 
+def plot_mf62_camber_png(fit_y: dict, p: ACTyreParams) -> bytes:
+    """
+    Two-panel MF 6.2 camber plot.
+
+    Left  — Fy vs α at Fz0 for γ = 0°, ±3°: AC solid, MF62 dashed.
+            Demonstrates that pVy3 = −CAMBER_GAIN shifts the MF62 curve
+            to match AC's linear camber thrust.
+    Right — Camber thrust (Fy at α = 0) vs γ for 3 load levels:
+            AC solid, MF62 dashed.  The slopes should coincide.
+    """
+    lat_params = dict(fit_y["params"])      # MF52 fitted keys
+    lat_params["pVy3"] = -p.CAMBER_GAIN     # inject MF62 camber coefficient
+    Fz0 = fit_y["Fz0"]
+
+    α_plot  = np.deg2rad(np.linspace(-12, 12, 240))
+    γ_plot  = np.deg2rad(np.linspace(-5, 5, 200))
+    gammas  = [0.0, np.deg2rad(3.0), np.deg2rad(-3.0)]
+    labels  = ["γ = 0°", "γ = +3°", "γ = −3°"]
+    cam_colors = [COLORS[0], COLORS[1], COLORS[2]]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+
+    # ── Left: Fy vs α at multiple camber angles ───────────────────────────────
+    ax = axes[0]
+    for γ_val, lbl, col in zip(gammas, labels, cam_colors):
+        Fy_ac  = ac_fy(α_plot, np.full_like(α_plot, Fz0),
+                       np.full_like(α_plot, γ_val), p)
+        Fy_mf6 = mf62_fy(α_plot, np.full_like(α_plot, Fz0), Fz0,
+                          lat_params, γ_val)
+        ax.plot(np.rad2deg(α_plot), Fy_ac  / 1000.0, color=col, lw=2.0,
+                label=f"AC  {lbl}")
+        ax.plot(np.rad2deg(α_plot), Fy_mf6 / 1000.0, color=col, lw=1.0,
+                ls="--", label=f"MF62 {lbl}")
+    ax.set_xlabel("Slip angle α [deg]")
+    ax.set_ylabel("Lateral force Fy [kN]")
+    ax.set_title(
+        f"MF 6.2 camber sensitivity  (Fz = {Fz0/1000:.1f} kN)\n"
+        f"AC (solid) vs MF 6.2 (dashed)  —  pVy3 = {-p.CAMBER_GAIN:.4f}"
+    )
+    ax.grid(alpha=0.3)
+    ax.axhline(0, color="k", lw=0.5); ax.axvline(0, color="k", lw=0.5)
+    ax.legend(fontsize=7, ncol=2, loc="lower right")
+
+    # ── Right: camber thrust (Fy at α=0) vs γ for 3 Fz levels ────────────────
+    ax = axes[1]
+    for i, Fz in enumerate([Fz0 * 0.5, Fz0, Fz0 * 1.5]):
+        col = COLORS[i % 5]
+        ct_ac  = ac_fy(0.0, np.full_like(γ_plot, Fz), γ_plot, p)
+        ct_mf6 = mf62_fy(0.0, np.full_like(γ_plot, Fz), Fz0, lat_params, γ_plot)
+        lbl = f"Fz = {Fz/1000:.1f} kN"
+        ax.plot(np.rad2deg(γ_plot), ct_ac  / 1000.0, color=col, lw=2.0,
+                label=f"AC  {lbl}")
+        ax.plot(np.rad2deg(γ_plot), ct_mf6 / 1000.0, color=col, lw=1.0,
+                ls="--", label=f"MF62 {lbl}")
+    ax.set_xlabel("Camber angle γ [deg]")
+    ax.set_ylabel("Camber thrust Fy  (α = 0) [kN]")
+    ax.set_title(
+        f"Camber thrust vs γ  (α = 0)\n"
+        f"CAMBER_GAIN = {p.CAMBER_GAIN:.4f}  →  pVy3 = {-p.CAMBER_GAIN:.4f}"
+    )
+    ax.grid(alpha=0.3)
+    ax.axhline(0, color="k", lw=0.5); ax.axvline(0, color="k", lw=0.5)
+    ax.legend(fontsize=7, ncol=2, loc="upper right")
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=140)
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def plot_mf62_lateral_png(data, fit_y: dict, p: ACTyreParams) -> bytes:
+    """
+    MF 6.2 lateral — mirrors the layout of plot_lateral_png but uses mf62_fy.
+
+    Left  — Fy vs α at all five Fz levels (γ = 0): AC solid, MF62 dashed.
+             Shows overall fit quality (same as MF52 at zero camber).
+    Right — Residual cloud split by camber angle: γ = 0 in one colour,
+             γ ≠ 0 in another, demonstrating that MF62 also captures the
+             camber-induced shift that MF52 misses.
+    """
+    lat_params = dict(fit_y["params"])
+    lat_params["pVy3"] = -p.CAMBER_GAIN
+    Fz0 = fit_y["Fz0"]
+
+    α_plot = np.deg2rad(np.linspace(-12, 12, 240))
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+
+    # ── Left: Fy vs α for all Fz levels at γ = 0 ────────────────────────────
+    ax = axes[0]
+    for i, Fz in enumerate(FZ_LEVELS):
+        Fy_ac  = ac_fy(α_plot, np.full_like(α_plot, Fz), np.zeros_like(α_plot), p)
+        Fy_mf6 = mf62_fy(α_plot, np.full_like(α_plot, Fz), Fz0, lat_params, 0.0)
+        ax.plot(np.rad2deg(α_plot), Fy_ac  / 1000.0, color=COLORS[i % 5], lw=2.0,
+                label=f"AC  Fz={Fz/1000:.1f} kN")
+        ax.plot(np.rad2deg(α_plot), Fy_mf6 / 1000.0, color=COLORS[i % 5], lw=1.0,
+                ls="--", label=f"MF62 Fz={Fz/1000:.1f} kN")
+
+    # Compute an MF62 R² across all Fz / γ sweep points
+    rows = data["lateral"]
+    Fz_a = np.array([r[0] for r in rows])
+    γ_a  = np.array([r[1] for r in rows])
+    α_a  = np.array([r[2] for r in rows])
+    Fy_a = np.array([r[3] for r in rows])
+    Fy62 = mf62_fy(α_a, Fz_a, Fz0, lat_params, γ_a)
+    ss_res = float(np.sum((Fy_a - Fy62) ** 2))
+    ss_tot = float(np.sum((Fy_a - np.mean(Fy_a)) ** 2))
+    r2_62  = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    rmse62 = float(np.sqrt(np.mean((Fy_a - Fy62) ** 2)))
+
+    ax.set_xlabel("Slip angle α [deg]")
+    ax.set_ylabel("Lateral force Fy [kN]")
+    ax.set_title(
+        f"Lateral — AC (solid) vs Pacejka MF 6.2 (dashed)  [γ = 0]\n"
+        f"R² = {r2_62:.4f}   RMSE = {rmse62:.0f} N   pVy3 = {-p.CAMBER_GAIN:.4f}"
+    )
+    ax.grid(alpha=0.3)
+    ax.axhline(0, color="k", lw=0.5)
+    ax.axvline(0, color="k", lw=0.5)
+    ax.legend(fontsize=7, ncol=2, loc="lower right")
+
+    # ── Right: residual cloud, γ=0 vs γ≠0 ───────────────────────────────────
+    ax = axes[1]
+    mask0 = np.abs(γ_a) < 1e-6
+    err   = Fy_a - Fy62
+    ax.scatter(np.rad2deg(α_a[ mask0]), err[ mask0], s=10,
+               color=COLORS[0], alpha=0.6, label="γ = 0°")
+    ax.scatter(np.rad2deg(α_a[~mask0]), err[~mask0], s=10,
+               color=COLORS[1], alpha=0.6, label=f"γ = ±{np.rad2deg(GAMMA_LEVELS[1]):.0f}°")
+    ax.set_xlabel("Slip angle α [deg]")
+    ax.set_ylabel("AC − MF62 residual [N]")
+    ax.set_title("MF 6.2 residual (all Fz, both camber angles)")
+    ax.grid(alpha=0.3)
+    ax.axhline(0, color="k", lw=0.5)
+    ax.legend(fontsize=8)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=140)
+    plt.close(fig)
+    return buf.getvalue()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6.  Public bench entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class BenchResult:
-    params:        ACTyreParams
-    fit_lateral:   dict
-    fit_longitudinal: dict
-    lateral_png:   bytes
-    longitudinal_png: bytes
-    mu_vs_fz_png:  bytes
-    n_sweep_points: int
+    params:            ACTyreParams
+    fit_lateral:       dict
+    fit_longitudinal:  dict
+    lateral_png:       bytes           # AC vs MF5.2 lateral
+    longitudinal_png:  bytes           # AC vs MF5.2 longitudinal
+    mu_vs_fz_png:      bytes           # peak μ vs Fz
+    n_sweep_points:    int
+    mf62_camber_png:   Optional[bytes] = None   # camber sensitivity + thrust
+    mf62_lateral_png:  Optional[bytes] = None   # AC vs MF6.2 lateral (all Fz/γ)
 
 
 def run_bench(p: ACTyreParams) -> BenchResult:
     """Run the full AC → Pacejka pipeline. All outputs in-memory."""
-    data = sweep(p)
+    data  = sweep(p)
     fit_y = _fit_lat(data, p.FZ0)
     fit_x = _fit_long(data, p.FZ0)
     return BenchResult(
@@ -390,40 +575,161 @@ def run_bench(p: ACTyreParams) -> BenchResult:
         lateral_png=plot_lateral_png(data, fit_y, p),
         longitudinal_png=plot_longitudinal_png(data, fit_x, p),
         mu_vs_fz_png=plot_mu_vs_fz_png(fit_y, fit_x, p),
+        mf62_camber_png=plot_mf62_camber_png(fit_y, p),
+        mf62_lateral_png=plot_mf62_lateral_png(data, fit_y, p),
         n_sweep_points=len(data["lateral"]) + len(data["longitudinal"]),
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7.  SVJ payload builder
+# 7.  SVJ payload builders  (MF 5.2  and  MF 6.2)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _metrics(fit: dict) -> dict:
+    return {
+        "r2":       round(fit["r2"], 5),
+        "rmse_N":   round(fit["rmse_N"], 1),
+        "n_points": fit["n_points"],
+    }
+
+
 def build_svj_pacejka_block(result: BenchResult) -> dict:
-    """Return a dict suitable for `svj.tires.sets.{name}.models.pacejka_mf52`."""
+    """
+    MF 5.2 block in SVJ schema format.
+    Key path in the SVJ: tires.sets.<name>.pacejka_mf52
+    (Also exposed via build_svj_pacejka_blocks for dual-model output.)
+    """
     p = result.params
     return {
-        "version":   "MF 5.2",
-        "reference_load_N": p.FZ0,
-        "pure_slip_lateral": {
-            **result.fit_lateral["params"],
-            "_metrics": {
-                "r2":       round(result.fit_lateral["r2"], 5),
-                "rmse_N":   round(result.fit_lateral["rmse_N"], 1),
-                "n_points": result.fit_lateral["n_points"],
-            },
+        "model": "MF52",
+        "lateral":      {**result.fit_lateral["params"]},
+        "longitudinal": {**result.fit_longitudinal["params"]},
+        "_source":       "virtual_bench (AC forward model → MF5.2 pure-slip fit)",
+        "_metrics": {
+            "lateral":      _metrics(result.fit_lateral),
+            "longitudinal": _metrics(result.fit_longitudinal),
         },
-        "pure_slip_longitudinal": {
-            **result.fit_longitudinal["params"],
-            "_metrics": {
-                "r2":       round(result.fit_longitudinal["r2"], 5),
-                "rmse_N":   round(result.fit_longitudinal["rmse_N"], 1),
-                "n_points": result.fit_longitudinal["n_points"],
-            },
-        },
-        "_source":       "virtual_bench (AC forward model → MF fit)",
         "_source_params": asdict(p),
-        "_note": "Pure-slip only; combined-slip + thermal + transient terms deferred.",
+        "_note": (
+            "Pure-slip only (α or κ, not combined). "
+            "Camber, horizontal/vertical shifts, and pressure terms are zero. "
+            "See pacejka (MF62) for the extended block."
+        ),
     }
+
+
+def build_svj_mf62_block(result: BenchResult) -> dict:
+    """
+    MF 6.2 block in SVJ schema format.
+    Key path in the SVJ: tires.sets.<name>.pacejka  (schema-standard key)
+
+    Extra params beyond MF52 are derived from the AC forward-model parameters:
+      pVy3 = −CAMBER_GAIN   (AC camber thrust → MF62 lateral vertical shift)
+      pKy4 = 2.0            (Fz-dependency of camber stiffness, standard default)
+      All pressure (pPy*, pPx*), horizontal shift (pHy*, pHx*, pVx*), and
+      camber-peak-D (pDy3, pDx3) terms are zero — AC uses a scalar multiplier.
+      Combined-slip coefficients are representative defaults (not fitted).
+    """
+    p   = result.params
+    lat = result.fit_lateral["params"]    # pCy1, pDy1, pDy2, pEy1, pEy2, pKy1, pKy2
+    lon = result.fit_longitudinal["params"]  # pCx1, pDx1, pDx2, pEx1-4, pKx1-3
+
+    lateral_mf62 = {
+        # ── Core (fitted, same as MF52) ──────────────────────────────────────
+        "pCy1":  lat["pCy1"],
+        "pDy1":  lat["pDy1"],
+        "pDy2":  lat["pDy2"],
+        "pDy3":  0.0,                   # no camber reduction of peak D in AC
+        "pEy1":  lat["pEy1"],
+        "pEy2":  lat["pEy2"],
+        "pEy3":  0.0,
+        "pEy4":  0.0,
+        "pEy5":  0.0,
+        "pKy1":  lat["pKy1"],
+        "pKy2":  lat["pKy2"],
+        "pKy3":  0.0,                   # no camber effect on cornering stiffness
+        "pKy4":  2.0,                   # Fz-shape of camber stiffness (standard)
+        "pKy5":  0.0,
+        "pKy6":  0.0,
+        "pKy7":  0.0,
+        # ── Horizontal / vertical shifts ─────────────────────────────────────
+        "pHy1":  0.0,
+        "pHy2":  0.0,
+        "pHy3":  0.0,
+        "pVy1":  0.0,
+        "pVy2":  0.0,
+        "pVy3":  round(-p.CAMBER_GAIN, 5),  # AC camber thrust → MF62 Sv term
+        "pVy4":  0.0,
+        # ── Pressure (not in AC's simplified model) ───────────────────────────
+        "pPy1":  0.0,
+        "pPy2":  0.0,
+    }
+
+    longitudinal_mf62 = {
+        # ── Core (fitted, same as MF52) ──────────────────────────────────────
+        "pCx1":  lon["pCx1"],
+        "pDx1":  lon["pDx1"],
+        "pDx2":  lon["pDx2"],
+        "pDx3":  0.0,                   # no camber effect on Fx peak
+        "pEx1":  lon["pEx1"],
+        "pEx2":  lon["pEx2"],
+        "pEx3":  lon["pEx3"],
+        "pEx4":  lon["pEx4"],
+        "pKx1":  lon["pKx1"],
+        "pKx2":  lon["pKx2"],
+        "pKx3":  lon["pKx3"],
+        # ── Horizontal / vertical shifts ─────────────────────────────────────
+        "pHx1":  0.0,
+        "pHx2":  0.0,
+        "pVx1":  0.0,
+        "pVx2":  0.0,
+        # ── Pressure ─────────────────────────────────────────────────────────
+        "pPx1":  0.0,
+        "pPx2":  0.0,
+        "pPx3":  0.0,
+        "pPx4":  0.0,
+    }
+
+    # Representative combined-slip weights (not fitted; typical radial values).
+    # rBx / rBy shape factors, rCx / rCy curvature, rHx / rHy peak shift,
+    # rVy vertical shift under combined load.
+    combined_mf62 = {
+        "rBx1": 13.0, "rBx2": 9.0,  "rBx3": 0.0,
+        "rCx1": 1.0,  "rHx1": 0.0,
+        "rBy1":  9.0, "rBy2": 7.0,  "rBy3": 0.0,  "rBy4": 0.0,
+        "rCy1":  1.0, "rHy1": 0.0,
+        "rVy1":  0.0, "rVy2": 0.0,  "rVy3": 0.0,
+        "rVy4": 12.0, "rVy5": 1.9,  "rVy6": 10.0,
+    }
+
+    return {
+        "model":       "MF62",
+        "lateral":      lateral_mf62,
+        "longitudinal": longitudinal_mf62,
+        "combined":     combined_mf62,
+        "_source":      "virtual_bench (AC forward model -> MF52 fit, extended to MF62)",
+        "_metrics": {
+            "lateral":      _metrics(result.fit_lateral),
+            "longitudinal": _metrics(result.fit_longitudinal),
+        },
+        "_source_params": asdict(p),
+        "_note": (
+            "Lateral/longitudinal pure-slip coefficients fitted from synthetic sweep. "
+            "pVy3 = -CAMBER_GAIN maps AC camber thrust to MF62 vertical shift. "
+            "Pressure terms (pPy*, pPx*), horizontal shifts, and pDy3/pDx3 are zero "
+            "because AC uses a scalar pressure multiplier without per-coefficient sensitivity. "
+            "Combined-slip coefficients are typical radial-tyre defaults, not fitted."
+        ),
+    }
+
+
+def build_svj_pacejka_blocks(result: BenchResult) -> tuple[dict, dict]:
+    """
+    Return (mf52_block, mf62_block) ready to embed in an SVJ tire set as:
+        tire_set["pacejka"]      = mf62_block   # schema-standard key
+        tire_set["pacejka_mf52"] = mf52_block   # pure-slip reference
+    """
+    return build_svj_pacejka_block(result), build_svj_mf62_block(result)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -438,5 +744,5 @@ if __name__ == "__main__":
     (out / "longitudinal.png").write_bytes(res.longitudinal_png)
     (out / "mu_vs_fz.png").write_bytes(res.mu_vs_fz_png)
     (out / "pacejka_fit.json").write_text(json.dumps(build_svj_pacejka_block(res), indent=2))
-    print(f"lateral R² = {res.fit_lateral['r2']:.4f}  longitudinal R² = {res.fit_longitudinal['r2']:.4f}")
+    print(f"lateral R2 = {res.fit_lateral['r2']:.4f}  longitudinal R2 = {res.fit_longitudinal['r2']:.4f}")
     print(f"outputs in {out}")
