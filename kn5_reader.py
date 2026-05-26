@@ -59,6 +59,9 @@ extra rotation.
 
 Triangle winding is reversed (swap index[1] <-> index[2]) because the
 handedness changes from left-handed (AC) to right-handed (Three.js).
+
+UV V coordinate is flipped (V_gltf = 1 - V_ac) because KN5 stores V=0
+at the bottom (OpenGL convention) while glTF expects V=0 at the top.
 """
 
 from __future__ import annotations
@@ -221,7 +224,7 @@ def _read_node(f: io.RawIOBase, geometry: bool) -> Kn5Node:
             node.positions = raw[:, 0:3].copy()
             node.normals   = raw[:, 3:6].copy()
             node.uvs       = raw[:, 6:8].copy()
-            # AC uses DirectX UV convention (V=0 at top), same as glTF -- no V-flip needed.
+            # Raw UVs -- V will be flipped to glTF convention in _process_node.
             # Tangent XYZ at floats 8-10; W not stored in AC, set +1.0 (handedness).
             tan_xyz = raw[:, 8:11].copy()
             tan_w   = np.ones((vert_count, 1), dtype="<f4")
@@ -639,7 +642,11 @@ def kn5_to_glb(
             # AC (left-handed) -> Three.js/glTF (right-handed): negate Z.
             pos = _ac_to_three(kn5_node.positions)
             nrm = _ac_to_three(kn5_node.normals)
-            uvs = kn5_node.uvs
+            # KN5 stores V=0 at the bottom (OpenGL convention).
+            # glTF expects V=0 at the top (DirectX / image-origin convention).
+            # Flip the V component to correct the mismatch.
+            uvs = kn5_node.uvs.copy()
+            uvs[:, 1] = 1.0 - uvs[:, 1]
 
             # Tangents: negate Z on XYZ component.
             # Negate W to compensate for the winding reversal below,
