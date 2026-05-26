@@ -11,8 +11,8 @@ mission-critical, consult a lawyer in your jurisdiction.
 Every file in this repository was authored originally for this project.
 There is no pasted third-party source code. Your copyright covers:
 
-- `converter.py`, `ac_parsers.py`, `acd_reader.py` (car-data loader),
-  `tire_lab.py`, `smoke_test.py`
+- `gui.py`, `converter.py`, `ac_parsers.py`, `acd_reader.py` (car-data
+  loader), `kn5_reader.py`, `tire_lab.py`, `smoke_test.py`
 - `test_car/` (synthetic reference data you wrote)
 - `README.md`, `CHANGELOG.md`, `THIRD_PARTY_NOTICES.md`, this file
 - `examples/mx5_nd_club.svj.json` (generated from your synthetic test car)
@@ -37,11 +37,11 @@ under any license (permissive, copyleft, or proprietary) without issue.
 
 | Package | License | Copyleft? | Can you bundle? | Can downstream relicense? |
 |---------|---------|-----------|-----------------|---------------------------|
-| gradio  | Apache 2.0 | No | Yes (with NOTICE) | Yes |
 | numpy / scipy | BSD-3 | No | Yes | Yes |
 | matplotlib | BSD-style | No | Yes | Yes |
 | Pillow | HPND | No | Yes | Yes |
-| socksio | ISC | No | Yes | Yes |
+| pygltflib | MIT | No | Yes | Yes |
+| tkinter | PSF | No | Yes (stdlib) | Yes |
 
 ## 4. Your license options — pick one
 

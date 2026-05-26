@@ -14,7 +14,7 @@ python -m venv .venv
 source .venv/bin/activate       # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
 python smoke_test.py            # should exit 0
-python converter.py             # opens the Gradio UI
+python gui.py                   # opens the tkinter desktop GUI
 ```
 
 `smoke_test.py` runs against the synthetic `test_car/` and does not need any

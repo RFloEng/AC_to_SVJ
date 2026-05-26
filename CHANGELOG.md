@@ -55,14 +55,19 @@ When a KN5 file is detected alongside the car data, `build_svj()` now emits:
 All fields are optional in the schema; if no KN5 is present, the SVJ is
 still fully valid.
 
-### Gradio UI changes
+### Desktop GUI (tkinter)
 
-- **Tab 2 (single car)**: new checkbox *"Convert KN5 → GLB (embeds SAE J670
-  3D mesh)"*.  When checked, the output file changes from `.svj.json` to a
-  `.zip` containing both the SVJ JSON and the `meshes/*.glb` file.
-- **Tab 3 (batch)**: new checkbox *"Convert KN5 → GLB (SAE J670 3D mesh per
-  car)"*.  When checked, each car's subfolder in the output ZIP gains a
-  `meshes/<car>.glb` entry (when a KN5 file is available).
+- Standalone two-tab tkinter application (`gui.py`); no browser required.
+- **Batch tab**: scan a `cars/` folder, tick-list selection, **▶ Convert
+  selected** and **■ Stop** button, colour-coded log pane with **Save log**
+  export.
+- Output written to a folder (not a ZIP): one subfolder per car with
+  `{model}.svj.json`, `conversion_log.txt`, Pacejka PNG plots, and
+  `meshes/{model}.glb` when KN5→GLB is enabled.
+- New checkbox *"Convert KN5 → GLB"* in the Batch tab.
+- **Tire Lab tab**: three input modes (car folder, bare `tyres.ini`, manual
+  parameters); displays five MF 5.2 / MF 6.2 plots plus copy-ready JSON
+  blocks.
 
 ### Other
 
@@ -99,10 +104,11 @@ Initial public beta release.
 ### Aero
 - `aerodynamics.components[]` per SVJ 0.95; wing AoA-CL/CD LUTs; DRS.
 
-### UI (Gradio)
-- Tab 1: upload files. Tab 2: single car directory. Tab 4: Tire Lab.
-- Tab 3 (batch): scan folder → tick-list of cars → convert selected.
-  Output ZIP named `ac_svj_batch_<date>_conv<ver>_svj<ver>.zip`.
+### UI (tkinter)
+- Standalone two-tab tkinter desktop app (`gui.py`).
+- **Batch tab**: scan folder → tick-list of cars → convert selected.
+  Output folder named `ac_svj_batch_<date>_conv<ver>_svj<ver>/`.
+- **Tire Lab tab**: standalone MF 5.2 / MF 6.2 bench.
 
 ### Quality
 - `smoke_test.py` with 62 structural checks including DWB V-shape geometry.

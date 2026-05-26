@@ -29,12 +29,12 @@ its own license; none of their source is included in this repository.
 
 | Package    | License                                | SPDX ID      |
 |------------|----------------------------------------|--------------|
-| gradio     | Apache License 2.0                     | Apache-2.0   |
 | numpy      | BSD 3-Clause                           | BSD-3-Clause |
 | scipy      | BSD 3-Clause                           | BSD-3-Clause |
 | matplotlib | Matplotlib License (PSF/BSD-compatible)| (BSD-style)  |
 | Pillow     | Historical Permission Notice (HPND)    | HPND         |
-| socksio    | ISC                                    | ISC          |
+| pygltflib  | MIT                                    | MIT          |
+| tkinter    | PSF (Python standard library)          | PSF-2.0      |
 
 All of the above are permissively licensed and compatible with both
 open-source and commercial use. None impose copyleft obligations on code

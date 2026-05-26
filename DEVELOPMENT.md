@@ -9,16 +9,17 @@ and the small-but-painful pitfalls that have eaten time before.
 ## 1. Architecture map
 
 ```
-converter.py       Main app. Gradio UI + SVJ assembly.
+gui.py             Main entry point. Standalone tkinter desktop GUI.
+                   Two tabs: Batch Conversion and Tire Lab.
+                   No browser required.
+
+converter.py       SVJ assembly engine (pure conversion logic, no UI).
                    Public surface:
-                     - convert_uploaded_files()
-                     - convert_single_car_dir()
-                     - convert_batch_collection()
                      - build_corner()        ← per-corner topology
                      - build_svj()           ← top-level SVJ assembly
                    Constants:
-                     - CONV_VER  = "0.99"
-                     - SVJ_VERSION = "0.95"
+                     - CONV_VER    = "0.9.1"
+                     - SVJ_VERSION = "0.97"
 
 ac_parsers.py      AC ini/lut readers. Source of truth for which ini sections
                    are recognised. HARDPOINT_KEYS is the canonical list of
@@ -31,8 +32,8 @@ acd_reader.py      Car-data loader. Reads unpacked `data/` for any car
                    the user).
 
 tire_lab.py        AC tire forward model + Pacejka MF 5.2 fitter +
-                   matplotlib plot generation. The Tire Lab Gradio tab in
-                   converter.py just wires this up.
+                   matplotlib plot generation. The Tire Lab tab in
+                   gui.py wires this up.
 
 smoke_test.py      End-to-end smoke test against test_car/. If a real_car/
                    folder exists alongside the repo root, additional real-car
@@ -235,7 +236,7 @@ it just detects it and returns an empty ini map plus a clear
 "needs unpack" `source_note`. Callers (`convert_single_dir`,
 `convert_batch`) surface that to the user with a Content Manager
 unpack instruction; in batch mode every skipped car is also written to
-a `skipped.txt` file inside the output ZIP.
+a `skipped.txt` file inside the output folder.
 
 ## 9. Releasing
 
