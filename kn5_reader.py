@@ -718,6 +718,16 @@ def kn5_to_glb(
     # at AC Z = +F ends up at Three.js Z = -F.  Adding a wrapper node with
     # translation [0, 0, +F] shifts everything so the front axle lands at 0.
     if model.root:
+        # Top-level 180° rotation around X to bring the mesh upright.
+        # Quaternion [x, y, z, w] for 180° around X = [1, 0, 0, 0].
+        rot_node = pygltflib.Node(
+            name="_ac_x_rotation",
+            rotation=[1.0, 0.0, 0.0, 0.0],
+        )
+        gltf.nodes.append(rot_node)
+        rot_idx = len(gltf.nodes) - 1
+        scene.nodes.append(rot_idx)
+
         front_axle_z = _find_front_axle_z(model.root)
         if front_axle_z is not None and abs(front_axle_z) > 0.01:
             wrapper = pygltflib.Node(
@@ -726,10 +736,12 @@ def kn5_to_glb(
             )
             gltf.nodes.append(wrapper)
             wrapper_idx = len(gltf.nodes) - 1
-            scene.nodes.append(wrapper_idx)
+            if gltf.nodes[rot_idx].children is None:
+                gltf.nodes[rot_idx].children = []
+            gltf.nodes[rot_idx].children.append(wrapper_idx)
             _process_node(model.root, wrapper_idx)
         else:
-            _process_node(model.root, None)
+            _process_node(model.root, rot_idx)
 
     # -- Finalise buffer -------------------------------------------------------
     gltf.buffers.append(pygltflib.Buffer(byteLength=len(bin_data)))
