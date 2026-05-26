@@ -711,18 +711,12 @@ def kn5_to_glb(
 
         return this_idx
 
-    # -- Front-axle alignment wrapper ------------------------------------------
-    # AC cars store their mesh with the front axle at some arbitrary Z in
-    # model space.  The SVJ viewer expects the front axle at Three.js Z = 0.
-    # After the AC->Three.js transform (negate Z), a front-axle node that sat
-    # at AC Z = +F ends up at Three.js Z = -F.  Adding a wrapper node with
-    # translation [0, 0, +F] shifts everything so the front axle lands at 0.
+    # -- Orientation + front-axle alignment ------------------------------------
     if model.root:
-        # Top-level 180° rotation around X to bring the mesh upright.
-        # Quaternion [x, y, z, w] for 180° around X = [1, 0, 0, 0].
+        # 180° around Z. Quaternion [x, y, z, w] = [0, 0, 1, 0].
         rot_node = pygltflib.Node(
-            name="_ac_x_rotation",
-            rotation=[1.0, 0.0, 0.0, 0.0],
+            name="_ac_z_rotation",
+            rotation=[0.0, 0.0, 1.0, 0.0],
         )
         gltf.nodes.append(rot_node)
         rot_idx = len(gltf.nodes) - 1
