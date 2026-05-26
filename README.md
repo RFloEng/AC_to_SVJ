@@ -9,37 +9,82 @@
 Converts **Assetto Corsa** car data into the
 [SVJ v0.97 standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
 — SAE J670 axes, SI units — runs a virtual Pacejka MF 6.2 bench on every
-tyre section, and exports all KN5 mesh LODs as ready-to-use `.glb` files
-bundled in the same ZIP.
+tyre section, and exports all KN5 mesh LODs as ready-to-use `.glb` files.
 
 ## Install
 
 ```bash
 pip install -r requirements.txt
-python converter.py
+python gui.py
 ```
 
-Opens the Gradio UI at `http://127.0.0.1:7860`.
+Opens a native desktop window. No browser required.
 
-## Two tabs
+## Desktop GUI
 
-**1 · Batch collection** — point at a `cars/` folder, click **Scan** to list
-every convertible car with a tick-box, uncheck what you don't need, click
-**Convert selected**. Output is a ZIP named
-`ac_svj_batch_<date>_conv<ver>_svj<ver>.zip` containing, per car:
-`{model}.svj.json`, all LOD GLBs (`{model}.glb`, `{model}_LOD_B.glb`, …),
-three Pacejka comparison PNGs, `conversion_log.txt`, and a root-level
-`batch_summary.csv` with fit quality per axle/compound.
-Cars with an encrypted `data.acd` are listed in `skipped.txt` — unpack them
-via Content Manager → Tools → Unpack Data and re-run.
+`gui.py` is a standalone tkinter application with two tabs.
 
-**2 · Tire Lab** — standalone Pacejka MF 5.2 / MF 6.2 bench: fit from a
-`tyres.ini` file, or dial AC parameters by hand.
+### 1 · Batch Conversion
+
+Point at a `cars/` folder, click **Scan** to list every convertible car with
+a tick-box, filter by name, uncheck what you don't need, then click
+**▶ Convert selected**.
+
+Output is written directly to a folder (auto-named sibling of the input, or
+any folder you choose), one subfolder per car:
+
+```
+ac_svj_batch_YYYYMMDD_HHMMSS_convX.X.X_svjX.XX/
+  {car_name}/
+    {model}.svj.json           ← converted vehicle data
+    conversion_log.txt         ← detailed per-car log with fit quality table
+    {model}.tires_front_lateral.png
+    {model}.tires_front_longitudinal.png
+    {model}.tires_front_mu_vs_fz.png
+    {model}.tires_front_mf62_camber.png
+    {model}.tires_front_mf62_lateral.png
+    meshes/{model}.glb         ← if KN5 → GLB enabled
+  batch_summary.csv            ← fit quality for every axle/compound
+  batch_run_TIMESTAMP.log      ← master log combining all cars
+```
+
+**Stop button** — cancels the run cleanly after the current car finishes.  
+**Log window** — timestamped, colour-coded (green ✓ / red ✗ / orange ⚠);
+**Save log** exports the full session to a `.log` file.
+
+Cars with an encrypted `data.acd` are listed separately — unpack them via
+Content Manager → Tools → Unpack Data and re-run.
+
+### 2 · Tire Lab
+
+Standalone Pacejka MF 5.2 / MF 6.2 bench — three input modes:
+
+| Mode | How |
+|---|---|
+| **A · From car folder** | Paste any AC car path; reads `data/tyres.ini` automatically |
+| **B · From tyres.ini file** | Browse to a bare `tyres.ini` |
+| **C · Manual parameters** | Dial FZ0, DY0, DY1, DX0, DX1, LS_EXPY/X, camber, pressure, … by hand |
+
+Displays five plots (MF 5.2 lateral / longitudinal / peak-μ-vs-Fz, MF 6.2
+lateral+camber overlay, camber sensitivity & thrust) plus the full MF 5.2 and
+MF 6.2 JSON blocks ready to paste into an SVJ file.
+
+## Conversion log detail
+
+Every `conversion_log.txt` contains:
+
+- Converter version, timestamp, full car path
+- All parsing events (ini files found, ini keys resolved, defaults applied)
+- Pacejka fit quality table (R², RMSE, Fz0, DY0, DX0 per axle/compound)
+- Complete output file manifest
+
+The master `batch_run_*.log` combines every car's log in one file for
+post-hoc review or CI ingestion.
 
 ## Mesh pipeline (KN5 → GLB)
 
 The converter reads the car's KN5 mesh files and exports one `.glb` per LOD
-level alongside every SVJ output:
+level (enable the checkbox in the Batch tab; requires `pygltflib`):
 
 | LOD | Source file | GLB output |
 |-----|-------------|------------|
@@ -101,7 +146,8 @@ Vertical shift: `chassis_z_offset = −rolling_radius`.
 
 | File | Purpose |
 |---|---|
-| `converter.py` | SVJ assembly + Gradio UI |
+| `gui.py` | Standalone desktop GUI (tkinter) — main entry point |
+| `converter.py` | SVJ assembly engine — pure conversion logic |
 | `kn5_reader.py` | KN5 mesh reader → multi-LOD GLB exporter |
 | `tire_lab.py` | AC tyre forward model + MF 5.2 / MF 6.2 fitter + plots |
 | `ac_parsers.py` | All `.ini` / `.lut` parsers |
@@ -123,11 +169,11 @@ Vertical shift: `chassis_z_offset = −rolling_radius`.
 ## Third-party notices
 
 No third-party source code is bundled. Runtime Python dependencies
-(`gradio`, `numpy`, `scipy`, `matplotlib`, `Pillow`, `pygltflib`) are
-installed via `pip` and are all permissively licensed. See
-`THIRD_PARTY_NOTICES.md` for full credits. The Pacejka MF 5.2 / MF 6.2
-formulas are mathematical facts and not copyrightable; the implementation
-is original.
+(`numpy`, `scipy`, `matplotlib`, `Pillow`, `pygltflib`) are installed via
+`pip` and are all permissively licensed. `tkinter` is part of the Python
+standard library. See `THIRD_PARTY_NOTICES.md` for full credits.
+The Pacejka MF 5.2 / MF 6.2 formulas are mathematical facts and not
+copyrightable; the implementation is original.
 
 ## License
 
