@@ -529,6 +529,12 @@ class App(tk.Tk):
             variable=self._b_glb_var,
             state="normal" if _KN5 else "disabled",
         ).pack(side="left", padx=16)
+        self._b_skins_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opts, text="Embed skins (liveries)",
+            variable=self._b_skins_var,
+            state="normal" if _KN5 else "disabled",
+        ).pack(side="left", padx=4)
         if not _KN5:
             ttk.Label(opts, text="(kn5_reader unavailable)",
                       foreground="gray").pack(side="left")
@@ -636,6 +642,7 @@ class App(tk.Tk):
                 self._b_out_var.get().strip(),
                 self._b_plots_var.get(),
                 self._b_glb_var.get(),
+                self._b_skins_var.get(),
                 selected,
             ),
             daemon=True,
@@ -645,7 +652,7 @@ class App(tk.Tk):
 
     def _batch_worker(self, cars_folder: str, out_folder: str,
                       include_plots: bool, convert_glb: bool,
-                      selected: list[str]) -> None:
+                      include_skins: bool, selected: list[str]) -> None:
         q   = self._q
         put = lambda *a: q.put(a)
 
@@ -741,6 +748,7 @@ class App(tk.Tk):
                         data_dir=data_dir,
                         ctrl_files=ctrl_files,
                         glb_output_dir=glb_dir,
+                        include_skins=include_skins,
                     )
                     svj  = _clean(svj)
                     stem = _car_stem(svj, car_path.name)

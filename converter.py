@@ -747,6 +747,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               data_dir: Optional[Path] = None,
               ctrl_files: Optional[dict] = None,
               glb_output_dir: Optional[Path] = None,
+              include_skins: bool = True,
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
@@ -1447,7 +1448,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 if glb_output_dir is not None:
                     try:
                         _glb_dir = glb_output_dir / "meshes"
-                        exported = kn5_all_lods_to_glbs(car_path, _glb_dir)
+                        exported = kn5_all_lods_to_glbs(
+                            car_path, _glb_dir, include_skins=include_skins)
                         for lbl, out_p in exported.items():
                             log.append(f"✓ GLB LOD {lbl} written → meshes/{out_p.name}")
                     except Exception as _glb_err:

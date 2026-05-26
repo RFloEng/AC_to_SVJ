@@ -458,10 +458,41 @@ def _find_front_axle_z(root: "Kn5Node") -> Optional[float]:
 
 # --- glTF export --------------------------------------------------------------
 
+def _load_skin_tex(skin_dir: Path, tex_name: str) -> Optional[bytes]:
+    """
+    Return raw bytes of a texture override found in a skin folder, or None.
+    Matches by stem (case-insensitive), accepts .dds / .png / .jpg / .jpeg.
+    """
+    stem = Path(tex_name).stem.lower()
+    try:
+        for f in skin_dir.iterdir():
+            if (f.stem.lower() == stem and
+                    f.suffix.lower() in (".dds", ".png", ".jpg", ".jpeg")):
+                return f.read_bytes()
+    except OSError:
+        pass
+    return None
+
+
+def _find_skins(car_path: Path) -> list[tuple[str, Path]]:
+    """
+    Return [(skin_name, skin_folder), ...] sorted alphabetically from
+    <car_path>/skins/.  Returns an empty list if no skins directory exists.
+    """
+    skins_dir = car_path / "skins"
+    if not skins_dir.is_dir():
+        return []
+    return sorted(
+        [(d.name, d) for d in skins_dir.iterdir() if d.is_dir()],
+        key=lambda x: x[0].lower(),
+    )
+
+
 def kn5_to_glb(
     path: Path,
     output_path: Optional[Path] = None,
     embed_textures: bool = True,
+    skins: Optional[list[tuple[str, Path]]] = None,
 ) -> bytes:
     """
     Convert a KN5 file to a self-contained GLB (binary glTF).
@@ -471,6 +502,9 @@ def kn5_to_glb(
     path           : Source .kn5 file.
     output_path    : If given, the GLB bytes are also written here.
     embed_textures : Embed texture images in the GLB (default True).
+    skins          : Optional list of (skin_name, skin_folder) tuples from
+                     _find_skins().  When provided, each skin becomes a named
+                     variant via the KHR_materials_variants extension.
 
     Returns
     -------
@@ -512,6 +546,41 @@ def kn5_to_glb(
         gltf.accessors.append(acc)
         return len(gltf.accessors) - 1
 
+    def _embed_raw(raw: bytes, name: str) -> int:
+        """Convert raw image bytes (DDS/PNG/JPEG) and add to gltf. Returns glTF texture index or -1."""
+        img_data = raw
+        mime = "image/png"
+        if raw[:4] == b"DDS ":
+            try:
+                from PIL import Image as PILImage
+                buf = io.BytesIO(raw)
+                pil_img = PILImage.open(buf)
+                if "A" in pil_img.mode:
+                    a = np.asarray(pil_img)[:, :, 3].ravel()
+                    extreme = float((a <= 10).sum() + (a >= 245).sum())
+                    tex_bimodal[name] = extreme / len(a) > 0.85
+                out_buf = io.BytesIO()
+                pil_img.save(out_buf, format="PNG")
+                img_data = out_buf.getvalue()
+            except Exception:
+                return -1
+        elif raw[:3] == b"\xff\xd8\xff":
+            mime = "image/jpeg"
+        bv_idx = _add_buffer_view(img_data)
+        gltf.images.append(pygltflib.Image(bufferView=bv_idx, mimeType=mime, name=name))
+        gltf.samplers.append(pygltflib.Sampler(
+            magFilter=pygltflib.LINEAR,
+            minFilter=pygltflib.LINEAR_MIPMAP_LINEAR,
+            wrapS=pygltflib.REPEAT,
+            wrapT=pygltflib.REPEAT,
+        ))
+        gltf.textures.append(pygltflib.Texture(
+            source=len(gltf.images) - 1,
+            sampler=len(gltf.samplers) - 1,
+            name=name,
+        ))
+        return len(gltf.textures) - 1
+
     # -- Build texture images --------------------------------------------------
     tex_idx:      dict[str, int]  = {}   # texture name -> glTF texture index
     tex_bimodal:  dict[str, bool] = {}   # texture name -> True if alpha is bimodal
@@ -522,45 +591,9 @@ def kn5_to_glb(
         for kn5_tex in model.textures:
             if not kn5_tex.data:
                 continue
-            img_data = kn5_tex.data
-            mime = "image/png"
-            if img_data[:4] == b"DDS ":
-                try:
-                    from PIL import Image as PILImage
-                    buf = io.BytesIO(img_data)
-                    pil_img = PILImage.open(buf)
-                    # Record alpha bimodality before format conversion.
-                    if "A" in pil_img.mode:
-                        a = np.asarray(pil_img)[:, :, 3].ravel()
-                        extreme = float((a <= 10).sum() + (a >= 245).sum())
-                        tex_bimodal[kn5_tex.name] = extreme / len(a) > 0.85
-                    out_buf = io.BytesIO()
-                    pil_img.save(out_buf, format="PNG")
-                    img_data = out_buf.getvalue()
-                    mime = "image/png"
-                except Exception:
-                    continue
-            elif img_data[:3] == b"\xff\xd8\xff":
-                mime = "image/jpeg"
-
-            bv_idx = _add_buffer_view(img_data)
-            img = pygltflib.Image(bufferView=bv_idx, mimeType=mime,
-                                   name=kn5_tex.name)
-            gltf.images.append(img)
-            sampler = pygltflib.Sampler(
-                magFilter=pygltflib.LINEAR,
-                minFilter=pygltflib.LINEAR_MIPMAP_LINEAR,
-                wrapS=pygltflib.REPEAT,
-                wrapT=pygltflib.REPEAT,
-            )
-            gltf.samplers.append(sampler)
-            gtex = pygltflib.Texture(
-                source=len(gltf.images) - 1,
-                sampler=len(gltf.samplers) - 1,
-                name=kn5_tex.name,
-            )
-            gltf.textures.append(gtex)
-            tex_idx[kn5_tex.name] = len(gltf.textures) - 1
+            tidx = _embed_raw(kn5_tex.data, kn5_tex.name)
+            if tidx >= 0:
+                tex_idx[kn5_tex.name] = tidx
 
     # -- Build materials -------------------------------------------------------
     mat_gltf_idx: list[int] = []
@@ -622,6 +655,62 @@ def kn5_to_glb(
     )
     gltf.materials.append(_hidden_mat)
     _hidden_mat_idx: int = len(gltf.materials) - 1
+
+    # -- Build skin variants (KHR_materials_variants) --------------------------
+    # variant_names[0] = "Default" (base KN5 textures), [1..] = skin names.
+    # mat_variants[kn5_mat_id][variant_idx] = glTF material index.
+    variant_names: list[str] = []
+    mat_variants: list[list[int]] = [[idx] for idx in mat_gltf_idx]
+
+    if embed_textures and skins:
+        variant_names = ["Default"] + [sn for sn, _ in skins]
+
+        for skin_name, skin_dir in skins:
+            # Find which base textures this skin overrides and embed them.
+            skin_tex_map: dict[str, int] = {}   # base tex_name -> skin glTF tex idx
+            for kn5_mat in model.materials:
+                tx = kn5_mat.tx_diffuse
+                if tx and tx not in skin_tex_map:
+                    raw = _load_skin_tex(skin_dir, tx)
+                    if raw is not None:
+                        tidx = _embed_raw(raw, f"{skin_name}/{tx}")
+                        if tidx >= 0:
+                            skin_tex_map[tx] = tidx
+
+            # For each KN5 material: create a variant material or reuse base.
+            for kn5_mid, kn5_mat in enumerate(model.materials):
+                base_idx  = mat_gltf_idx[kn5_mid]
+                base_gmat = gltf.materials[base_idx]
+                tx = kn5_mat.tx_diffuse
+                if tx and tx in skin_tex_map:
+                    base_pbr = base_gmat.pbrMetallicRoughness
+                    new_pbr  = pygltflib.PbrMetallicRoughness(
+                        baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+                        metallicFactor=base_pbr.metallicFactor,
+                        roughnessFactor=base_pbr.roughnessFactor,
+                    )
+                    new_pbr.baseColorTexture = pygltflib.TextureInfo(
+                        index=skin_tex_map[tx]
+                    )
+                    new_gmat = pygltflib.Material(
+                        name=f"{kn5_mat.name}_{skin_name}",
+                        pbrMetallicRoughness=new_pbr,
+                        alphaMode=base_gmat.alphaMode,
+                        alphaCutoff=base_gmat.alphaCutoff,
+                    )
+                    if base_gmat.normalTexture:
+                        new_gmat.normalTexture = base_gmat.normalTexture
+                    gltf.materials.append(new_gmat)
+                    mat_variants[kn5_mid].append(len(gltf.materials) - 1)
+                else:
+                    mat_variants[kn5_mid].append(base_idx)
+
+        gltf.extensionsUsed = ["KHR_materials_variants"]
+        gltf.extensions = {
+            "KHR_materials_variants": {
+                "variants": [{"name": n} for n in variant_names]
+            }
+        }
 
     # -- Build scene nodes (DFS, mirrors KN5 tree) -----------------------------
     scene = pygltflib.Scene(name=model.name, nodes=[])
@@ -692,6 +781,25 @@ def kn5_to_glb(
                 indices=acc_idx,
                 material=mat_idx,
             )
+            # Attach skin variant mappings when skins were supplied and this
+            # mesh's material actually differs across variants.
+            kn5_mid = kn5_node.material_id
+            if (variant_names and not _is_ephemeral(kn5_node.name)
+                    and mat_idx is not None
+                    and 0 <= kn5_mid < len(mat_variants)):
+                v_list = mat_variants[kn5_mid]
+                if not all(v == v_list[0] for v in v_list):
+                    mat_to_vis: dict[int, list[int]] = {}
+                    for vi, mi in enumerate(v_list):
+                        mat_to_vis.setdefault(mi, []).append(vi)
+                    primitive.extensions = {
+                        "KHR_materials_variants": {
+                            "mappings": [
+                                {"material": mi, "variants": vis}
+                                for mi, vis in mat_to_vis.items()
+                            ]
+                        }
+                    }
             mesh = pygltflib.Mesh(name=kn5_node.name, primitives=[primitive])
             gltf.meshes.append(mesh)
             gnode.mesh = len(gltf.meshes) - 1
@@ -810,6 +918,7 @@ def kn5_all_lods_to_glbs(
     car_path: Path,
     output_dir: Path,
     embed_textures: bool = True,
+    include_skins: bool = True,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -824,6 +933,8 @@ def kn5_all_lods_to_glbs(
     car_path      : AC car folder.
     output_dir    : Directory where GLBs are written (created if needed).
     embed_textures: Passed through to kn5_to_glb() for each LOD.
+    include_skins : When True (default), embed all skin liveries as
+                    KHR_materials_variants inside the GLB.
 
     Returns
     -------
@@ -833,10 +944,13 @@ def kn5_all_lods_to_glbs(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     lods = find_car_kn5_lods(car_path)
+    skins = _find_skins(car_path) if include_skins else []
     results: dict[str, Path] = {}
     for label, kn5_path in lods:
         out_path = output_dir / f"{kn5_path.stem}.glb"
-        kn5_to_glb(kn5_path, output_path=out_path, embed_textures=embed_textures)
+        kn5_to_glb(kn5_path, output_path=out_path,
+                   embed_textures=embed_textures,
+                   skins=skins if skins else None)
         results[label] = out_path
     return results
 
