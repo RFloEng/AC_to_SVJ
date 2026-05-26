@@ -52,13 +52,8 @@ Coordinate system
 AC / KN5  : left-handed, X-right, Y-up, Z-forward.
 Three.js  : right-handed, X-right, Y-up, Z-backward  (glTF standard).
 
-Transform applied: negate Z  ->  three = (ac.x, ac.y, -ac.z).
-This matches  sae2three(ac_to_svj(p)) = (p.x, p.y, -p.z)  so the GLB
-overlays correctly on the physics skeleton in the SVJ viewer without any
-extra rotation.
-
-Triangle winding is reversed (swap index[1] <-> index[2]) because the
-handedness changes from left-handed (AC) to right-handed (Three.js).
+Transform applied: negate Y and Z  ->  three = (ac.x, -ac.y, -ac.z).
+Negating two axes preserves handedness, so triangle winding is kept as-is.
 """
 
 from __future__ import annotations
@@ -394,9 +389,10 @@ def _is_ephemeral(name: str) -> bool:
 def _ac_to_three(arr: np.ndarray) -> np.ndarray:
     """
     Vectorised AC -> Three.js/glTF space for an (N, 3) float32 array.
-    Just negates Z: three = (ac.x, ac.y, -ac.z).
+    Negates Y and Z: three = (ac.x, -ac.y, -ac.z).
     """
     out = arr.copy()
+    out[:, 1] = -arr[:, 1]
     out[:, 2] = -arr[:, 2]
     return out
 
@@ -410,9 +406,12 @@ def _mat4_ac_to_three(m: list[float]) -> list[float]:
     """
     M_col = np.array(m, dtype="f4").reshape(4, 4).T  # KN5 row-major -> col-vector
     M_three = M_col.copy()
+    # P = diag(1, -1, -1, 1)  →  M_three = P * M_col * P
+    M_three[1, :]  = -M_col[1, :]
     M_three[2, :]  = -M_col[2, :]
+    M_three[:, 1]  = -M_three[:, 1]
     M_three[:, 2]  = -M_three[:, 2]
-    M_three[2, 2]  =  M_col[2, 2]
+    # [1,1] [1,2] [2,1] [2,2] are double-negated → back to original (no restore needed)
     return M_three.flatten(order="F").tolist()        # column-major for glTF
 
 _mat4_ac_to_sae = _mat4_ac_to_three  # backward-compat alias
@@ -641,16 +640,15 @@ def kn5_to_glb(
             nrm = _ac_to_three(kn5_node.normals)
             uvs = kn5_node.uvs
 
-            # Tangents: negate Z on XYZ component.
-            # Negate W to compensate for the winding reversal below,
-            # keeping B = cross(N,T)*W consistent with the UV encoding.
+            # Tangents: apply same Y+Z negate as positions/normals.
+            # W sign is kept as-is (no winding reversal, so no handedness compensation needed).
             tan_raw = kn5_node.tangents          # (N,4)
             tan_xyz = _ac_to_three(tan_raw[:, :3])
-            tan_w   = -tan_raw[:, 3:4]           # negate handedness for winding flip
+            tan_w   = tan_raw[:, 3:4]            # unchanged
             tan = np.concatenate([tan_xyz, tan_w], axis=1).astype("<f4")
 
-            # Reverse triangle winding: handedness flips (left->right-handed).
-            idx = kn5_node.indices.reshape(-1, 3)[:, [0, 2, 1]].flatten()
+            # Winding unchanged: double axis negation (Y+Z) preserves handedness.
+            idx = kn5_node.indices
 
             # Accessors
             pos_bytes = pos.astype("<f4").tobytes()
