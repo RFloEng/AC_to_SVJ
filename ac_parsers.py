@@ -480,32 +480,61 @@ def detect_tyre_compounds(ini: dict) -> list[tuple[str, str]]:
 
 
 def parse_tyre_extras(sec: dict) -> dict:
-    """Capture tyres.ini fields beyond the Pacejka fit."""
+    """Capture tyres.ini fields beyond the Pacejka fit.
+
+    Handles both vanilla AC and CSP Extended Physics sections.
+    All values are SI units; PSI fields stay in PSI to match AC convention.
+    """
     out = {
-        "relaxation_length_m": _m(sec.get("RELAXATION_LENGTH")),
-        "rolling_resistance": {
-            "k0": _m(sec.get("ROLLING_RESISTANCE_0")),
-            "k1": _m(sec.get("ROLLING_RESISTANCE_1")),
-            "k2": _m(sec.get("ROLLING_RESISTANCE_SLIP") or sec.get("ROLLING_RESISTANCE_2")),
+        # ── Structural ────────────────────────────────────────────────────────
+        "relaxation_length_m":    _m(sec.get("RELAXATION_LENGTH")),
+        "vertical_stiffness_n_m": _m(sec.get("RATE")),
+        "vertical_damping_n_s_m": _m(sec.get("DAMP")),
+        "angular_inertia_kg_m2":  _m(sec.get("ANGULAR_INERTIA")),
+        "radius_angular_k":       _m(sec.get("RADIUS_ANGULAR_K")),
+
+        # ── Friction shape ────────────────────────────────────────────────────
+        "speed_sensitivity":      _m(sec.get("SPEED_SENSITIVITY")),
+        "dcamber_0":              _m(sec.get("DCAMBER_0")),
+        "dcamber_1":              _m(sec.get("DCAMBER_1")),
+        "friction_limit_angle":   _m(sec.get("FRICTION_LIMIT_ANGLE")),
+
+        # ── CSP Extended Physics slip-curve shape ─────────────────────────────
+        # FALLOFF_LEVEL  = kinetic/peak friction ratio (mapped to KINETIC_RATIO in
+        #                  tire_lab; stored here for reference)
+        # FALLOFF_SPEED  = post-peak sharpness (higher → sharper drop-off)
+        # DY_REF / DX_REF = reference peak friction (e.g. for wear normalisation)
+        "csp": {
+            "falloff_level":  _m(sec.get("FALLOFF_LEVEL")),
+            "falloff_speed":  _m(sec.get("FALLOFF_SPEED")),
+            "dy_ref":         _m(sec.get("DY_REF")),
+            "dx_ref":         _m(sec.get("DX_REF")),
+            "cx_mult":        _m(sec.get("CX_MULT")),
+            "flex_gain":      _m(sec.get("FLEX_GAIN")),
         },
-        "speed_sensitivity": _m(sec.get("SPEED_SENSITIVITY")),
-        "dcamber_0":         _m(sec.get("DCAMBER_0")),
-        "dcamber_1":         _m(sec.get("DCAMBER_1")),
-        "friction_limit_angle": _m(sec.get("FRICTION_LIMIT_ANGLE")),
+
+        # ── Rolling resistance ────────────────────────────────────────────────
+        "rolling_resistance": {
+            "k0":             _m(sec.get("ROLLING_RESISTANCE_0")),
+            "k1":             _m(sec.get("ROLLING_RESISTANCE_1")),
+            "k2":             _m(sec.get("ROLLING_RESISTANCE_SLIP") or sec.get("ROLLING_RESISTANCE_2")),
+            "pressure_gain":  _m(sec.get("PRESSURE_RR_GAIN")),
+        },
+
+        # ── Pressure model ────────────────────────────────────────────────────
         "pressure_model": {
-            "static_psi":        _m(sec.get("PRESSURE_STATIC")),
-            "ideal_psi":         _m(sec.get("PRESSURE_IDEAL")),
-            "d_gain":            _m(sec.get("PRESSURE_D_GAIN")),
-            "flex_gain":         _m(sec.get("PRESSURE_FLEX_GAIN")),
+            "static_psi":     _m(sec.get("PRESSURE_STATIC")),
+            "ideal_psi":      _m(sec.get("PRESSURE_IDEAL")),
+            "d_gain":         _m(sec.get("PRESSURE_D_GAIN")),
+            "flex_gain":      _m(sec.get("PRESSURE_FLEX_GAIN")),
+            "spring_gain":    _m(sec.get("PRESSURE_SPRING_GAIN")),
         },
     }
     # clean nested Nones
-    out["rolling_resistance"] = {k: v for k, v in out["rolling_resistance"].items() if v is not None}
-    if not out["rolling_resistance"]:
-        out["rolling_resistance"] = None
-    out["pressure_model"] = {k: v for k, v in out["pressure_model"].items() if v is not None}
-    if not out["pressure_model"]:
-        out["pressure_model"] = None
+    for nested in ("rolling_resistance", "pressure_model", "csp"):
+        out[nested] = {k: v for k, v in out[nested].items() if v is not None}
+        if not out[nested]:
+            out[nested] = None
     return {k: v for k, v in out.items() if v is not None}
 
 
