@@ -67,6 +67,7 @@ class ACTyreParams:
     FLEX: float = 0.00018
     CAMBER_GAIN: float = 1.10
     KINETIC_RATIO: float = 0.92
+    FALLOFF_SPEED: float = 1.0   # CSP: post-peak slip sharpness (1=gradual … 7+=sharp slick)
     PRESSURE_REF_PSI: float = 27.0
     PRESSURE_NOW_PSI: float = 27.0
     PRESSURE_GAIN: float = 0.005
@@ -163,6 +164,11 @@ def parse_tyre_section(parsed_ini: dict, section: str = "FRONT",
             d.KINETIC_RATIO = falloff
             matched += 1
 
+        fs = _f(sec.get("FALLOFF_SPEED"), None)
+        if fs is not None and fs > 0.0:
+            d.FALLOFF_SPEED = fs
+            matched += 1
+
         cx_mult = _f(sec.get("CX_MULT"), None)
         if cx_mult is not None and cx_mult > 0.0:
             d.K_k = 18.0 * cx_mult   # scale default longitudinal stiffness
@@ -210,11 +216,20 @@ def _K_lat(Fz, p):  return p.K_a * Fz / (1.0 + p.FLEX * Fz)
 def _K_long(Fz, p): return p.K_k * Fz / (1.0 + p.FLEX * Fz)
 
 
-def _shape(u, kin):
-    sigma = 1.6
+def _shape(u, kin, sigma=1.6):
+    """
+    Normalised slip-curve shape.  sigma controls post-peak sharpness:
+      sigma = 1.6 / sqrt(FALLOFF_SPEED)
+    Default sigma=1.6 corresponds to FALLOFF_SPEED=1 (gradual/vanilla).
+    """
     bell = np.exp(-((np.maximum(u, 0.0) - 1.0) ** 2) / (sigma ** 2))
     pure = 2.0 * u / (1.0 + u * u)
     return pure * bell + kin * (1.0 - bell) * np.tanh(u * 1.5)
+
+
+def _sigma(p: ACTyreParams) -> float:
+    """Convert FALLOFF_SPEED → _shape() sigma.  sigma = 1.6 / sqrt(FALLOFF_SPEED)."""
+    return float(np.clip(1.6 / math.sqrt(max(p.FALLOFF_SPEED, 1e-3)), 0.25, 4.0))
 
 
 def ac_fy(alpha, Fz, gamma, p: ACTyreParams):
@@ -222,7 +237,7 @@ def ac_fy(alpha, Fz, gamma, p: ACTyreParams):
     mu = _mu_lat(Fz, p); Cα = _K_lat(Fz, p)
     peak = mu * Fz; α_p = peak / np.maximum(Cα, 1e-3)
     s = alpha / np.maximum(α_p, 1e-4)
-    return np.sign(s) * peak * _shape(np.abs(s), p.KINETIC_RATIO) - p.CAMBER_GAIN * gamma * Fz
+    return np.sign(s) * peak * _shape(np.abs(s), p.KINETIC_RATIO, _sigma(p)) - p.CAMBER_GAIN * gamma * Fz
 
 
 def ac_fx(kappa, Fz, gamma, p: ACTyreParams):
@@ -230,7 +245,7 @@ def ac_fx(kappa, Fz, gamma, p: ACTyreParams):
     mu = _mu_long(Fz, p); Cκ = _K_long(Fz, p)
     peak = mu * Fz; κ_p = peak / np.maximum(Cκ * Fz, 1e-3)
     s = kappa / np.maximum(κ_p, 1e-4)
-    return np.sign(s) * peak * _shape(np.abs(s), p.KINETIC_RATIO)
+    return np.sign(s) * peak * _shape(np.abs(s), p.KINETIC_RATIO, _sigma(p))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
