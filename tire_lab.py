@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional
@@ -70,7 +71,7 @@ class ACTyreParams:
     PRESSURE_NOW_PSI: float = 27.0
     PRESSURE_GAIN: float = 0.005
 
-    source: str = "defaults"     # "defaults" | "tyres.ini" | "mixed"
+    source: str = "defaults"     # "defaults" | "tyres.ini" | "mixed" | "csp_extended" | "csp_mixed"
 
 
 def _f(raw, default: Optional[float]) -> Optional[float]:
@@ -78,6 +79,22 @@ def _f(raw, default: Optional[float]) -> Optional[float]:
         return float(raw)
     except (TypeError, ValueError):
         return default
+
+
+def _is_csp_tyre(sec: dict) -> bool:
+    """
+    Detect CSP Extended Physics tyre format.
+
+    CSP tyres carry load-exponent / falloff keys (LS_EXPY, FALLOFF_LEVEL,
+    FRICTION_LIMIT_ANGLE) but omit the classic Pacejka slope coefficients
+    (BY0, BX0) and shape factors (CY, CX).  Both conditions must hold so we
+    don't accidentally flag a vanilla tyre that happens to have a stray key.
+    """
+    has_csp = any(sec.get(k) is not None
+                  for k in ("LS_EXPY", "FALLOFF_LEVEL", "FRICTION_LIMIT_ANGLE"))
+    has_pacejka = any(sec.get(k) is not None
+                      for k in ("BY0", "BX0", "CY", "CX"))
+    return has_csp and not has_pacejka
 
 
 def parse_tyre_section(parsed_ini: dict, section: str = "FRONT",
@@ -118,13 +135,53 @@ def parse_tyre_section(parsed_ini: dict, section: str = "FRONT",
             setattr(d, attr, v)
             matched += 1
 
-    # Optional: derive kinetic ratio from XMU if present (XMU ≈ μ_kin / μ_peak)
-    xmu = _f(sec.get("XMU"), None)
-    if xmu is not None and 0.5 < xmu < 1.0:
-        d.KINETIC_RATIO = xmu
-        matched += 1
+    # ── CSP Extended Physics tyre parameters ─────────────────────────────────
+    # Detected when LS_EXPY / FALLOFF_LEVEL / FRICTION_LIMIT_ANGLE are present
+    # without classic Pacejka BY0/BX0/CY/CX.  Three additional mappings:
+    #
+    #   FRICTION_LIMIT_ANGLE (deg) → K_a
+    #     The angle at which peak lateral force occurs.
+    #     From the brush model: α_peak = mu*(1+FLEX*FZ0) / K_a  →
+    #     K_a = DY0 * (1 + FLEX*FZ0) / radians(FRICTION_LIMIT_ANGLE)
+    #
+    #   FALLOFF_LEVEL → KINETIC_RATIO
+    #     CSP's explicit kinetic/peak ratio; replaces the XMU heuristic.
+    #
+    #   CX_MULT → K_k scale
+    #     CSP multiplier on longitudinal stiffness.
+    is_csp = _is_csp_tyre(sec)
+    if is_csp:
+        fla = _f(sec.get("FRICTION_LIMIT_ANGLE"), None)
+        if fla is not None and fla > 0.0 and d.DY0 > 0.0:
+            fla_rad = math.radians(fla)
+            # α_peak = DY0*(1+FLEX*FZ0)/K_a  →  solve for K_a
+            d.K_a = d.DY0 * (1.0 + d.FLEX * d.FZ0) / fla_rad
+            matched += 1
 
-    if matched == 0:
+        falloff = _f(sec.get("FALLOFF_LEVEL"), None)
+        if falloff is not None and 0.0 < falloff < 1.0:
+            d.KINETIC_RATIO = falloff
+            matched += 1
+
+        cx_mult = _f(sec.get("CX_MULT"), None)
+        if cx_mult is not None and cx_mult > 0.0:
+            d.K_k = 18.0 * cx_mult   # scale default longitudinal stiffness
+            matched += 1
+
+    # Optional: derive kinetic ratio from XMU if present (XMU ≈ μ_kin / μ_peak)
+    # Only applies for vanilla AC tyres (CSP uses FALLOFF_LEVEL instead; CSP's
+    # XMU is often < 0.5 and used for a different purpose).
+    if not is_csp:
+        xmu = _f(sec.get("XMU"), None)
+        if xmu is not None and 0.5 < xmu < 1.0:
+            d.KINETIC_RATIO = xmu
+            matched += 1
+
+    if is_csp and matched >= 4:
+        d.source = "csp_extended"
+    elif is_csp and matched > 0:
+        d.source = "csp_mixed"
+    elif matched == 0:
         d.source = "defaults"
     elif matched < 4:
         d.source = "mixed"
