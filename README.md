@@ -2,7 +2,7 @@
   <img src="docs/AC-to-svj logo.png" alt="AC to SVJ" width="180">
 </p>
 
-# AC → SVJ Converter  ·  beta 0.9.1
+# AC → SVJ Converter  ·  beta 0.9.2
 
 > **Repository:** https://github.com/RFloEng/AC_to_SVJ
 
@@ -119,6 +119,83 @@ The SVJ `assets.meshes` block lists every LOD that was found:
   sits at Three.js Z = 0, matching the SVJ physics skeleton without any
   manual offset.
 
+### Skins / liveries (`KHR_materials_variants`)
+
+When the **Embed skins** checkbox is enabled, all skin folders found under
+`skins/` are embedded into each GLB via the
+[`KHR_materials_variants`](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_variants)
+glTF extension — one variant per livery plus a **Default** variant:
+
+```json
+"KHR_materials_variants": {
+  "variants": [
+    { "name": "Default" },
+    { "name": "red_bull" },
+    { "name": "marlboro_1988" }
+  ]
+}
+```
+
+Each skin overrides only the diffuse textures that differ from the base car;
+all other material properties (normals, roughness, alpha mode) are inherited.
+Skins are embedded as full-resolution PNG/JPEG — no resolution reduction.
+
+## Tyre model
+
+### Vanilla AC (Pacejka MF 5.2)
+
+`tyres.ini` sections containing `BY0`/`BX0`/`CY`/`CX` are processed with the
+standard AC brush-tyre forward model and fitted to Pacejka MF 5.2 / MF 6.2
+pure-slip coefficients via non-linear least squares.
+
+### CSP Extended Physics tyres
+
+Many cars — including all current Kunos DLC packs — use the
+**CSP Extended Physics** tyre format, which replaces Pacejka slope coefficients
+with a load-exponent / friction-falloff parameterisation.
+The converter detects this automatically and maps each CSP parameter:
+
+| `tyres.ini` key | Maps to | Notes |
+|---|---|---|
+| `DY0`, `DY1`, `LS_EXPY` | lateral friction model | direct |
+| `DX0`, `DX1`, `LS_EXPX` | longitudinal friction model | direct |
+| `FRICTION_LIMIT_ANGLE` | cornering stiffness `K_a` | `K_a = DY0·(1+FLEX·FZ0) / radians(FLA)` |
+| `FALLOFF_LEVEL` | kinetic/peak ratio `KINETIC_RATIO` | direct |
+| `FALLOFF_SPEED` | post-peak sharpness `sigma` | `sigma = 1.6 / sqrt(FS)` — higher = sharper |
+| `CX_MULT` | longitudinal stiffness `K_k` | scales default by factor |
+
+The fitted Pacejka blocks are identical in format to vanilla cars; the SVJ
+`_source_params` field records which CSP values were used.
+
+**Typical fit quality (CSP cars):**
+
+| Car | Axle | Lateral R² | Long R² |
+|---|---|---|---|
+| Lancia Delta GRA `87` (rally, FS=2) | Front | 0.9981 | 0.9977 |
+| Ferrari F2004 (F1 slick, FS=7) | Front | 0.9991 | 0.9882 |
+
+The source tag in the conversion log reads `csp_extended` when all key
+parameters were found, or `csp_mixed` when only some were present.
+
+### Extended tyre data in SVJ
+
+Beyond the Pacejka block, each tyre set in the SVJ carries additional
+structural and CSP fields wherever the source `tyres.ini` provides them:
+
+```json
+"vertical_stiffness_n_m": 313466,
+"vertical_damping_n_s_m": 593,
+"angular_inertia_kg_m2":  1.6251,
+"radius_angular_k":        0.0197,
+"relaxation_length_m":     0.08957,
+"speed_sensitivity":        0.003181,
+"rolling_resistance": { "k0": 9, "k1": 0.00065, "k2": 5154, "pressure_gain": 0.51 },
+"pressure_model": { "static_psi": 21, "ideal_psi": 30, "spring_gain": 7748, ... },
+"csp": { "falloff_level": 0.86, "falloff_speed": 2, "dy_ref": 1.67, "cx_mult": 1.08, ... }
+```
+
+The `csp` sub-object is omitted for vanilla AC cars that lack these fields.
+
 ## Coordinate system
 
 AC uses `(X-right, Y-up, Z-forward)`. SVJ / SAE J670 uses
@@ -148,7 +225,7 @@ Vertical shift: `chassis_z_offset = −rolling_radius`.
 |---|---|
 | `gui.py` | Standalone desktop GUI (tkinter) — main entry point |
 | `converter.py` | SVJ assembly engine — pure conversion logic |
-| `kn5_reader.py` | KN5 mesh reader → multi-LOD GLB exporter |
+| `kn5_reader.py` | KN5 mesh reader → multi-LOD GLB exporter with skin embedding |
 | `tire_lab.py` | AC tyre forward model + MF 5.2 / MF 6.2 fitter + plots |
 | `ac_parsers.py` | All `.ini` / `.lut` parsers |
 | `acd_reader.py` | Car-data loader (`data/` or `data.acd` detection) |
