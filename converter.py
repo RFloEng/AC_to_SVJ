@@ -273,7 +273,8 @@ def build_corner(corner_id: str, susp_axle: dict,
                  wheelbase: float, track_front: float, track_rear: float,
                  disc_inertia, disc_radius, max_torque, brake_bias,
                  tire_set_ref: str, rolling_radius: float = 0.306,
-                 cg_height: float = 0.42) -> dict:
+                 cg_height: float = 0.42,
+                 tire_sets: Optional[dict] = None) -> dict:
     """
     corner_id : "FL" | "FR" | "RL" | "RR"
     SVJ hardpoints are expressed in VEHICLE coordinates (J670 origin at the
@@ -684,8 +685,11 @@ def build_corner(corner_id: str, susp_axle: dict,
         "position":        wheel_center,   # corner location in vehicle frame
         "topology":        topology,
         "wheel": {
-            "rim_diameter": round(0.432, 4),
-            "rim_width":    0.20,
+            "rim_diameter": round(
+                (tire_sets or {}).get(tire_set_ref, {}).get("rim", {}).get("diameter", 0.432),
+                4),
+            "rim_width":    None,   # AC does not store rim width; tyre section width
+                                    # is in tires.sets.<ref>.rim.width_nominal
             "set_ref":      tire_set_ref,
         },
         "spring": spring,
@@ -1236,16 +1240,16 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         "suspension": {
             "FL": build_corner("FL", sa_f, wheelbase, track_f, track_r,
                                disc_in_f, disc_rad_f, brake_torq_f, brake_bias, ts_front_default,
-                               rolling_radius=rolling_radius_f, cg_height=-cg_z),
+                               rolling_radius=rolling_radius_f, cg_height=-cg_z, tire_sets=tire_sets),
             "FR": build_corner("FR", sa_f, wheelbase, track_f, track_r,
                                disc_in_f, disc_rad_f, brake_torq_f, brake_bias, ts_front_default,
-                               rolling_radius=rolling_radius_f, cg_height=-cg_z),
+                               rolling_radius=rolling_radius_f, cg_height=-cg_z, tire_sets=tire_sets),
             "RL": build_corner("RL", sa_r, wheelbase, track_f, track_r,
                                disc_in_r, disc_rad_r, brake_torq_r, brake_bias, ts_rear_default,
-                               rolling_radius=rolling_radius_r, cg_height=-cg_z),
+                               rolling_radius=rolling_radius_r, cg_height=-cg_z, tire_sets=tire_sets),
             "RR": build_corner("RR", sa_r, wheelbase, track_f, track_r,
                                disc_in_r, disc_rad_r, brake_torq_r, brake_bias, ts_rear_default,
-                               rolling_radius=rolling_radius_r, cg_height=-cg_z),
+                               rolling_radius=rolling_radius_r, cg_height=-cg_z, tire_sets=tire_sets),
         },
         "tires": {"sets": tire_sets},
         "brakes": {
