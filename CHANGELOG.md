@@ -29,6 +29,12 @@ All notable changes are documented here.
   skin and the colour it paints (bodywork first, rims/glass ranked after).
   `kn5_reader.py` CLI is now argparse-based (`--skin`, `--no-skins`,
   `--scan-nodes`, `--keep-variants`, `--list-skins`).
+- **Materials** — roughness now comes from the Blinn exponent and intensity
+  (`sqrt(2 / (ksSpecularEXP * ksSpecular + 2))`, clamped) instead of
+  `1 - ksSpecular`. `fresnelMaxLevel` maps to `KHR_materials_specular`
+  (`specularFactor`); materials with `sunSpecular` (car paint) get
+  `KHR_materials_clearcoat` from `sunSpecular` / `sunSpecularEXP`. Not done:
+  per-pixel roughness from the `txMaps` texture.
 - New `test_kn5_export.py` (synthetic KN5 encoder; no AC content), run first by
   `smoke_test.py`.
 

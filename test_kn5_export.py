@@ -311,6 +311,40 @@ def test_livery_tint_and_variants():
         assert "nope" in str(e)
 
 
+# --- item 3: materials --------------------------------------------------------
+
+def test_blinn_to_roughness():
+    assert abs(K.blinn_to_roughness(50, 1.0) - (2 / 52) ** 0.5) < 1e-9
+    assert K.blinn_to_roughness(50, 0.0) > K.blinn_to_roughness(50, 1.0)  # matte
+    assert K.blinn_to_roughness(1e9, 1.0) == 0.04                          # clamp
+    assert 0.04 <= K.blinn_to_roughness(1, 0.02) <= 1.0
+
+
+def test_material_mapping():
+    mats = [
+        ("PAINT", "ksPerPixel", {"ksSpecular": 1.0, "ksSpecularEXP": 50.0,
+                                 "fresnelMaxLevel": 0.45, "sunSpecular": 12.0,
+                                 "sunSpecularEXP": 1500.0}, {}),
+        ("MATTE", "ksPerPixel", {"ksSpecular": 0.0, "ksSpecularEXP": 50.0}, {}),
+        ("PLAIN", "ksPerPixel", {}, {}),
+    ]
+    root = N("ROOT", children=[N("A", "mesh", material=0),
+                               N("B", "mesh", material=1),
+                               N("C", "mesh", material=2)])
+    with tempfile.TemporaryDirectory() as t:
+        g, _ = _export(root, Path(t), materials=mats)
+    paint, matte, plain = (_mat(g, n) for n in ("PAINT", "MATTE", "PLAIN"))
+    assert abs(paint.pbrMetallicRoughness.roughnessFactor - (2 / 52) ** 0.5) < 1e-3
+    assert abs(matte.pbrMetallicRoughness.roughnessFactor - (2 / 3) ** 0.5) < 1e-3
+    assert paint.extensions["KHR_materials_specular"]["specularFactor"] == 0.45
+    cc = paint.extensions["KHR_materials_clearcoat"]
+    assert cc["clearcoatFactor"] == 0.6
+    assert abs(cc["clearcoatRoughnessFactor"] - (2 / 1502) ** 0.5) < 1e-3
+    # only paint gets a clearcoat; materials without the properties get no extension
+    assert not matte.extensions and not plain.extensions
+    assert {"KHR_materials_specular", "KHR_materials_clearcoat"} <= set(g.extensionsUsed)
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

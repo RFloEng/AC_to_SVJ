@@ -108,7 +108,7 @@ class Kn5Material:
     ks_ambient:  float = 0.6
     ks_diffuse:  float = 0.6
     ks_specular: float = 0.9
-    ks_specular_exp: float = 1.0
+    ks_specular_exp: float = 20.0   # Blinn exponent; 20 when the property is absent
     diffuse_mult: float = 1.0
     tx_diffuse:       Optional[str] = None
     tx_normal:        Optional[str] = None
@@ -117,6 +117,9 @@ class Kn5Material:
     use_detail:       bool  = False          # useDetail property (shader gate)
     detail_uv_mult:   float = 1.0            # detailUVMultiplier (typically 5–500)
     normal_uv_mult:   float = 1.0            # normalUVMultiplier
+    fresnel_max:      float = 0.0            # fresnelMaxLevel (cap on reflectance)
+    sun_specular:     float = 0.0            # sunSpecular: >0 marks car paint (clear lacquer lobe)
+    sun_specular_exp: float = 1500.0         # sunSpecularEXP
 
 
 @dataclass
@@ -189,6 +192,9 @@ def _read_materials(f: io.RawIOBase, version: int) -> list[Kn5Material]:
             elif prop_name == "useDetail":             mat.use_detail      = prop_value > 0.0
             elif prop_name == "detailUVMultiplier":    mat.detail_uv_mult  = prop_value
             elif prop_name == "normalUVMultiplier":    mat.normal_uv_mult  = prop_value
+            elif prop_name == "fresnelMaxLevel":      mat.fresnel_max     = prop_value
+            elif prop_name == "sunSpecular":          mat.sun_specular    = prop_value
+            elif prop_name == "sunSpecularEXP":       mat.sun_specular_exp = prop_value
 
         tex_count = _read_i32(f)
         for _ in range(tex_count):
@@ -706,6 +712,20 @@ def format_skin_report(report: dict) -> str:
     return "\n".join(lines)
 
 
+def blinn_to_roughness(exponent: float, intensity: float = 1.0) -> float:
+    """
+    AC's Blinn-Phong specular -> glTF roughness.
+
+    ``roughness = sqrt(2 / (exp + 2))`` is the standard Blinn-exponent to
+    GGX-alpha mapping.  The intensity (ksSpecular) scales the peak of the lobe,
+    which is what the exponent controls too, so it is folded in as
+    ``exp * intensity`` (floored at 0.02): intensity 1 changes nothing, intensity
+    0 makes the surface matte.  Clamped to [0.04, 1].
+    """
+    eff = max(exponent, 1.0) * max(intensity, 0.02)
+    return min(max((2.0 / (eff + 2.0)) ** 0.5, 0.04), 1.0)
+
+
 def kn5_to_glb(
     path: Path,
     output_path: Optional[Path] = None,
@@ -888,7 +908,8 @@ def kn5_to_glb(
         pbr = pygltflib.PbrMetallicRoughness(
             baseColorFactor=base_factor,
             metallicFactor=0.0,
-            roughnessFactor=max(0.0, 1.0 - kn5_mat.ks_specular),
+            roughnessFactor=round(blinn_to_roughness(
+                kn5_mat.ks_specular_exp, kn5_mat.ks_specular), 4),
         )
         if has_tex:
             pbr.baseColorTexture = pygltflib.TextureInfo(index=d_idx)
@@ -913,6 +934,26 @@ def kn5_to_glb(
                 texCoord=1,       # Three.js aoMap samples from UV1 (TEXCOORD_1)
                 strength=1.0,
             )
+        # fresnelMaxLevel is AC's cap on how much a surface may reflect (black
+        # trim and glass set ~0.2, paint ~0.6).  glTF's dielectric Fresnel has no
+        # such knob; KHR_materials_specular's specularFactor is exactly it.
+        if kn5_mat.fresnel_max > 0.0:
+            gmat.extensions = {"KHR_materials_specular": {
+                "specularFactor": round(min(kn5_mat.fresnel_max, 1.0), 4)}}
+            ext_used.add("KHR_materials_specular")
+        # Car paint: AC adds a second, tighter lobe (sunSpecular / sunSpecularEXP)
+        # for the clear lacquer over the base coat.  Only paint sets it, so its
+        # presence is the author's own marker for "this panel is painted".
+        if kn5_mat.sun_specular > 0.0:
+            sx = max(kn5_mat.sun_specular_exp, 1.0)
+            # sunSpecular is an intensity in AC units, not a coverage; /20 puts
+            # typical values (12..40) either side of the range the extension wants.
+            gmat.extensions = gmat.extensions or {}
+            gmat.extensions["KHR_materials_clearcoat"] = {
+                "clearcoatFactor": round(min(kn5_mat.sun_specular / 20.0, 1.0), 4),
+                "clearcoatRoughnessFactor": round(
+                    min(max((2.0 / (sx + 2.0)) ** 0.5, 0.02), 1.0), 4)}
+            ext_used.add("KHR_materials_clearcoat")
         # Map KN5 blend mode to glTF alphaMode:
         #   0   -> OPAQUE  (ignore alpha channel)
         #   256 -> MASK    (explicit alpha-test flag: belts, grilles, plates)
