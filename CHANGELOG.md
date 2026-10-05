@@ -35,6 +35,13 @@ All notable changes are documented here.
   (`specularFactor`); materials with `sunSpecular` (car paint) get
   `KHR_materials_clearcoat` from `sunSpecular` / `sunSpecularEXP`. Not done:
   per-pixel roughness from the `txMaps` texture.
+- **Robustness** — texture-table entries that differ only in case are folded
+  (largest blob wins) and material slots re-pointed, so exports no longer name
+  an image that exists only under another capitalisation. Car folder, `skins/`,
+  skin texture and LOD file lookups are case-insensitive (Linux/macOS).
+  Meshes that use vertex index 65535 (more than 65,535 vertices) are written
+  with `UNSIGNED_INT` indices — 65535 is the reserved restart value for
+  `UNSIGNED_SHORT` and made such files invalid.
 - New `test_kn5_export.py` (synthetic KN5 encoder; no AC content), run first by
   `smoke_test.py`.
 

@@ -210,6 +210,33 @@ def _read_materials(f: io.RawIOBase, version: int) -> list[Kn5Material]:
     return materials
 
 
+def _fold_texture_case(model: "Kn5Model") -> int:
+    """
+    Collapse texture-table entries that differ only in case and point every
+    material slot at the surviving spelling.  Returns how many were folded.
+
+    AC is a Windows game and matches texture names case-insensitively, so a car
+    can store ``INT_DEcals.dds`` and ask a material for ``INT_Decals.dds`` and
+    still render.  Written out literally that fails on case-sensitive systems
+    (Linux, macOS) and two entries would collide on a case-insensitive disk.
+    The surviving entry is the one with the largest blob (never the 1x1 stub).
+    """
+    keep: dict[str, int] = {}
+    for i, t in enumerate(model.textures):
+        k = t.name.lower()
+        if k not in keep or len(t.data) > len(model.textures[keep[k]].data):
+            keep[k] = i
+    folded = len(model.textures) - len(keep)
+    canon = {k: model.textures[i].name for k, i in keep.items()}
+    model.textures = [model.textures[i] for i in sorted(keep.values())]
+    for m in model.materials:
+        for attr in ("tx_diffuse", "tx_normal", "tx_detail", "tx_normal_detail"):
+            v = getattr(m, attr)
+            if v:
+                setattr(m, attr, canon.get(v.lower(), v))
+    return folded
+
+
 def _read_node(f: io.RawIOBase, geometry: bool) -> Kn5Node:
     """
     Read one node record (header + body). Children are NOT read here;
@@ -319,13 +346,15 @@ def parse_kn5(path: Path, geometry: bool = True) -> Kn5Model:
         materials = _read_materials(f, version)
         root      = _read_node(f, geometry)
 
-    return Kn5Model(
+    model = Kn5Model(
         name=path.stem,
         version=version,
         textures=textures,
         materials=materials,
         root=root,
     )
+    _fold_texture_case(model)
+    return model
 
 
 # --- Node-name scanner (lightweight) ------------------------------------------
@@ -535,13 +564,34 @@ def _is_uvmult_shader(shader: str) -> bool:
     return "uvmult" in shader.lower()
 
 
+def _ci_child(parent: Path, name: str) -> Optional[Path]:
+    """
+    ``parent / name`` matched case-insensitively (AC is a Windows game, so a car
+    folder may say ``Skins`` or ``Car.KN5`` and still load there; on Linux and
+    macOS a literal path would miss).  Returns the entry as it is actually
+    spelled on disk (an exact-case match wins if several differ only in case) --
+    on a case-insensitive filesystem ``exists()`` would echo *our* spelling back.
+    """
+    try:
+        want = name.lower()
+        found: Optional[Path] = None
+        for child in parent.iterdir():
+            if child.name == name:
+                return child
+            if found is None and child.name.lower() == want:
+                found = child
+        return found
+    except OSError:
+        return None
+
+
 def _find_skins(car_path: Path) -> list[tuple[str, Path]]:
     """
     Return [(skin_name, skin_folder), ...] sorted alphabetically from
     <car_path>/skins/.  Returns an empty list if no skins directory exists.
     """
-    skins_dir = car_path / "skins"
-    if not skins_dir.is_dir():
+    skins_dir = _ci_child(Path(car_path), "skins")
+    if skins_dir is None or not skins_dir.is_dir():
         return []
     return sorted(
         [(d.name, d) for d in skins_dir.iterdir() if d.is_dir()],
@@ -1099,10 +1149,17 @@ def kn5_to_glb(
                     acc_uv1 = _add_accessor(bv_uv1, pygltflib.FLOAT, "VEC2",
                                             len(uv_det))
 
-            idx16 = idx.astype("<u2").tobytes()
-            bv_idx = _add_buffer_view(idx16, target=pygltflib.ELEMENT_ARRAY_BUFFER)
-            acc_idx = _add_accessor(bv_idx, pygltflib.UNSIGNED_SHORT, "SCALAR",
-                                    len(idx))
+            # KN5 indices are uint16, but glTF reserves 65535 (primitive restart)
+            # for UNSIGNED_SHORT, so a mesh that uses index 65535 (i.e. has more
+            # than 65535 vertices) must be written as UNSIGNED_INT.
+            if len(pos) > 65535 or (len(idx) and int(idx.max()) >= 65535):
+                idx_bytes = idx.astype("<u4").tobytes()
+                idx_type = pygltflib.UNSIGNED_INT
+            else:
+                idx_bytes = idx.astype("<u2").tobytes()
+                idx_type = pygltflib.UNSIGNED_SHORT
+            bv_idx = _add_buffer_view(idx_bytes, target=pygltflib.ELEMENT_ARRAY_BUFFER)
+            acc_idx = _add_accessor(bv_idx, idx_type, "SCALAR", len(idx))
 
             mat_idx = (mat_gltf_idx[kn5_node.material_id]
                        if 0 <= kn5_node.material_id < len(mat_gltf_idx) else None)
@@ -1198,17 +1255,26 @@ def kn5_to_glb(
 _EFFECT_PREFIXES = ("3d", "smoke", "particle", "collider", "blur_", "tyre_")
 
 
+def _kn5_files(car_path: Path) -> list[Path]:
+    """All .kn5 files in a car folder (extension matched case-insensitively)."""
+    try:
+        return [p for p in Path(car_path).iterdir()
+                if p.is_file() and p.suffix.lower() == ".kn5"]
+    except OSError:
+        return []
+
+
 def find_car_kn5(car_path: Path) -> Optional[Path]:
     """
     Return the primary (LOD A) KN5 file for an AC car folder.
     Falls back to largest non-effect KN5 if the stem-named file is absent.
     """
     car_path = Path(car_path)
-    named = car_path / f"{car_path.name}.kn5"
-    if named.exists():
+    named = _ci_child(car_path, f"{car_path.name}.kn5")
+    if named is not None and named.is_file():
         return named
 
-    all_kn5 = list(car_path.glob("*.kn5"))
+    all_kn5 = _kn5_files(car_path)
     mesh_kn5 = [p for p in all_kn5
                 if not p.stem.lower().startswith(_EFFECT_PREFIXES)]
     candidates = mesh_kn5 if mesh_kn5 else all_kn5
@@ -1228,26 +1294,27 @@ def find_car_kn5_lods(car_path: Path) -> list[tuple[str, Path]]:
 
     LOD A is the main file (stem == folder name).
     LOD B-D are named  <stem>_LOD_B.kn5 / _LOD_C.kn5 / _LOD_D.kn5.
+    File names are matched case-insensitively.
     Returns an empty list when no KN5 is found at all.
     """
     car_path = Path(car_path)
     stem = car_path.name          # e.g. "bo_caterham_165_lhd"
     result: list[tuple[str, Path]] = []
 
-    lod_a = car_path / f"{stem}.kn5"
-    if lod_a.exists():
+    lod_a = _ci_child(car_path, f"{stem}.kn5")
+    if lod_a is not None and lod_a.is_file():
         result.append(("A", lod_a))
     else:
         # Fallback: largest non-effect KN5 that doesn't look like a LOD file
-        all_kn5 = [p for p in car_path.glob("*.kn5")
+        all_kn5 = [p for p in _kn5_files(car_path)
                    if not p.stem.lower().startswith(_EFFECT_PREFIXES)
                    and "_lod_" not in p.stem.lower()]
         if all_kn5:
             result.append(("A", max(all_kn5, key=lambda p: p.stat().st_size)))
 
     for label in ("B", "C", "D"):
-        lod_path = car_path / f"{stem}_LOD_{label}.kn5"
-        if lod_path.exists():
+        lod_path = _ci_child(car_path, f"{stem}_LOD_{label}.kn5")
+        if lod_path is not None and lod_path.is_file():
             result.append((label, lod_path))
 
     return result

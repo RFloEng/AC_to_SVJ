@@ -345,6 +345,72 @@ def test_material_mapping():
     assert {"KHR_materials_specular", "KHR_materials_clearcoat"} <= set(g.extensionsUsed)
 
 
+# --- item 4: robustness -------------------------------------------------------
+
+def test_texture_case_folding():
+    big, small = noisy_png((64, 64)), png_bytes((8, 8))
+    mats = [("M", "ksPerPixel", {}, {"txDiffuse": "FOO.png"})]
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "x.kn5"
+        p.write_bytes(make_kn5(N("ROOT", children=[N("A", "mesh")]), materials=mats,
+                               textures=[("Foo.png", big), ("foo.PNG", small)]))
+        model = K.parse_kn5(p)
+        glb = K.kn5_to_glb(p)
+    assert [tx.name for tx in model.textures] == ["Foo.png"]      # larger blob survives
+    assert model.materials[0].tx_diffuse == "Foo.png"             # slot re-pointed
+    import pygltflib
+    g = pygltflib.GLTF2.load_from_bytes(glb)
+    assert len(g.images) == 1 and _mat(g, "M").pbrMetallicRoughness.baseColorTexture
+
+
+def test_skin_lookup_case_insensitive():
+    skins = {"red": {"METAL_DETAIL.PNG": flat_png((126, 1, 0))}}
+    with tempfile.TemporaryDirectory() as t:
+        root = Path(t)
+        kn5_path = _make_car(root, skins)
+        rep = K.list_skins(kn5_path)
+        assert K._ci_child(root, "SKINS") == root / "skins"
+        assert K._ci_child(root, "nope") is None
+    red = rep["skins"][0]["colours"]
+    assert red and red[0]["source"] == "skin" and red[0]["rgb"] == [126, 1, 0]
+
+
+def test_car_folder_lookup_case_insensitive():
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "MyCar"
+        (car / "SKINS" / "red").mkdir(parents=True)
+        (car / "mycar.KN5").write_bytes(make_kn5(N("ROOT"), materials=[]))
+        (car / "mycar_lod_b.KN5").write_bytes(make_kn5(N("ROOT"), materials=[]))
+        assert K.find_car_kn5(car).name == "mycar.KN5"
+        assert [lbl for lbl, _ in K.find_car_kn5_lods(car)] == ["A", "B"]
+        assert [n for n, _ in K._find_skins(car)] == ["red"]
+
+
+def _comp_types(g):
+    return [g.accessors[pr.indices].componentType
+            for m in g.meshes for pr in m.primitives]
+
+
+def test_large_mesh_indices():
+    import pygltflib
+    n = 65540
+    verts = [((float(i % 100), 0.0, float(i // 100)), (0, 1, 0), (0.0, 0.0), (1, 0, 0))
+             for i in range(n)]
+    big = N("BIG", "mesh", verts=verts, tris=[(0, 1, 65535)])
+    small = N("SMALL", "mesh")
+    with tempfile.TemporaryDirectory() as t:
+        g, _ = _export(N("ROOT", children=[big, small]), Path(t))
+    types = dict(zip([m.name for m in g.meshes], _comp_types(g)))
+    assert types["BIG"] == pygltflib.UNSIGNED_INT       # 65535 is the restart value
+    assert types["SMALL"] == pygltflib.UNSIGNED_SHORT
+    blob = g.binary_blob()
+    acc = next(a for m, a in zip(g.meshes, (g.accessors[pr.indices] for mm in g.meshes
+                                            for pr in mm.primitives)) if m.name == "BIG")
+    bv = g.bufferViews[acc.bufferView]
+    got = np.frombuffer(blob[bv.byteOffset:bv.byteOffset + 12], dtype="<u4")
+    assert list(got) == [0, 1, 65535]
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
