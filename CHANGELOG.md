@@ -16,6 +16,19 @@ All notable changes are documented here.
   `kn5_all_lods_to_glbs` and `--keep-variants` on the `kn5_reader.py` CLI.
   Ideas adapted from semiloker/assetto-corsa-gltf (MIT) — see
   `THIRD_PARTY_NOTICES.md`.
+- **Livery paint** — the GLB now opens in the colour the game would show. A
+  flat `txDetail` map (with `useDetail` set) is the paint on many Kunos cars:
+  AC multiplies it into a shared grey diffuse as `diffuse * detail * 2`, so it
+  is baked into `baseColorFactor` (doubled in gamma space, clamped, then
+  linearised). Base materials resolve against AC's default skin (the first;
+  `default_skin="first"|<name>|"none"`), and every skin is still a
+  `KHR_materials_variants` entry, now including skins that differ only by
+  detail colour. A flat detail map is no longer also exported as AO; patterned
+  detail maps keep the `TEXCOORD_1` AO path.
+  `list_skins(kn5)` / `python kn5_reader.py car.kn5 --list-skins` print each
+  skin and the colour it paints (bodywork first, rims/glass ranked after).
+  `kn5_reader.py` CLI is now argparse-based (`--skin`, `--no-skins`,
+  `--scan-nodes`, `--keep-variants`, `--list-skins`).
 - New `test_kn5_export.py` (synthetic KN5 encoder; no AC content), run first by
   `smoke_test.py`.
 

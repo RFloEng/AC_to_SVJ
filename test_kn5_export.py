@@ -162,6 +162,155 @@ def test_keep_variants():
         assert n in names, n
 
 
+# --- item 2: livery paint -----------------------------------------------------
+
+def flat_png(rgb, size=(128, 128)) -> bytes:
+    """One flat colour. Big enough that flat_colour() does not treat it as a stub."""
+    from PIL import Image
+    b = io.BytesIO()
+    Image.new("RGB", size, rgb).save(b, "PNG")
+    blob = b.getvalue()
+    assert len(blob) >= 128, len(blob)
+    return blob
+
+
+def noisy_png(size=(64, 64)) -> bytes:
+    """A varying (pattern-like) texture."""
+    from PIL import Image
+    rng = np.random.RandomState(7)
+    arr = rng.randint(0, 256, size=(size[1], size[0], 3), dtype=np.uint8)
+    b = io.BytesIO()
+    Image.fromarray(arr, "RGB").save(b, "PNG")
+    return b.getvalue()
+
+
+def _lin(v8: int) -> float:
+    """Independent re-statement of "double in gamma space, clamp, linearise"."""
+    c = min(2.0 * v8 / 255.0, 1.0)
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _make_car(root: Path, skin_files=None) -> Path:
+    """A tiny car folder: car.kn5 + skins/<name>/<file>.  The body is painted by
+    a flat txDetail over a shared template diffuse; the rim has MORE triangles
+    than the body (to prove ordering is not by size alone); TRIM has a varying
+    detail map."""
+    body = N("BODY", "mesh", material=0)
+    rim = N("RIM_LF", "mesh", material=1, tris=[(0, 1, 2), (0, 2, 1)])
+    trim = N("TRIM", "mesh", material=2)
+    tree = N("ROOT", children=[body, rim, trim])
+    mats = [
+        ("EXT_CARPAINT", "ksPerPixelMultiMap", {"useDetail": 1.0},
+         {"txDiffuse": "template.png", "txDetail": "metal_detail.png"}),
+        ("RIM", "ksPerPixelMultiMap", {"useDetail": 1.0},
+         {"txDiffuse": "template.png", "txDetail": "rim_detail.png"}),
+        ("TRIM", "ksPerPixelMultiMap",
+         {"useDetail": 1.0, "detailUVMultiplier": 10.0},
+         {"txDiffuse": "template.png", "txDetail": "grain.png"}),
+    ]
+    tex = [("template.png", noisy_png()),
+           ("metal_detail.png", flat_png((128, 128, 128))),
+           ("rim_detail.png", flat_png((120, 120, 120))),
+           ("grain.png", noisy_png())]
+    kn5_path = root / "car.kn5"
+    kn5_path.write_bytes(make_kn5(tree, materials=mats, textures=tex))
+    for skin, files in (skin_files or {}).items():
+        d = root / "skins" / skin
+        d.mkdir(parents=True)
+        for fname, data in files.items():
+            (d / fname).write_bytes(data)
+    return kn5_path
+
+
+_SKINS = {
+    "blue": {"metal_detail.png": flat_png((30, 33, 36)),
+             "rim_detail.png": flat_png((200, 200, 200))},
+    "red":  {"metal_detail.png": flat_png((126, 1, 0)),
+             "rim_detail.png": flat_png((200, 200, 200))},
+}
+
+
+def _mat(g, name):
+    return next(m for m in g.materials if m.name == name)
+
+
+def test_flat_colour_and_tint():
+    fc = K.flat_colour(flat_png((126, 1, 0)))
+    assert fc is not None and fc[0] == [126, 1, 0]
+    assert abs(fc[1][0] - _lin(126)) < 1e-4 and abs(fc[1][2]) < 1e-9
+    assert K.flat_colour(noisy_png()) is None          # a pattern is not a colour
+    assert K.flat_colour(b"tiny") is None              # stub
+    # (148,148,148) doubles past white: the SWATCH keeps the real colour
+    fc = K.flat_colour(flat_png((148, 148, 148)))
+    assert fc[0] == [148, 148, 148] and fc[1] == [1.0, 1.0, 1.0]
+
+
+def test_paint_rank_prefers_bodywork():
+    assert K.paint_rank("EXT_Carpaint") < K.paint_rank("RIM")
+    assert K.paint_rank("Body")[0] == 0
+    # an interior copy of the paint sorts after the exterior one in its band
+    assert K.paint_rank("EXT_Carpaint") < K.paint_rank("INT_OCC_Carpaint")
+    assert K.paint_rank("whatever")[0] == 1
+    assert K.paint_rank("RIM_front")[0] == 2
+
+
+def test_list_skins():
+    with tempfile.TemporaryDirectory() as t:
+        kn5_path = _make_car(Path(t), _SKINS)
+        rep = K.list_skins(kn5_path)
+    assert [s["name"] for s in rep["skins"]] == ["blue", "red", "none"]
+    red = rep["skins"][1]["colours"]
+    # bodywork first although the rim has more triangles
+    assert red[0]["material"] == "EXT_CARPAINT" and red[0]["rgb"] == [126, 1, 0]
+    assert red[0]["source"] == "skin" and red[0]["tris"] == 1
+    assert red[1]["material"] == "RIM" and red[1]["tris"] == 2
+    # the varying TRIM detail is a pattern, not a colour: not listed
+    assert all(c["material"] != "TRIM" for c in red)
+    none = rep["skins"][2]["colours"]
+    assert none[0]["source"] == "kn5" and none[0]["rgb"] == [128, 128, 128]
+    text = K.format_skin_report(rep)
+    assert "skin	red	EXT_CARPAINT	7E0100	1	skin" in text
+
+
+def test_livery_tint_and_variants():
+    with tempfile.TemporaryDirectory() as t:
+        root = Path(t)
+        kn5_path = _make_car(root, _SKINS)
+        import pygltflib
+        glb = K.kn5_to_glb(kn5_path, skins=K._find_skins(root))
+        g = pygltflib.GLTF2.load_from_bytes(glb)
+        glb_none = K.kn5_to_glb(kn5_path, skins=K._find_skins(root),
+                                default_skin="none")
+        g_none = pygltflib.GLTF2.load_from_bytes(glb_none)
+    # base materials follow AC's default = first skin = "blue"
+    base = _mat(g, "EXT_CARPAINT").pbrMetallicRoughness.baseColorFactor
+    assert all(abs(a - b) < 1e-4 for a, b in zip(base, [_lin(30), _lin(33), _lin(36), 1.0]))
+    # a flat detail is the paint, so it must NOT also be exported as AO
+    assert _mat(g, "EXT_CARPAINT").occlusionTexture is None
+    # a varying detail keeps the AO path and is not tinted
+    trim = _mat(g, "TRIM")
+    assert trim.occlusionTexture is not None
+    assert list(trim.pbrMetallicRoughness.baseColorFactor) == [1.0, 1.0, 1.0, 1.0]
+    # variants: Default + each skin; red differs from base, blue does not
+    names = [v["name"] for v in g.extensions["KHR_materials_variants"]["variants"]]
+    assert names == ["Default", "blue", "red"]
+    red = _mat(g, "EXT_CARPAINT_red").pbrMetallicRoughness.baseColorFactor
+    assert abs(red[0] - _lin(126)) < 1e-4 and red[1] < 0.01
+    assert not any(m.name == "EXT_CARPAINT_blue" for m in g.materials)
+    assert "KHR_materials_variants" in g.extensionsUsed
+    # default_skin="none": base uses the KN5's embedded grey detail -> factor 1
+    b0 = _mat(g_none, "EXT_CARPAINT").pbrMetallicRoughness.baseColorFactor
+    assert list(b0) == [1.0, 1.0, 1.0, 1.0]
+    # unknown default skin is an error, not a silent fallback
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            kp = _make_car(Path(t), _SKINS)
+            K.kn5_to_glb(kp, skins=K._find_skins(Path(t)), default_skin="nope")
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "nope" in str(e)
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

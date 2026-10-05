@@ -62,6 +62,7 @@ import io
 import math
 import re
 import struct
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -133,6 +134,7 @@ class Kn5Node:
     tangents:    Optional[np.ndarray] = None    # (N,4) float32  XYZ + W handedness
     indices:     Optional[np.ndarray] = None    # (M,)  uint16
     material_id: int = -1
+    index_count: int = 0                        # set even when geometry=False
 
 
 @dataclass
@@ -184,7 +186,7 @@ def _read_materials(f: io.RawIOBase, version: int) -> list[Kn5Material]:
             elif prop_name == "ksSpecular":            mat.ks_specular     = prop_value
             elif prop_name == "ksSpecularEXP":         mat.ks_specular_exp = prop_value
             elif prop_name == "diffuseMult":           mat.diffuse_mult    = prop_value
-            elif prop_name == "useDetail":             mat.use_detail      = prop_value > 0.5
+            elif prop_name == "useDetail":             mat.use_detail      = prop_value > 0.0
             elif prop_name == "detailUVMultiplier":    mat.detail_uv_mult  = prop_value
             elif prop_name == "normalUVMultiplier":    mat.normal_uv_mult  = prop_value
 
@@ -235,6 +237,7 @@ def _read_node(f: io.RawIOBase, geometry: bool) -> Kn5Node:
         else:
             f.seek(vert_count * 44, 1)
         idx_count   = _read_i32(f)
+        node.index_count = idx_count
         if geometry:
             node.indices = np.frombuffer(f.read(idx_count * 2), dtype="<u2").copy()
         else:
@@ -263,6 +266,7 @@ def _read_node(f: io.RawIOBase, geometry: bool) -> Kn5Node:
         else:
             f.seek(vert_count * 76, 1)
         idx_count   = _read_i32(f)
+        node.index_count = idx_count
         if geometry:
             node.indices = np.frombuffer(f.read(idx_count * 2), dtype="<u2").copy()
         else:
@@ -539,12 +543,176 @@ def _find_skins(car_path: Path) -> list[tuple[str, Path]]:
     )
 
 
+# --- Livery paint -------------------------------------------------------------
+#
+# A livery in Assetto Corsa lives *outside* the model.  The KN5 carries whichever
+# skin was loaded at export time (often a grey template) and the game swaps in
+# same-named files from skins/<name>/ at load.  On many Kunos road cars the
+# body diffuse is a shared grey panel/AO sheet, and the paint is a *flat colour*
+# in the material's txDetail map (useDetail > 0), which AC's shader multiplies
+# into the diffuse as ``diffuse * detail * 2``.  So the "paint" of a skin is one
+# texel of its detail map.  (Approach first described in semiloker's
+# assetto-corsa-gltf; reimplemented here.)
+
+# Names a car is painted *beside*: a rim is a painted material on most Kunos
+# cars and often has more triangles than the bodywork, so size alone picks the
+# wheels.  Name hints first, triangle count inside a band.
+_PAINT_HINT = re.compile(r"car[_ ]?paint|(?:^|[^a-z])body(?:[^a-z]|$)|chassis", re.I)
+_NOT_BODY = re.compile(
+    r"rim|wheel|tyre|tire|brake|calip|disc|glass|window|light|lamp|badge|logo|"
+    r"plate|mirror|seat|interior|cockpit|dash|carpet|leather|belt|driver|steer|"
+    r"engine|exhaust|grill|plastic|chrome|rubber|shadow", re.I)
+
+
+def paint_rank(name: str) -> tuple[int, int]:
+    """Sort key band for a painted material: lower = more likely the bodywork."""
+    low = name.lower()
+    inside = 1 if low.startswith("int") else 0     # interior copy of the paint
+    if _NOT_BODY.search(low):
+        return (2, inside)
+    if _PAINT_HINT.search(low):
+        return (0, inside)
+    return (1, inside)
+
+
+def flat_colour(blob: Optional[bytes]) -> Optional[tuple[list[int], list[float]]]:
+    """
+    ``(srgb_bytes, linear_factor)`` if the texture is ONE colour, else None.
+
+    srgb_bytes is the texture's own 8-bit colour (what a swatch should show);
+    linear_factor is the glTF baseColorFactor equivalent of AC's
+    ``diffuse * detail * 2``: doubled in gamma space, clamped, *then*
+    linearised (the order matters).  Extrema are taken over the full image so a
+    grainy/patterned map is never mistaken for a flat tint.
+    """
+    if not blob or len(blob) < 128:
+        return None
+    try:
+        from PIL import Image
+        Image.MAX_IMAGE_PIXELS = None
+        im = Image.open(io.BytesIO(blob))
+        im.load()
+        im = im.convert("RGB")
+    except Exception:                                    # noqa: BLE001
+        return None
+    ext = im.getextrema()
+    if max(hi - lo for lo, hi in ext) > 6:               # varies: a pattern
+        return None
+    srgb: list[int] = []
+    lin: list[float] = []
+    for lo, hi in ext:
+        mid = (lo + hi) * 0.5 / 255.0
+        srgb.append(int(round(mid * 255.0)))
+        c = min(2.0 * mid, 1.0)
+        lin.append(round(c / 12.92 if c <= 0.04045
+                         else ((c + 0.055) / 1.055) ** 2.4, 5))
+    return srgb, lin
+
+
+def detail_tint(blob: Optional[bytes]) -> Optional[list[float]]:
+    """Linear baseColorFactor RGB for a flat txDetail map, else None."""
+    fc = flat_colour(blob)
+    return fc[1] if fc else None
+
+
+def paint_slots(materials: list["Kn5Material"],
+                tris: dict[int, int]) -> list[tuple[int, str, str]]:
+    """
+    ``(index, name, txDetail)`` for every material that has an *active* paint
+    slot, bodywork first.  useDetail is AC's own switch: without it the shader
+    never samples txDetail, so it is not a colour of anything.
+    """
+    out = [(i, m.name, m.tx_detail) for i, m in enumerate(materials)
+           if m.tx_detail and m.use_detail]
+    out.sort(key=lambda t: paint_rank(t[1]) + (-tris.get(t[0], 0),))
+    return out
+
+
+def _skin_dirs(kn5_path: Path) -> list[tuple[str, Path]]:
+    return _find_skins(Path(kn5_path).parent)
+
+
+def list_skins(kn5_path: Path) -> dict:
+    """
+    Every livery a car ships and the colour each one paints it.
+
+    Returns ``{"car", "skins": [{"name", "colours": [{"material", "texture",
+    "rgb", "tris", "source"}]}]}``.  Within a skin, colours are ordered
+    bodywork-first, so ``colours[0]`` is "the car's colour".  A final entry
+    named ``none`` lists what the KN5's own embedded textures paint.  A skin
+    whose paint is a pattern rather than a flat colour has an empty list.
+    Geometry is not loaded (triangle counts come from index counts only).
+    """
+    kn5_path = Path(kn5_path)
+    out: dict = {"car": kn5_path.stem, "skins": []}
+    try:
+        model = parse_kn5(kn5_path, geometry=False)
+    except ValueError as e:
+        out["error"] = str(e)
+        return out
+
+    tris: dict[int, int] = {}
+
+    def _walk(n: Kn5Node) -> None:
+        if n.node_type in (2, 3) and n.material_id >= 0:
+            tris[n.material_id] = tris.get(n.material_id, 0) + n.index_count // 3
+        for c in n.children:
+            _walk(c)
+    if model.root:
+        _walk(model.root)
+
+    slots = paint_slots(model.materials, tris)
+    own = {t.name: t.data for t in model.textures}
+    cache: dict = {}
+
+    def colour(key, blob):
+        if key not in cache:
+            cache[key] = flat_colour(blob)
+        return cache[key]
+
+    entries: list[tuple[str, Optional[Path]]] = list(_skin_dirs(kn5_path))
+    entries.append(("none", None))
+    for sname, sdir in entries:
+        entry = {"name": sname, "colours": []}
+        for mi, mname, dds in slots:
+            raw = _load_skin_tex(sdir, dds) if sdir is not None else None
+            if raw is not None:
+                c, src = colour((sname, dds), raw), "skin"
+            else:
+                c, src = colour(("kn5", dds), own.get(dds)), "kn5"
+            if c is None:
+                continue
+            entry["colours"].append({"material": mname, "texture": dds,
+                                     "rgb": c[0], "tris": tris.get(mi, 0),
+                                     "source": src})
+        out["skins"].append(entry)
+    return out
+
+
+def format_skin_report(report: dict) -> str:
+    """list_skins() as tab-separated lines: skin, material, RRGGBB, tris, source."""
+    lines = [f"# car\t{report['car']}"]
+    if report.get("error"):
+        lines.append(f"# error\t{report['error']}")
+        return "\n".join(lines)
+    for sk in report["skins"]:
+        if not sk["colours"]:
+            lines.append(f"skin\t{sk['name']}\t-\t-\t0\t-")
+            continue
+        for c in sk["colours"]:
+            r, g, b = c["rgb"]
+            lines.append(f"skin\t{sk['name']}\t{c['material']}\t"
+                         f"{r:02X}{g:02X}{b:02X}\t{c['tris']}\t{c['source']}")
+    return "\n".join(lines)
+
+
 def kn5_to_glb(
     path: Path,
     output_path: Optional[Path] = None,
     embed_textures: bool = True,
     skins: Optional[list[tuple[str, Path]]] = None,
     keep_variants: bool = False,
+    default_skin: Optional[str] = "first",
 ) -> bytes:
     """
     Convert a KN5 file to a self-contained GLB (binary glTF).
@@ -560,6 +728,9 @@ def kn5_to_glb(
     skins          : Optional list of (skin_name, skin_folder) tuples from
                      _find_skins().  When provided, each skin becomes a named
                      variant via the KHR_materials_variants extension.
+    default_skin   : Skin the base materials are resolved against: "first"
+                     (default; what AC itself loads), a skin name, or "none"
+                     to keep the KN5's embedded (template) textures.
 
     Returns
     -------
@@ -654,15 +825,63 @@ def kn5_to_glb(
             if tidx >= 0:
                 tex_idx[kn5_tex.name] = tidx
 
-    # -- Build materials -------------------------------------------------------
-    mat_gltf_idx: list[int] = []
-    for kn5_mat in model.materials:
-        has_tex = embed_textures and kn5_mat.tx_diffuse and kn5_mat.tx_diffuse in tex_idx
+    ext_used: set[str] = set()
+
+    # -- Livery / paint resolution ---------------------------------------------
+    # The game replaces KN5 textures by name with files from skins/<name>/.  The
+    # base materials are resolved against AC's own default skin (the first one)
+    # so the GLB opens in a real livery rather than the grey export template;
+    # every skin is then a KHR_materials_variants entry.
+    kn5_blobs = {t.name: t.data for t in model.textures}
+    skin_diffuse: dict[tuple, int] = {}              # (skin, tex) -> gltf tex idx
+    skin_tint: dict[tuple, Optional[list]] = {}      # (skin, detail tex) -> tint
+
+    base_skin: Optional[tuple[str, Path]] = None
+    if embed_textures and skins and default_skin != "none":
+        if default_skin in (None, "first"):
+            base_skin = skins[0]
+        else:
+            base_skin = next((s for s in skins
+                              if s[0].lower() == default_skin.lower()), None)
+            if base_skin is None:
+                raise ValueError(
+                    f"No skin {default_skin!r}; have: "
+                    + ", ".join(n for n, _ in skins))
+
+    def _resolve_paint(kn5_mat: Kn5Material, skin):
+        """-> (diffuse gltf tex idx | None, alpha key, flat-detail tint | None)"""
+        tx = kn5_mat.tx_diffuse
+        d_idx = tex_idx.get(tx) if tx else None
+        d_key = tx
+        sname, sdir = skin if skin else (None, None)
+        if sdir is not None and tx:
+            k = (sname, tx)
+            if k not in skin_diffuse:
+                raw = _load_skin_tex(sdir, tx)
+                skin_diffuse[k] = (_embed_raw(raw, f"{sname}/{tx}")
+                                   if raw is not None else -1)
+            if skin_diffuse[k] >= 0:
+                d_idx, d_key = skin_diffuse[k], f"{sname}/{tx}"
+        tint = None
+        td = kn5_mat.tx_detail
+        if td and kn5_mat.use_detail:
+            k = (sname, td)
+            if k not in skin_tint:
+                raw = _load_skin_tex(sdir, td) if sdir is not None else None
+                skin_tint[k] = detail_tint(raw if raw is not None
+                                           else kn5_blobs.get(td))
+            tint = skin_tint[k]
+        return d_idx, d_key, tint
+
+    def _make_gmat(kn5_mat: Kn5Material, name: str, d_idx, d_key, tint):
+        has_tex = d_idx is not None
         if has_tex:
-            base_factor = [1.0, 1.0, 1.0, 1.0]
+            # A flat txDetail is the paint colour: AC multiplies it into the
+            # (grey) diffuse, which is exactly what baseColorFactor does.
+            base_factor = (list(tint) + [1.0]) if tint else [1.0, 1.0, 1.0, 1.0]
         else:
             # diffuseMult is a brightness factor for normal shaders, but a UV
-            # tiling factor for _UVMult shaders — never apply it as brightness there.
+            # tiling factor for _UVMult shaders - never apply it as brightness there.
             bright_mult = 1.0 if _is_uvmult_shader(kn5_mat.shader) else kn5_mat.diffuse_mult
             v = max(0.05, kn5_mat.ks_diffuse * bright_mult)
             base_factor = [v, v, v, 1.0]
@@ -672,21 +891,20 @@ def kn5_to_glb(
             roughnessFactor=max(0.0, 1.0 - kn5_mat.ks_specular),
         )
         if has_tex:
-            pbr.baseColorTexture = pygltflib.TextureInfo(
-                index=tex_idx[kn5_mat.tx_diffuse]
-            )
-        gmat = pygltflib.Material(name=kn5_mat.name, pbrMetallicRoughness=pbr)
+            pbr.baseColorTexture = pygltflib.TextureInfo(index=d_idx)
+        gmat = pygltflib.Material(name=name, pbrMetallicRoughness=pbr)
         if embed_textures and kn5_mat.tx_normal and kn5_mat.tx_normal in tex_idx:
             gmat.normalTexture = pygltflib.NormalMaterialTexture(
                 index=tex_idx[kn5_mat.tx_normal]
             )
-        # Detail texture — exported as occlusionTexture referencing TEXCOORD_1.
+        # Detail texture - exported as occlusionTexture referencing TEXCOORD_1.
         # Three.js aoMap requires UV1 (vUv2 in the shader); texCoord=0 is silently
         # ignored.  The mesh-building step pre-bakes scaled UVs into TEXCOORD_1
-        # (uv × detailUVMultiplier), so no KHR_texture_transform extension is needed.
-        # Gate: tx_detail must be present and either useDetail is set or the
-        # multiplier is meaningfully above 1.0 (i.e. it was actually specified).
+        # (uv x detailUVMultiplier), so no KHR_texture_transform extension is needed.
+        # Skipped when the detail map was a flat colour: that is the paint tint
+        # above, and as an AO map it would only darken the surface uniformly.
         if (embed_textures
+                and tint is None
                 and kn5_mat.tx_detail
                 and kn5_mat.tx_detail in tex_idx
                 and (kn5_mat.use_detail or kn5_mat.detail_uv_mult > 1.0)):
@@ -702,21 +920,28 @@ def kn5_to_glb(
         #          Some car mods use blend=1 for both true semi-transparent
         #          surfaces (glass, lens) and hard-edge cutouts (grille, decals).
         #          We resolve the ambiguity by inspecting the diffuse texture:
-        #          if alpha is bimodal (≥85 % of pixels near 0 or near 255)
-        #          the surface is a cutout → MASK; otherwise → BLEND.
+        #          if alpha is bimodal (>=85 % of pixels near 0 or near 255)
+        #          the surface is a cutout -> MASK; otherwise -> BLEND.
         if kn5_mat.blend_mode == 256:
             gmat.alphaMode = "MASK"
             gmat.alphaCutoff = 0.5
         elif kn5_mat.blend_mode == 1:
-            tx = kn5_mat.tx_diffuse
-            if tx and tex_bimodal.get(tx, False):
+            if d_key and tex_bimodal.get(d_key, False):
                 gmat.alphaMode = "MASK"
                 gmat.alphaCutoff = 0.5
             else:
                 gmat.alphaMode = "BLEND"
         else:
             gmat.alphaMode = "OPAQUE"
-        gltf.materials.append(gmat)
+        return gmat
+
+    # -- Build materials -------------------------------------------------------
+    mat_gltf_idx: list[int] = []
+    base_paint: list[tuple] = []
+    for kn5_mat in model.materials:
+        res = _resolve_paint(kn5_mat, base_skin)
+        base_paint.append(res)
+        gltf.materials.append(_make_gmat(kn5_mat, kn5_mat.name, *res))
         mat_gltf_idx.append(len(gltf.materials) - 1)
 
     # Runtime variants (blur / damage / in-file low-res twins) are dropped
@@ -726,7 +951,8 @@ def kn5_to_glb(
                         else lowres_twins(_walk_names(model.root)))
 
     # -- Build skin variants (KHR_materials_variants) --------------------------
-    # variant_names[0] = "Default" (base KN5 textures), [1..] = skin names.
+    # variant_names[0] = "Default" (base materials: the default skin when one is
+    # applied, else the KN5's embedded textures), [1..] = skin names.
     # mat_variants[kn5_mat_id][variant_idx] = glTF material index.
     variant_names: list[str] = []
     mat_variants: list[list[int]] = [[idx] for idx in mat_gltf_idx]
@@ -734,47 +960,18 @@ def kn5_to_glb(
     if embed_textures and skins:
         variant_names = ["Default"] + [sn for sn, _ in skins]
 
-        for skin_name, skin_dir in skins:
-            # Find which base textures this skin overrides and embed them.
-            skin_tex_map: dict[str, int] = {}   # base tex_name -> skin glTF tex idx
-            for kn5_mat in model.materials:
-                tx = kn5_mat.tx_diffuse
-                if tx and tx not in skin_tex_map:
-                    raw = _load_skin_tex(skin_dir, tx)
-                    if raw is not None:
-                        tidx = _embed_raw(raw, f"{skin_name}/{tx}")
-                        if tidx >= 0:
-                            skin_tex_map[tx] = tidx
-
-            # For each KN5 material: create a variant material or reuse base.
+        for skin in skins:
             for kn5_mid, kn5_mat in enumerate(model.materials):
-                base_idx  = mat_gltf_idx[kn5_mid]
-                base_gmat = gltf.materials[base_idx]
-                tx = kn5_mat.tx_diffuse
-                if tx and tx in skin_tex_map:
-                    base_pbr = base_gmat.pbrMetallicRoughness
-                    new_pbr  = pygltflib.PbrMetallicRoughness(
-                        baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-                        metallicFactor=base_pbr.metallicFactor,
-                        roughnessFactor=base_pbr.roughnessFactor,
-                    )
-                    new_pbr.baseColorTexture = pygltflib.TextureInfo(
-                        index=skin_tex_map[tx]
-                    )
-                    new_gmat = pygltflib.Material(
-                        name=f"{kn5_mat.name}_{skin_name}",
-                        pbrMetallicRoughness=new_pbr,
-                        alphaMode=base_gmat.alphaMode,
-                        alphaCutoff=base_gmat.alphaCutoff,
-                    )
-                    if base_gmat.normalTexture:
-                        new_gmat.normalTexture = base_gmat.normalTexture
-                    gltf.materials.append(new_gmat)
-                    mat_variants[kn5_mid].append(len(gltf.materials) - 1)
+                res = _resolve_paint(kn5_mat, skin)
+                base = base_paint[kn5_mid]
+                if (res[0], res[2]) == (base[0], base[2]):
+                    mat_variants[kn5_mid].append(mat_gltf_idx[kn5_mid])  # same look
                 else:
-                    mat_variants[kn5_mid].append(base_idx)
+                    gltf.materials.append(
+                        _make_gmat(kn5_mat, f"{kn5_mat.name}_{skin[0]}", *res))
+                    mat_variants[kn5_mid].append(len(gltf.materials) - 1)
 
-        gltf.extensionsUsed = ["KHR_materials_variants"]
+        ext_used.add("KHR_materials_variants")
         gltf.extensions = {
             "KHR_materials_variants": {
                 "variants": [{"name": n} for n in variant_names]
@@ -943,6 +1140,9 @@ def kn5_to_glb(
         else:
             _process_node(model.root, rot_idx)
 
+    if ext_used:
+        gltf.extensionsUsed = sorted(ext_used)
+
     # -- Finalise buffer -------------------------------------------------------
     gltf.buffers.append(pygltflib.Buffer(byteLength=len(bin_data)))
     gltf.set_binary_blob(bytes(bin_data))
@@ -1018,6 +1218,7 @@ def kn5_all_lods_to_glbs(
     embed_textures: bool = True,
     include_skins: bool = True,
     keep_variants: bool = False,
+    default_skin: Optional[str] = "first",
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -1034,6 +1235,8 @@ def kn5_all_lods_to_glbs(
     embed_textures: Passed through to kn5_to_glb() for each LOD.
     include_skins : When True (default), embed all skin liveries as
                     KHR_materials_variants inside the GLB.
+    keep_variants : Keep *_BLUR / *_DAMAGE / in-file low-res meshes.
+    default_skin  : Skin the base materials use ("first", a name, or "none").
 
     Returns
     -------
@@ -1050,31 +1253,61 @@ def kn5_all_lods_to_glbs(
         kn5_to_glb(kn5_path, output_path=out_path,
                    embed_textures=embed_textures,
                    skins=skins if skins else None,
-                   keep_variants=keep_variants)
+                   keep_variants=keep_variants,
+                   default_skin=default_skin)
         results[label] = out_path
     return results
 
 
 # --- CLI entry point ----------------------------------------------------------
 
-if __name__ == "__main__":
-    import sys as _sys
-    _args = [a for a in _sys.argv[1:] if a != "--keep-variants"]
-    _keep_variants = "--keep-variants" in _sys.argv[1:]
-    if not _args:
-        print("Usage: python kn5_reader.py <car.kn5> [output.glb] [--keep-variants]")
-        _sys.exit(1)
-    src = Path(_args[0])
-    dst = Path(_args[1]) if len(_args) > 1 else src.with_suffix(".glb")
-    print("Scanning nodes ...")
-    names = scan_kn5_nodes(src)
-    print(f"  {len(names)} nodes found:")
-    for n in names:
-        print(f"    {n}")
-    mapping = map_ac_nodes_to_svj(names)
-    print("\nSVJ visual binding map:")
-    for svj_id, ac_name in mapping.items():
-        print(f"  {svj_id:20s} <- {ac_name}")
-    print("\nConverting to GLB ...")
-    glb = kn5_to_glb(src, output_path=dst, keep_variants=_keep_variants)
+def _main(argv: Optional[list[str]] = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(
+        prog="kn5_reader.py",
+        description="Convert an Assetto Corsa .kn5 to GLB, or list a car's skins.")
+    ap.add_argument("kn5", type=Path, help="car .kn5 file")
+    ap.add_argument("output", type=Path, nargs="?", help="output .glb (default: beside the kn5)")
+    ap.add_argument("--keep-variants", action="store_true",
+                    help="keep *_BLUR, *_DAMAGE and in-file low-res (_LR) meshes")
+    ap.add_argument("--list-skins", action="store_true",
+                    help="write nothing; print each skin and the colour it paints "
+                         "(tab-separated: skin, material, RRGGBB, tris, source)")
+    ap.add_argument("--skin", default="first", metavar="NAME",
+                    help="skin for the base materials: first (default), a skin "
+                         "name, or none (KN5 embedded textures). All skins are "
+                         "still embedded as KHR_materials_variants.")
+    ap.add_argument("--no-skins", action="store_true",
+                    help="do not embed skins as variants")
+    ap.add_argument("--scan-nodes", action="store_true",
+                    help="also print the node names and the SVJ body binding map")
+    a = ap.parse_args(argv)
+
+    if a.list_skins:
+        print(format_skin_report(list_skins(a.kn5)))
+        return 0
+
+    if a.scan_nodes:
+        names = scan_kn5_nodes(a.kn5)
+        print(f"{len(names)} nodes found:")
+        for n in names:
+            print(f"  {n}")
+        print("SVJ visual binding map:")
+        for svj_id, ac_name in map_ac_nodes_to_svj(names).items():
+            print(f"  {svj_id:20s} <- {ac_name}")
+
+    dst = a.output or a.kn5.with_suffix(".glb")
+    skins = [] if a.no_skins else _skin_dirs(a.kn5)
+    print(f"Converting {a.kn5.name} ...")
+    try:
+        glb = kn5_to_glb(a.kn5, output_path=dst, skins=skins or None,
+                         keep_variants=a.keep_variants, default_skin=a.skin)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     print(f"  Written {len(glb):,} bytes -> {dst}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main())
