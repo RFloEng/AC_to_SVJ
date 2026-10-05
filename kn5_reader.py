@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -376,24 +377,48 @@ def map_ac_nodes_to_svj(node_names: list[str]) -> dict[str, str]:
 # Triangle winding is reversed because handedness flips (left->right-handed).
 
 # ---------------------------------------------------------------------------
-# Ephemeral-mesh detection
+# Runtime variants: meshes AC swaps in and out, which a static GLB cannot
 # ---------------------------------------------------------------------------
-# AC controls these meshes at runtime (hidden by default, shown only during
-# motion or damage events).  We render them fully transparent so they don't
-# make the car look crashed / spinning when displayed as a static model.
-_EPHEMERAL_SUBSTRINGS: frozenset[str] = frozenset({
-    "blur",      # motion-blur rim discs  (RIM_BLUR_*, rim blur lf, …)
-    "damage",    # damage-state body panels
-    "dent",      # dented panels
-    "bent",      # bent panels
-    "crash",     # crash-state geometry
-    "deform",    # deformable/crumple-zone meshes
-})
+# Exported next to the originals they read as a broken model rather than extra
+# detail: damage shells sit a hair off the clean panels and z-fight with them,
+# and blurred-wheel discs are opaque and cover the spokes.  They are dropped
+# (subtree and all) unless keep_variants=True.
+#
+# The rules are exact on purpose.  A node is a blur/damage variant when one of
+# its name *tokens* is exactly "blur" or "damage" (tokens split on _ - . and
+# whitespace, case-insensitive), so RIM_BLUR_LF, "rim blur lf" and
+# EXT_Rim_Blur match but UNDAMAGED_PANEL does not.  The earlier substring list
+# also caught dent/bent/crash/deform; those are not reliable markers (e.g.
+# "bent" matches "BENTLEY_BADGE"), so they are no longer special-cased.
+_VARIANT_TOKENS: frozenset[str] = frozenset({"blur", "damage"})
+_NAME_SPLIT = re.compile(r"[\s_.\-]+")
 
-def _is_ephemeral(name: str) -> bool:
-    """Return True for meshes AC shows/hides dynamically at runtime."""
-    nl = name.lower()
-    return any(s in nl for s in _EPHEMERAL_SUBSTRINGS)
+
+def _is_variant_name(name: str) -> bool:
+    """True for *_BLUR / *_DAMAGE style runtime-variant meshes."""
+    return any(t in _VARIANT_TOKENS for t in _NAME_SPLIT.split(name.lower()))
+
+
+def lowres_twins(names) -> set[str]:
+    """
+    Names of the low-res halves of in-file LOD pairs.
+
+    AC ships two versions of the cockpit and steering wheel *inside* the top
+    LOD (COCKPIT_HR / COCKPIT_LR, STEER_HR / STEER_LR) and swaps them by
+    camera.  Exported together they overlap.  A name is a low-res twin only
+    when it ends in ``_LR`` **and** its ``_HR`` partner is also present:
+    ``_LR`` is far more often "Left Rear" (WHEEL_LR, SUSP_LR, DISC_LR, ...),
+    and none of those have an ``_HR`` twin, so the suspension is never touched.
+    """
+    have = {n.lower() for n in names}
+    return {n for n in names
+            if n.lower().endswith("_lr") and n[:-3].lower() + "_hr" in have}
+
+
+def _walk_names(node: "Kn5Node") -> list[str]:
+    out: list[str] = []
+    _collect_names(node, out)
+    return out
 
 
 def _ac_to_three(arr: np.ndarray) -> np.ndarray:
@@ -519,6 +544,7 @@ def kn5_to_glb(
     output_path: Optional[Path] = None,
     embed_textures: bool = True,
     skins: Optional[list[tuple[str, Path]]] = None,
+    keep_variants: bool = False,
 ) -> bytes:
     """
     Convert a KN5 file to a self-contained GLB (binary glTF).
@@ -528,6 +554,9 @@ def kn5_to_glb(
     path           : Source .kn5 file.
     output_path    : If given, the GLB bytes are also written here.
     embed_textures : Embed texture images in the GLB (default True).
+    keep_variants  : Keep runtime-variant meshes (*_BLUR, *_DAMAGE and the
+                     low-res ``_LR`` half of in-file ``_HR``/``_LR`` pairs).
+                     Default False drops them, subtree and all.
     skins          : Optional list of (skin_name, skin_folder) tuples from
                      _find_skins().  When provided, each skin becomes a named
                      variant via the KHR_materials_variants extension.
@@ -690,19 +719,11 @@ def kn5_to_glb(
         gltf.materials.append(gmat)
         mat_gltf_idx.append(len(gltf.materials) - 1)
 
-    # Shared fully-transparent material for blur/damage meshes.
-    # All ephemeral nodes share one entry to keep the material table small.
-    _hidden_mat = pygltflib.Material(
-        name="_hidden_ephemeral",
-        pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
-            baseColorFactor=[0.0, 0.0, 0.0, 0.0],
-            metallicFactor=0.0,
-            roughnessFactor=1.0,
-        ),
-        alphaMode="BLEND",
-    )
-    gltf.materials.append(_hidden_mat)
-    _hidden_mat_idx: int = len(gltf.materials) - 1
+    # Runtime variants (blur / damage / in-file low-res twins) are dropped
+    # outright rather than hidden behind a transparent material.
+    dropped_variants = 0
+    lowres: set[str] = (set() if keep_variants or model.root is None
+                        else lowres_twins(_walk_names(model.root)))
 
     # -- Build skin variants (KHR_materials_variants) --------------------------
     # variant_names[0] = "Default" (base KN5 textures), [1..] = skin names.
@@ -765,7 +786,13 @@ def kn5_to_glb(
     gltf.scenes.append(scene)
     gltf.scene = 0
 
-    def _process_node(kn5_node: Kn5Node, parent_gltf_idx: Optional[int]) -> int:
+    def _process_node(kn5_node: Kn5Node,
+                      parent_gltf_idx: Optional[int]) -> Optional[int]:
+        nonlocal dropped_variants
+        if not keep_variants and (_is_variant_name(kn5_node.name)
+                                  or kn5_node.name in lowres):
+            dropped_variants += 1       # subtree goes with it
+            return None
         gnode = pygltflib.Node(name=kn5_node.name)
 
         if kn5_node.node_type == 1 and kn5_node.matrix:
@@ -841,10 +868,6 @@ def kn5_to_glb(
 
             mat_idx = (mat_gltf_idx[kn5_node.material_id]
                        if 0 <= kn5_node.material_id < len(mat_gltf_idx) else None)
-            # Blur-rim / damage meshes: override to fully transparent so the
-            # static GLB doesn't look like a crashed or spinning car.
-            if _is_ephemeral(kn5_node.name):
-                mat_idx = _hidden_mat_idx
 
             primitive = pygltflib.Primitive(
                 attributes=pygltflib.Attributes(
@@ -860,8 +883,7 @@ def kn5_to_glb(
             # Attach skin variant mappings when skins were supplied and this
             # mesh's material actually differs across variants.
             kn5_mid = kn5_node.material_id
-            if (variant_names and not _is_ephemeral(kn5_node.name)
-                    and mat_idx is not None
+            if (variant_names and mat_idx is not None
                     and 0 <= kn5_mid < len(mat_variants)):
                 v_list = mat_variants[kn5_mid]
                 if not all(v == v_list[0] for v in v_list):
@@ -995,6 +1017,7 @@ def kn5_all_lods_to_glbs(
     output_dir: Path,
     embed_textures: bool = True,
     include_skins: bool = True,
+    keep_variants: bool = False,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -1026,7 +1049,8 @@ def kn5_all_lods_to_glbs(
         out_path = output_dir / f"{kn5_path.stem}.glb"
         kn5_to_glb(kn5_path, output_path=out_path,
                    embed_textures=embed_textures,
-                   skins=skins if skins else None)
+                   skins=skins if skins else None,
+                   keep_variants=keep_variants)
         results[label] = out_path
     return results
 
@@ -1035,11 +1059,13 @@ def kn5_all_lods_to_glbs(
 
 if __name__ == "__main__":
     import sys as _sys
-    if len(_sys.argv) < 2:
-        print("Usage: python kn5_reader.py <car.kn5> [output.glb]")
+    _args = [a for a in _sys.argv[1:] if a != "--keep-variants"]
+    _keep_variants = "--keep-variants" in _sys.argv[1:]
+    if not _args:
+        print("Usage: python kn5_reader.py <car.kn5> [output.glb] [--keep-variants]")
         _sys.exit(1)
-    src = Path(_sys.argv[1])
-    dst = Path(_sys.argv[2]) if len(_sys.argv) > 2 else src.with_suffix(".glb")
+    src = Path(_args[0])
+    dst = Path(_args[1]) if len(_args) > 1 else src.with_suffix(".glb")
     print("Scanning nodes ...")
     names = scan_kn5_nodes(src)
     print(f"  {len(names)} nodes found:")
@@ -1050,5 +1076,5 @@ if __name__ == "__main__":
     for svj_id, ac_name in mapping.items():
         print(f"  {svj_id:20s} <- {ac_name}")
     print("\nConverting to GLB ...")
-    glb = kn5_to_glb(src, output_path=dst)
+    glb = kn5_to_glb(src, output_path=dst, keep_variants=_keep_variants)
     print(f"  Written {len(glb):,} bytes -> {dst}")

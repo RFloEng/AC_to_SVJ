@@ -2,7 +2,54 @@
 
 This project is an **original implementation**. No third-party source code is
 bundled or copied into this repository. This file credits the external
-algorithms, standards, and libraries the code relies on.
+algorithms, standards, and libraries the code relies on, and the projects whose
+*ideas* were reimplemented here (with their licence notices, below).
+
+## Ideas reimplemented from MIT-licensed projects
+
+### semiloker/assetto-corsa-gltf
+
+<https://github.com/semiloker/assetto-corsa-gltf> (`src/acgltf/convert.py`)
+
+The KN5 → GLB exporter in `kn5_reader.py` adopts several approaches first
+worked out in this project. The code here is a reimplementation against our own
+parser and glTF writer, not a copy; the adapted ideas are:
+
+- dropping runtime-variant meshes (`*_BLUR`, `*_DAMAGE`) and the low-res `_LR`
+  half of in-file LOD pairs only when an `_HR` twin exists (`lowres_twins`)
+- resolving a car's livery colour from the skin's flat `txDetail` map
+  (`paint_slots`, `detail_tint`, `flat_colour`, `skin_dir`)
+- mapping ksSpecular / ksSpecularEXP to roughness, `fresnelMaxLevel` to
+  `KHR_materials_specular`, and `sunSpecular` to `KHR_materials_clearcoat`
+  (`add_materials`)
+- case-insensitive texture lookup (`fold_texture_case`)
+
+No decryption is performed or adapted: encrypted `data.acd` and CSP-protected
+KN5 files remain refused and flagged.
+
+```
+MIT License
+
+Copyright (c) 2026 semiloker
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## Algorithms implemented from public knowledge
 

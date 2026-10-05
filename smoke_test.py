@@ -10,6 +10,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 from converter import build_svj, read_car_directory, _clean
 
 def main():
+    # KN5 -> GLB exporter checks use a synthetic KN5 (no AC content). They run
+    # first because the structural checks below exit on the first failure.
+    print("──── KN5 → GLB EXPORTER CHECKS ────")
+    import test_kn5_export
+    if not test_kn5_export.run():
+        print("\n✗ KN5 exporter checks failed")
+        sys.exit(1)
+    print()
+
     car = Path(__file__).parent / "test_car"
     ini_files, cm_meta, ctrl_files, data_dir = read_car_directory(car)
     print(f"ini  files loaded: {sorted(ini_files.keys())}")

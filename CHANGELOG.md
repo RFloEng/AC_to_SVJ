@@ -2,6 +2,23 @@
 
 All notable changes are documented here.
 
+## [Unreleased]
+
+### KN5 → GLB exporter (`kn5_reader.py`)
+
+- **Variants** — runtime-variant meshes are now *dropped* (subtree and all)
+  instead of being made transparent. Rules are exact: a node is a blur/damage
+  variant when a name token is exactly `blur` or `damage` (so `RIM_BLUR_LF`,
+  `BODY_DAMAGE` go; `UNDAMAGED_PANEL`, `BENTLEY_BADGE` stay). The low-res
+  half of an in-file LOD pair (`COCKPIT_LR`, `STEER_LR`) is dropped **only when
+  its `_HR` twin exists**, so `_LR` = Left Rear (`WHEEL_LR`, `SUSP_LR`, …) is
+  never touched. New `keep_variants` option on `kn5_to_glb` /
+  `kn5_all_lods_to_glbs` and `--keep-variants` on the `kn5_reader.py` CLI.
+  Ideas adapted from semiloker/assetto-corsa-gltf (MIT) — see
+  `THIRD_PARTY_NOTICES.md`.
+- New `test_kn5_export.py` (synthetic KN5 encoder; no AC content), run first by
+  `smoke_test.py`.
+
 ## [0.9.1] — 2026-05-07
 
 ### SVJ target: 0.97
