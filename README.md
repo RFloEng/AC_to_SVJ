@@ -106,11 +106,13 @@ The SVJ `assets.meshes` block lists every LOD that was found:
 
 **Mesh cleaning applied automatically:**
 
-- **Ephemeral meshes transparent** — blur-rim discs (`RIM_BLUR_*`,
-  `rim blur lf/rf/lr/rr`) and damage panels (`damage`, `dent`, `bent`,
-  `crash`, `deform`) are exported fully transparent (`alphaMode=BLEND`,
-  `baseColorFactor=[0,0,0,0]`). Cars no longer appear crashed or with
-  spinning rims at rest.
+- **Runtime variants dropped** — blur-rim discs (`RIM_BLUR_*`,
+  `rim blur lf/rf/lr/rr`) and damage panels (`*_DAMAGE`) are removed from the
+  GLB (subtree and all) instead of being hidden, along with the low-res half of
+  in-file LOD pairs (`COCKPIT_LR`, `STEER_LR` — only when the `_HR` twin exists,
+  so `WHEEL_LR` = Left Rear is never touched). Cars no longer appear crashed,
+  with spinning rims, or with doubled dashboards. Pass `keep_variants=True`
+  (CLI: `--keep-variants`) to keep them.
 - **Bimodal alpha detection** — materials with `blend_mode=1` are classified
   as hard-edge cutouts (`MASK`/`alphaCutoff=0.5`) or true transparency
   (`BLEND`) by inspecting the diffuse texture. Fixes grilles, belts, and
@@ -118,6 +120,32 @@ The SVJ `assets.meshes` block lists every LOD that was found:
 - **Front-axle Z alignment** — the GLB root node is offset so the front axle
   sits at Three.js Z = 0, matching the SVJ physics skeleton without any
   manual offset.
+
+**Materials and paint**
+
+- **Livery colour** — on many Kunos cars the body diffuse is a shared grey
+  sheet and the paint is a *flat* `txDetail` map that AC multiplies in. That
+  colour is baked into `baseColorFactor`, resolved against the car's first skin
+  (what AC loads by default; `default_skin=` / `--skin` to change).
+- **Specular** — `ksSpecularEXP` × `ksSpecular` → roughness; `fresnelMaxLevel`
+  → `KHR_materials_specular`; `sunSpecular` (car paint) →
+  `KHR_materials_clearcoat`.
+- **Robustness** — texture and skin names are matched case-insensitively, and
+  meshes using vertex index 65535 are written with 32-bit indices.
+
+**CLI**
+
+```bash
+python kn5_reader.py car.kn5 out.glb            # export + stats report
+python kn5_reader.py car.kn5 --list-skins       # each skin and the colour it paints
+python kn5_reader.py car.kn5 --skin none        # base = the KN5's embedded textures
+```
+
+The export prints node / triangle / material / image counts and the bounding
+box (also available as `kn5_to_glb(..., report=dict)`).
+
+Encrypted `data.acd` and CSP-protected KN5 files are refused and flagged, never
+decrypted.
 
 ### Skins / liveries (`KHR_materials_variants`)
 

@@ -762,6 +762,21 @@ def format_skin_report(report: dict) -> str:
     return "\n".join(lines)
 
 
+def format_export_report(r: dict) -> str:
+    """Human-readable summary of the ``report`` dict from kn5_to_glb()."""
+    def fmt(v):
+        return "(" + ", ".join(f"{x:.3f}" for x in v) + ")"
+    sx, sy, sz = r["size"]
+    return "\n".join([
+        f"nodes     : {r['nodes']}  ({r['transforms']} transforms, "
+        f"{r['meshes']} meshes, {r['variants_dropped']} variants dropped)",
+        f"triangles : {r['triangles']:,}",
+        f"materials : {r['materials']}   images: {r['images']}",
+        f"bbox      : min {fmt(r['bbox_min'])}  max {fmt(r['bbox_max'])}",
+        f"size      : {sx:.3f} x {sy:.3f} x {sz:.3f} m  (X right, Y up, Z rear)",
+    ])
+
+
 def blinn_to_roughness(exponent: float, intensity: float = 1.0) -> float:
     """
     AC's Blinn-Phong specular -> glTF roughness.
@@ -783,6 +798,8 @@ def kn5_to_glb(
     skins: Optional[list[tuple[str, Path]]] = None,
     keep_variants: bool = False,
     default_skin: Optional[str] = "first",
+    report: Optional[dict] = None,
+    verbose: bool = False,
 ) -> bytes:
     """
     Convert a KN5 file to a self-contained GLB (binary glTF).
@@ -801,6 +818,12 @@ def kn5_to_glb(
     default_skin   : Skin the base materials are resolved against: "first"
                      (default; what AC itself loads), a skin name, or "none"
                      to keep the KN5's embedded (template) textures.
+    report         : Optional dict, filled with export statistics: ``nodes``,
+                     ``transforms``, ``meshes``, ``triangles``, ``materials``,
+                     ``images``, ``variants_dropped``, ``bbox_min``, ``bbox_max``
+                     and ``size`` (metres, final glTF space: X right, Y up,
+                     Z towards the rear).
+    verbose        : Print the report after export.
 
     Returns
     -------
@@ -1038,6 +1061,8 @@ def kn5_to_glb(
     # Runtime variants (blur / damage / in-file low-res twins) are dropped
     # outright rather than hidden behind a transparent material.
     dropped_variants = 0
+    stats: dict = {"transforms": 0, "meshes": 0, "tris": 0,
+                   "bmin": None, "bmax": None}
     lowres: set[str] = (set() if keep_variants or model.root is None
                         else lowres_twins(_walk_names(model.root)))
 
@@ -1075,16 +1100,22 @@ def kn5_to_glb(
     gltf.scene = 0
 
     def _process_node(kn5_node: Kn5Node,
-                      parent_gltf_idx: Optional[int]) -> Optional[int]:
+                      parent_gltf_idx: Optional[int],
+                      parent_world: np.ndarray) -> Optional[int]:
         nonlocal dropped_variants
         if not keep_variants and (_is_variant_name(kn5_node.name)
                                   or kn5_node.name in lowres):
             dropped_variants += 1       # subtree goes with it
             return None
         gnode = pygltflib.Node(name=kn5_node.name)
+        world = parent_world
 
         if kn5_node.node_type == 1 and kn5_node.matrix:
             gnode.matrix = _mat4_ac_to_three(kn5_node.matrix)
+            stats["transforms"] += 1
+            # glTF matrices are column-major: reshape in Fortran order.
+            world = parent_world @ np.array(gnode.matrix, dtype="f8").reshape(
+                4, 4, order="F")
 
         elif kn5_node.node_type in (2, 3) and kn5_node.positions is not None:
             # AC (left-handed) -> Three.js/glTF (right-handed): negate Z.
@@ -1101,6 +1132,15 @@ def kn5_to_glb(
 
             # Winding unchanged: double axis negation (Y+Z) preserves handedness.
             idx = kn5_node.indices
+
+            # Export statistics: triangles and world-space bounding box.
+            stats["meshes"] += 1
+            stats["tris"] += len(idx) // 3
+            if len(pos):
+                wp = pos.astype("f8") @ world[:3, :3].T + world[:3, 3]
+                lo, hi = wp.min(axis=0), wp.max(axis=0)
+                stats["bmin"] = lo if stats["bmin"] is None else np.minimum(stats["bmin"], lo)
+                stats["bmax"] = hi if stats["bmax"] is None else np.maximum(stats["bmax"], hi)
 
             # Accessors
             pos_bytes = pos.astype("<f4").tobytes()
@@ -1208,7 +1248,7 @@ def kn5_to_glb(
             gltf.nodes[parent_gltf_idx].children.append(this_idx)
 
         for child in kn5_node.children:
-            _process_node(child, this_idx)
+            _process_node(child, this_idx, world)
 
         return this_idx
 
@@ -1234,9 +1274,13 @@ def kn5_to_glb(
             if gltf.nodes[rot_idx].children is None:
                 gltf.nodes[rot_idx].children = []
             gltf.nodes[rot_idx].children.append(wrapper_idx)
-            _process_node(model.root, wrapper_idx)
+            w0 = np.diag([-1.0, -1.0, 1.0, 1.0])
+            w0 = w0 @ np.array([[1, 0, 0, 0], [0, 1, 0, 0],
+                                [0, 0, 1, float(front_axle_z)], [0, 0, 0, 1]],
+                               dtype="f8")
+            _process_node(model.root, wrapper_idx, w0)
         else:
-            _process_node(model.root, rot_idx)
+            _process_node(model.root, rot_idx, np.diag([-1.0, -1.0, 1.0, 1.0]))
 
     if ext_used:
         gltf.extensionsUsed = sorted(ext_used)
@@ -1247,6 +1291,26 @@ def kn5_to_glb(
     glb_bytes = b"".join(gltf.save_to_bytes())
     if output_path:
         output_path.write_bytes(glb_bytes)
+
+    if report is not None or verbose:
+        bmin = stats["bmin"] if stats["bmin"] is not None else np.zeros(3)
+        bmax = stats["bmax"] if stats["bmax"] is not None else np.zeros(3)
+        rpt = {
+            "nodes": len(gltf.nodes),
+            "transforms": stats["transforms"],
+            "meshes": stats["meshes"],
+            "triangles": stats["tris"],
+            "materials": len(gltf.materials),
+            "images": len(gltf.images),
+            "variants_dropped": dropped_variants,
+            "bbox_min": [round(float(v), 4) for v in bmin],
+            "bbox_max": [round(float(v), 4) for v in bmax],
+            "size": [round(float(v), 4) for v in (bmax - bmin)],
+        }
+        if report is not None:
+            report.update(rpt)
+        if verbose:
+            print(format_export_report(rpt))
     return glb_bytes
 
 
@@ -1391,6 +1455,10 @@ def _main(argv: Optional[list[str]] = None) -> int:
                     help="also print the node names and the SVJ body binding map")
     a = ap.parse_args(argv)
 
+    if not a.kn5.is_file():
+        print(f"error: {a.kn5} is not a file", file=sys.stderr)
+        return 1
+
     if a.list_skins:
         print(format_skin_report(list_skins(a.kn5)))
         return 0
@@ -1409,8 +1477,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
     print(f"Converting {a.kn5.name} ...")
     try:
         glb = kn5_to_glb(a.kn5, output_path=dst, skins=skins or None,
-                         keep_variants=a.keep_variants, default_skin=a.skin)
-    except ValueError as e:
+                         keep_variants=a.keep_variants, default_skin=a.skin,
+                         verbose=True)
+    except (ValueError, OSError) as e:
+        # ValueError covers encrypted / CSP-protected or unsupported KN5s, which
+        # are refused (never decrypted), and an unknown --skin name.
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"  Written {len(glb):,} bytes -> {dst}")

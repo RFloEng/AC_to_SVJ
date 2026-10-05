@@ -42,6 +42,11 @@ All notable changes are documented here.
   Meshes that use vertex index 65535 (more than 65,535 vertices) are written
   with `UNSIGNED_INT` indices — 65535 is the reserved restart value for
   `UNSIGNED_SHORT` and made such files invalid.
+- **Export report** — `kn5_to_glb(report=dict, verbose=bool)` collects node,
+  mesh, triangle, material and image counts, dropped-variant count and the
+  world-space bounding box/size (final glTF axes, including the axis-fix and
+  front-axle nodes). `format_export_report()` renders it; the
+  `kn5_reader.py` CLI prints it after every export.
 - New `test_kn5_export.py` (synthetic KN5 encoder; no AC content), run first by
   `smoke_test.py`.
 

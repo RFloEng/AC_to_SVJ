@@ -411,6 +411,37 @@ def test_large_mesh_indices():
     assert list(got) == [0, 1, 65535]
 
 
+# --- item 5: export report ----------------------------------------------------
+
+def test_export_report():
+    # WHEEL_LF puts the "front axle" at AC z=2, which the exporter folds into a
+    # translation node; the BODY triangle sits at AC (0,0,0),(1,0,0),(0,0,1).
+    axle = N("WHEEL_LF", matrix=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1])
+    root = N("ROOT", children=[axle, N("BODY", "mesh"),
+                               N("RIM_BLUR_LF", "mesh")])   # dropped: not counted
+    rep = {}
+    with tempfile.TemporaryDirectory() as t:
+        _export(root, Path(t), report=rep)
+    assert rep["meshes"] == 1 and rep["triangles"] == 1
+    assert rep["variants_dropped"] == 1 and rep["materials"] == 1 and rep["images"] == 0
+    assert rep["transforms"] == 2                      # ROOT + WHEEL_LF
+    # AC -> glTF: x'=-x, y'=y, z'=2-z  (axis fix + front-axle alignment)
+    assert rep["bbox_min"] == [-1.0, 0.0, 1.0], rep["bbox_min"]
+    assert rep["bbox_max"] == [0.0, 0.0, 2.0], rep["bbox_max"]
+    assert rep["size"] == [1.0, 0.0, 1.0]
+    text = K.format_export_report(rep)
+    assert "triangles : 1" in text and "1 variants dropped" in text
+
+
+def test_export_report_verbose_prints():
+    import contextlib
+    buf = io.StringIO()
+    with tempfile.TemporaryDirectory() as t, contextlib.redirect_stdout(buf):
+        _export(N("ROOT", children=[N("BODY", "mesh")]), Path(t), verbose=True)
+    out = buf.getvalue()
+    assert "nodes" in out and "bbox" in out and "materials" in out
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
