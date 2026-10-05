@@ -108,8 +108,13 @@ class Kn5Material:
     ks_specular: float = 0.9
     ks_specular_exp: float = 1.0
     diffuse_mult: float = 1.0
-    tx_diffuse:  Optional[str] = None
-    tx_normal:   Optional[str] = None
+    tx_diffuse:       Optional[str] = None
+    tx_normal:        Optional[str] = None
+    tx_detail:        Optional[str] = None   # detail/overlay tiling texture
+    tx_normal_detail: Optional[str] = None   # detail normal map
+    use_detail:       bool  = False          # useDetail property (shader gate)
+    detail_uv_mult:   float = 1.0            # detailUVMultiplier (typically 5–500)
+    normal_uv_mult:   float = 1.0            # normalUVMultiplier
 
 
 @dataclass
@@ -173,19 +178,24 @@ def _read_materials(f: io.RawIOBase, version: int) -> list[Kn5Material]:
             prop_name  = _len_str(f)
             prop_value = _read_f32(f)
             f.read(36)                      # float array (unused by us)
-            if prop_name == "ksAmbient":        mat.ks_ambient      = prop_value
-            elif prop_name == "ksDiffuse":      mat.ks_diffuse      = prop_value
-            elif prop_name == "ksSpecular":     mat.ks_specular     = prop_value
-            elif prop_name == "ksSpecularEXP":  mat.ks_specular_exp = prop_value
-            elif prop_name == "diffuseMult":    mat.diffuse_mult    = prop_value
+            if prop_name == "ksAmbient":               mat.ks_ambient      = prop_value
+            elif prop_name == "ksDiffuse":             mat.ks_diffuse      = prop_value
+            elif prop_name == "ksSpecular":            mat.ks_specular     = prop_value
+            elif prop_name == "ksSpecularEXP":         mat.ks_specular_exp = prop_value
+            elif prop_name == "diffuseMult":           mat.diffuse_mult    = prop_value
+            elif prop_name == "useDetail":             mat.use_detail      = prop_value > 0.5
+            elif prop_name == "detailUVMultiplier":    mat.detail_uv_mult  = prop_value
+            elif prop_name == "normalUVMultiplier":    mat.normal_uv_mult  = prop_value
 
         tex_count = _read_i32(f)
         for _ in range(tex_count):
             sample_name = _len_str(f)
             _slot       = _read_i32(f)
             tex_name    = _len_str(f)
-            if sample_name == "txDiffuse": mat.tx_diffuse = tex_name
-            elif sample_name == "txNormal": mat.tx_normal = tex_name
+            if sample_name == "txDiffuse":         mat.tx_diffuse       = tex_name
+            elif sample_name == "txNormal":        mat.tx_normal        = tex_name
+            elif sample_name == "txDetail":        mat.tx_detail        = tex_name
+            elif sample_name == "txNormalDetail":  mat.tx_normal_detail = tex_name
 
         materials.append(mat)
     return materials
@@ -474,6 +484,22 @@ def _load_skin_tex(skin_dir: Path, tex_name: str) -> Optional[bytes]:
     return None
 
 
+def _is_uvmult_shader(shader: str) -> bool:
+    """
+    True for the Kunos ksPerPixel*_UVMult shader family.
+
+    In these shaders the ``diffuseMult`` (and ``normalMult``) material property
+    is NOT a colour-brightness multiplier as in every other shader — it is a
+    UV *tiling* factor applied to the main textures.  e.g. a carbon-weave
+    diffuse with diffuseMult=15 tiles 15× across the mesh's UVs.  Generic
+    converters that treat diffuseMult as brightness (or ignore it on textured
+    materials) render the pattern 15× too large; Content Manager's showroom
+    runs the real shader and tiles correctly.  A value of 0 means "no multiply"
+    (i.e. 1×) for unique-mapped textures like instrument panels or AO bakes.
+    """
+    return "uvmult" in shader.lower()
+
+
 def _find_skins(car_path: Path) -> list[tuple[str, Path]]:
     """
     Return [(skin_name, skin_folder), ...] sorted alphabetically from
@@ -553,6 +579,10 @@ def kn5_to_glb(
         if raw[:4] == b"DDS ":
             try:
                 from PIL import Image as PILImage
+                # AC textures can be very large (e.g. 8192×12288 = 100 M px).
+                # PIL's decompression-bomb guard is intended for untrusted web
+                # images; local KN5 textures are trusted, so disable the limit.
+                PILImage.MAX_IMAGE_PIXELS = None
                 buf = io.BytesIO(raw)
                 pil_img = PILImage.open(buf)
                 if "A" in pil_img.mode:
@@ -602,7 +632,10 @@ def kn5_to_glb(
         if has_tex:
             base_factor = [1.0, 1.0, 1.0, 1.0]
         else:
-            v = max(0.05, kn5_mat.ks_diffuse * kn5_mat.diffuse_mult)
+            # diffuseMult is a brightness factor for normal shaders, but a UV
+            # tiling factor for _UVMult shaders — never apply it as brightness there.
+            bright_mult = 1.0 if _is_uvmult_shader(kn5_mat.shader) else kn5_mat.diffuse_mult
+            v = max(0.05, kn5_mat.ks_diffuse * bright_mult)
             base_factor = [v, v, v, 1.0]
         pbr = pygltflib.PbrMetallicRoughness(
             baseColorFactor=base_factor,
@@ -617,6 +650,21 @@ def kn5_to_glb(
         if embed_textures and kn5_mat.tx_normal and kn5_mat.tx_normal in tex_idx:
             gmat.normalTexture = pygltflib.NormalMaterialTexture(
                 index=tex_idx[kn5_mat.tx_normal]
+            )
+        # Detail texture — exported as occlusionTexture referencing TEXCOORD_1.
+        # Three.js aoMap requires UV1 (vUv2 in the shader); texCoord=0 is silently
+        # ignored.  The mesh-building step pre-bakes scaled UVs into TEXCOORD_1
+        # (uv × detailUVMultiplier), so no KHR_texture_transform extension is needed.
+        # Gate: tx_detail must be present and either useDetail is set or the
+        # multiplier is meaningfully above 1.0 (i.e. it was actually specified).
+        if (embed_textures
+                and kn5_mat.tx_detail
+                and kn5_mat.tx_detail in tex_idx
+                and (kn5_mat.use_detail or kn5_mat.detail_uv_mult > 1.0)):
+            gmat.occlusionTexture = pygltflib.OcclusionTextureInfo(
+                index=tex_idx[kn5_mat.tx_detail],
+                texCoord=1,       # Three.js aoMap samples from UV1 (TEXCOORD_1)
+                strength=1.0,
             )
         # Map KN5 blend mode to glTF alphaMode:
         #   0   -> OPAQUE  (ignore alpha channel)
@@ -755,9 +803,36 @@ def kn5_to_glb(
             bv_tan = _add_buffer_view(tan_bytes, target=pygltflib.ARRAY_BUFFER)
             acc_tan = _add_accessor(bv_tan, pygltflib.FLOAT, "VEC4", len(tan))
 
-            uv_bytes = uvs.astype("<f4").tobytes()
+            # TEXCOORD_0: base UVs. For _UVMult shaders, Kunos applies diffuseMult
+            # as a UV *tiling* factor on the main textures (e.g. carbon-weave at
+            # 15×, mesh grille at 40×).  Bake that scale in so the pattern tiles
+            # at the correct frequency instead of appearing N× too large.
+            mid = kn5_node.material_id
+            uv0 = uvs
+            if 0 <= mid < len(model.materials):
+                raw_mat = model.materials[mid]
+                if _is_uvmult_shader(raw_mat.shader) and raw_mat.diffuse_mult > 1.0:
+                    uv0 = uvs * float(raw_mat.diffuse_mult)
+
+            uv_bytes = uv0.astype("<f4").tobytes()
             bv_uv = _add_buffer_view(uv_bytes, target=pygltflib.ARRAY_BUFFER)
-            acc_uv = _add_accessor(bv_uv, pygltflib.FLOAT, "VEC2", len(uvs))
+            acc_uv = _add_accessor(bv_uv, pygltflib.FLOAT, "VEC2", len(uv0))
+
+            # TEXCOORD_1: pre-scaled UVs for detail texture (Three.js aoMap uses UV1).
+            # detailUVMultiplier is read from the material and baked here so no
+            # KHR_texture_transform extension is needed.  Always computed from the
+            # ORIGINAL uvs, independent of any _UVMult diffuse scaling above.
+            acc_uv1 = None
+            if embed_textures and 0 <= mid < len(model.materials):
+                raw_mat = model.materials[mid]
+                if (raw_mat.tx_detail
+                        and raw_mat.tx_detail in tex_idx
+                        and (raw_mat.use_detail or raw_mat.detail_uv_mult > 1.0)):
+                    uv_det = (uvs * float(raw_mat.detail_uv_mult)).astype("<f4")
+                    bv_uv1 = _add_buffer_view(uv_det.tobytes(),
+                                              target=pygltflib.ARRAY_BUFFER)
+                    acc_uv1 = _add_accessor(bv_uv1, pygltflib.FLOAT, "VEC2",
+                                            len(uv_det))
 
             idx16 = idx.astype("<u2").tobytes()
             bv_idx = _add_buffer_view(idx16, target=pygltflib.ELEMENT_ARRAY_BUFFER)
@@ -777,6 +852,7 @@ def kn5_to_glb(
                     NORMAL=acc_nrm,
                     TANGENT=acc_tan,
                     TEXCOORD_0=acc_uv,
+                    TEXCOORD_1=acc_uv1,   # None for meshes without detail texture
                 ),
                 indices=acc_idx,
                 material=mat_idx,
