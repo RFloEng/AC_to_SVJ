@@ -164,7 +164,9 @@ The export prints node / triangle / material / image counts and the bounding
 box (also available as `kn5_to_glb(..., report=dict)`).
 
 Encrypted `data.acd` and CSP-protected KN5 files are refused and flagged, never
-decrypted.
+decrypted. If a car has an **unencrypted copy of its KN5 in a subfolder**, it is
+detected and used automatically — see
+[docs/ENCRYPTED_CARS.md](docs/ENCRYPTED_CARS.md) for how the folder should look.
 
 ### Skins / liveries (`KHR_materials_variants`)
 

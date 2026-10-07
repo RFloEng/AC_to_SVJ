@@ -735,7 +735,14 @@ def paint_slots(materials: list["Kn5Material"],
 
 
 def _skin_dirs(kn5_path: Path) -> list[tuple[str, Path]]:
-    return _find_skins(Path(kn5_path).parent)
+    """Skins for a KN5: next to it, else up to two levels above (a KN5 kept in
+    a subfolder such as ``<car>/unencrypted/`` still uses the car's skins/)."""
+    here = Path(kn5_path).resolve().parent
+    for d in [here, *list(here.parents)[:2]]:
+        found = _find_skins(d)
+        if found:
+            return found
+    return []
 
 
 def list_skins(kn5_path: Path) -> dict:
@@ -751,6 +758,9 @@ def list_skins(kn5_path: Path) -> dict:
     """
     kn5_path = Path(kn5_path)
     out: dict = {"car": kn5_path.stem, "skins": []}
+    if is_encrypted_kn5(kn5_path):
+        out["error"] = f"{kn5_path.name}: " + ENCRYPTED_KN5_HELP
+        return out
     try:
         model = parse_kn5(kn5_path, geometry=False)
     except ValueError as e:
@@ -892,6 +902,9 @@ def kn5_to_glb(
             "pygltflib is required for KN5->glTF export. "
             "Run: pip install pygltflib"
         )
+
+    if is_encrypted_kn5(Path(path)):
+        raise EncryptedKn5Error(f"{Path(path).name}: " + ENCRYPTED_KN5_HELP)
 
     model = parse_kn5(path, geometry=True)
 
@@ -1382,6 +1395,55 @@ def kn5_to_glb(
 _EFFECT_PREFIXES = ("3d", "smoke", "particle", "collider", "blur_", "tyre_")
 
 
+# --- Encrypted KN5 detection and car-model resolution -------------------------
+#
+# Some cars ship a KN5 protected by Content Manager / CSP.  In that file the
+# node tree reads fine but the textures and several meshes are decoys (1x1
+# placeholders), so a "successful" export would be silently wrong.  We only
+# DETECT that marker and refuse such a file; nothing here decrypts anything.
+# Cars that also ship an unencrypted copy of the same model (typically in a
+# subfolder) are supported by picking that copy instead.
+
+KN5_ENC_MARKER = b"__AC_SHADERS_PATCH_KN5ENC_v1__"
+
+ENCRYPTED_KN5_HELP = (
+    "This car's KN5 is encrypted (CSP protection): its textures and some meshes "
+    "are placeholders, so it cannot be exported as-is. To convert it, put an "
+    "UNENCRYPTED KN5 of the SAME car inside the car folder, in any subfolder "
+    "(for example <car>/unencrypted/<name>.kn5), or pass the file explicitly "
+    "(--kn5 / kn5_override). Skins and data stay in the car's own skins/ and data/ "
+    "folders. See docs/ENCRYPTED_CARS.md."
+)
+
+
+class EncryptedKn5Error(ValueError):
+    """The KN5 is encrypted (or no usable unencrypted KN5 was found)."""
+
+
+def is_encrypted_kn5(path: Path) -> bool:
+    """True when the file carries the CSP KN5 encryption marker (detection only)."""
+    keep = b""
+    try:
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(1 << 22)
+                if not chunk:
+                    return False
+                buf = keep + chunk
+                if KN5_ENC_MARKER in buf:
+                    return True
+                keep = buf[-(len(KN5_ENC_MARKER) - 1):]
+    except OSError:
+        return False
+
+
+# Folders that hold accessories, skins, textures or data - never the car model.
+_SKIP_DIRS = frozenset({"extension", "skins", "texture", "textures", "ui", "sfx",
+                        "animations", "data", "vertex_masks"})
+_MIN_NODE_OVERLAP = 0.5       # clean candidate must share this much with the encrypted model
+_STEM_NOISE = re.compile(r"[_\- ]?(un|de)?(en)?crypted$|[_\- ]?clean$", re.I)
+
+
 def _kn5_files(car_path: Path) -> list[Path]:
     """All .kn5 files in a car folder (extension matched case-insensitively)."""
     try:
@@ -1391,26 +1453,136 @@ def _kn5_files(car_path: Path) -> list[Path]:
         return []
 
 
-def find_car_kn5(car_path: Path) -> Optional[Path]:
+def _candidate_kn5s(car_path: Path, max_depth: int = 2) -> list[tuple[Path, int]]:
+    """(path, depth) for every plausible car-model KN5: the top level and
+    subfolders, skipping accessory/data folders, effect models and LOD files."""
+    car_path = Path(car_path)
+    out: list[tuple[Path, int]] = []
+
+    def walk(d: Path, depth: int) -> None:
+        try:
+            children = sorted(d.iterdir())
+        except OSError:
+            return
+        for c in children:
+            if c.is_file() and c.suffix.lower() == ".kn5":
+                low = c.stem.lower()
+                if "_lod_" in low:
+                    continue
+                if low.startswith(_EFFECT_PREFIXES) and low != car_path.name.lower():
+                    continue
+                out.append((c, depth))
+            elif c.is_dir() and depth < max_depth and c.name.lower() not in _SKIP_DIRS:
+                walk(c, depth + 1)
+    walk(car_path, 0)
+    return out
+
+
+@dataclass
+class Kn5Choice:
+    """Result of resolve_car_kn5()."""
+    path: Optional[Path]                 # None = refused (see message)
+    reason: str
+    skipped_encrypted: list = field(default_factory=list)
+    rejected: list = field(default_factory=list)      # [(path, why)]
+
+    @property
+    def refused(self) -> bool:
+        return self.path is None
+
+    @property
+    def message(self) -> str:
+        lines = [self.reason]
+        for p in self.skipped_encrypted:
+            lines.append(f"  skipped (encrypted): {p}")
+        for p, why in self.rejected:
+            lines.append(f"  skipped ({why}): {p}")
+        if self.refused:
+            lines.append(ENCRYPTED_KN5_HELP)
+        return "\n".join(lines)
+
+
+def _node_set(path: Path) -> set[str]:
+    try:
+        return {n.lower() for n in scan_kn5_nodes(path)}
+    except Exception:                                   # noqa: BLE001
+        return set()
+
+
+def _jaccard(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if (a or b) else 0.0
+
+
+def resolve_car_kn5(car_path: Path, override: Optional[Path] = None) -> Kn5Choice:
     """
-    Return the primary (LOD A) KN5 file for an AC car folder.
-    Falls back to largest non-effect KN5 if the stem-named file is absent.
+    Decide which KN5 is the car model.
+
+    * ``override`` wins if given (refused if it is encrypted).
+    * With no encrypted candidate: the KN5 named like the folder, else the largest
+      at the shallowest depth (top level first, then subfolders).
+    * When an encrypted KN5 is present: encrypted files are never used.  A clean
+      candidate is accepted only if its node names overlap the encrypted model's
+      by at least 50 % (same car, not an accessory), and the best match wins
+      (overlap, then stem match, then shallower, then larger).  If none
+      qualifies the result is *refused* with an explanation.
     """
     car_path = Path(car_path)
-    named = _ci_child(car_path, f"{car_path.name}.kn5")
-    if named is not None and named.is_file():
-        return named
+    if override is not None:
+        p = Path(override)
+        if not p.is_file():
+            raise ValueError(f"KN5 override is not a file: {p}")
+        if is_encrypted_kn5(p):
+            return Kn5Choice(None, f"{p.name} is encrypted.", skipped_encrypted=[p])
+        return Kn5Choice(p, f"explicit: {p.name}")
 
-    all_kn5 = _kn5_files(car_path)
-    mesh_kn5 = [p for p in all_kn5
-                if not p.stem.lower().startswith(_EFFECT_PREFIXES)]
-    candidates = mesh_kn5 if mesh_kn5 else all_kn5
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_size)
+    cands = _candidate_kn5s(car_path)
+    enc = [c for c, _ in cands if is_encrypted_kn5(c)]
+    clean = [(c, d) for c, d in cands if c not in enc]
+
+    if not enc:
+        if not clean:
+            return Kn5Choice(None, f"No KN5 found in {car_path}.")
+        named = [(c, d) for c, d in clean if c.stem.lower() == car_path.name.lower()]
+        pool = named or clean
+        best = min(pool, key=lambda cd: (cd[1], -cd[0].stat().st_size))
+        return Kn5Choice(best[0], f"{best[0].name}"
+                         + (" (named like the car folder)" if named else " (largest)"))
+
+    refs = [(e, _node_set(e)) for e in enc]
+    scored, rejected = [], []
+    for c, depth in clean:
+        names = _node_set(c)
+        sim = max((_jaccard(names, rn) for _, rn in refs), default=0.0)
+        if sim < _MIN_NODE_OVERLAP:
+            rejected.append((c, f"only {sim:.0%} node overlap with the encrypted model"))
+            continue
+        base = _STEM_NOISE.sub("", c.stem.lower())
+        stem_match = any(_STEM_NOISE.sub("", e.stem.lower()) == base for e in enc)
+        scored.append(((round(sim, 3), stem_match, -depth, c.stat().st_size), c))
+    if scored:
+        best = max(scored, key=lambda t: t[0])
+        sim = best[0][0]
+        return Kn5Choice(
+            best[1], f"{best[1].relative_to(car_path) if best[1].is_relative_to(car_path) else best[1]} "
+                     f"(unencrypted copy; {sim:.0%} node overlap with the encrypted "
+                     f"{', '.join(e.name for e in enc)})",
+            skipped_encrypted=enc, rejected=rejected)
+    return Kn5Choice(None, "Only encrypted KN5 files found.",
+                     skipped_encrypted=enc, rejected=rejected)
 
 
-def find_car_kn5_lods(car_path: Path) -> list[tuple[str, Path]]:
+def find_car_kn5(car_path: Path, override: Optional[Path] = None) -> Optional[Path]:
+    """
+    Return the primary (LOD A) KN5 for an AC car folder, or None.
+
+    Encrypted KN5s are never returned; an unencrypted copy of the same model in a
+    subfolder is used instead.  Use resolve_car_kn5() for the explanation.
+    """
+    return resolve_car_kn5(car_path, override).path
+
+
+def find_car_kn5_lods(car_path: Path,
+                      kn5_override: Optional[Path] = None) -> list[tuple[str, Path]]:
     """
     Return all LOD KN5 files for an AC car folder, in order.
 
@@ -1419,31 +1591,24 @@ def find_car_kn5_lods(car_path: Path) -> list[tuple[str, Path]]:
          ("B", PosixPath(".../car_LOD_B.kn5")),
          ("C", PosixPath(".../car_LOD_C.kn5"))]
 
-    LOD A is the main file (stem == folder name).
-    LOD B-D are named  <stem>_LOD_B.kn5 / _LOD_C.kn5 / _LOD_D.kn5.
-    File names are matched case-insensitively.
-    Returns an empty list when no KN5 is found at all.
+    LOD A comes from resolve_car_kn5() (so an encrypted KN5 is replaced by its
+    unencrypted copy).  LOD B-D are ``<A stem>_LOD_B.kn5`` / ``<folder>_LOD_B.kn5``
+    next to LOD A; encrypted LODs are skipped.  File names are matched
+    case-insensitively.  Returns an empty list when no usable KN5 is found.
     """
     car_path = Path(car_path)
-    stem = car_path.name          # e.g. "bo_caterham_165_lhd"
-    result: list[tuple[str, Path]] = []
-
-    lod_a = _ci_child(car_path, f"{stem}.kn5")
-    if lod_a is not None and lod_a.is_file():
-        result.append(("A", lod_a))
-    else:
-        # Fallback: largest non-effect KN5 that doesn't look like a LOD file
-        all_kn5 = [p for p in _kn5_files(car_path)
-                   if not p.stem.lower().startswith(_EFFECT_PREFIXES)
-                   and "_lod_" not in p.stem.lower()]
-        if all_kn5:
-            result.append(("A", max(all_kn5, key=lambda p: p.stat().st_size)))
-
+    lod_a = resolve_car_kn5(car_path, kn5_override).path
+    if lod_a is None:
+        return []
+    result: list[tuple[str, Path]] = [("A", lod_a)]
+    stems = [lod_a.stem, car_path.name]
     for label in ("B", "C", "D"):
-        lod_path = _ci_child(car_path, f"{stem}_LOD_{label}.kn5")
-        if lod_path is not None and lod_path.is_file():
-            result.append((label, lod_path))
-
+        for stem in stems:
+            lod_path = _ci_child(lod_a.parent, f"{stem}_LOD_{label}.kn5")
+            if (lod_path is not None and lod_path.is_file()
+                    and not is_encrypted_kn5(lod_path)):
+                result.append((label, lod_path))
+                break
     return result
 
 
@@ -1455,6 +1620,7 @@ def kn5_all_lods_to_glbs(
     keep_variants: bool = False,
     default_skin: Optional[str] = "first",
     node_names: Optional[dict[str, str]] = None,
+    kn5_override: Optional[Path] = None,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -1474,6 +1640,7 @@ def kn5_all_lods_to_glbs(
     keep_variants : Keep *_BLUR / *_DAMAGE / in-file low-res meshes.
     default_skin  : Skin the base materials use ("first", a name, or "none").
     node_names    : AC node name -> glTF node name rename map, applied to every LOD.
+    kn5_override  : Use this KN5 as LOD A instead of auto-detecting it.
 
     Returns
     -------
@@ -1482,7 +1649,9 @@ def kn5_all_lods_to_glbs(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    lods = find_car_kn5_lods(car_path)
+    lods = find_car_kn5_lods(car_path, kn5_override)
+    if not lods:
+        raise EncryptedKn5Error(resolve_car_kn5(car_path, kn5_override).message)
     skins = _find_skins(car_path) if include_skins else []
     results: dict[str, Path] = {}
     for label, kn5_path in lods:
@@ -1504,7 +1673,10 @@ def _main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="kn5_reader.py",
         description="Convert an Assetto Corsa .kn5 to GLB, or list a car's skins.")
-    ap.add_argument("kn5", type=Path, help="car .kn5 file")
+    ap.add_argument("kn5", type=Path,
+                    help="car .kn5 file, or a car folder (the model KN5 is detected; "
+                         "an encrypted KN5 is skipped in favour of an unencrypted "
+                         "copy in a subfolder - see docs/ENCRYPTED_CARS.md)")
     ap.add_argument("output", type=Path, nargs="?", help="output .glb (default: beside the kn5)")
     ap.add_argument("--keep-variants", action="store_true",
                     help="keep *_BLUR, *_DAMAGE and in-file low-res (_LR) meshes")
@@ -1521,6 +1693,12 @@ def _main(argv: Optional[list[str]] = None) -> int:
                     help="also print the node names and the SVJ body binding map")
     a = ap.parse_args(argv)
 
+    if a.kn5.is_dir():
+        choice = resolve_car_kn5(a.kn5)
+        print(choice.message, file=sys.stderr if choice.refused else sys.stdout)
+        if choice.refused:
+            return 1
+        a.kn5 = choice.path
     if not a.kn5.is_file():
         print(f"error: {a.kn5} is not a file", file=sys.stderr)
         return 1

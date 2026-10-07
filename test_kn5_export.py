@@ -511,6 +511,143 @@ def test_converter_emits_v0992_bindings():
         assert node in names, (node, sorted(names))     # bindings resolve in the GLB
 
 
+# --- encrypted KN5s and model resolution --------------------------------------
+
+def _car_nodes(extra=()):
+    names = ["BODY", "WHEEL_LF", "WHEEL_RF", "WHEEL_LR", "WHEEL_RR",
+             "SUSP_LF", "SUSP_RF", "SUSP_LR", "SUSP_RR", *extra]
+    return N("ROOT", children=[N(n, "mesh") for n in names])
+
+
+def _write(path: Path, tree: N, encrypted=False):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    blob = make_kn5(tree, materials=[("M", "ksPerPixel", {}, {})])
+    path.write_bytes(blob + (K.KN5_ENC_MARKER if encrypted else b""))
+    return path
+
+
+def test_encryption_marker_detected():
+    with tempfile.TemporaryDirectory() as t:
+        enc = _write(Path(t) / "a.kn5", _car_nodes(), encrypted=True)
+        clean = _write(Path(t) / "b.kn5", _car_nodes())
+        assert K.is_encrypted_kn5(enc) and not K.is_encrypted_kn5(clean)
+
+
+def test_resolve_plain_prefers_folder_name():
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "mycar"
+        _write(car / "other.kn5", _car_nodes(["EXTRA"] * 0))
+        want = _write(car / "mycar.kn5", _car_nodes())
+        c = K.resolve_car_kn5(car)
+        assert c.path == want and not c.skipped_encrypted
+        assert K.find_car_kn5(car) == want
+
+
+def test_resolve_uses_unencrypted_subfolder_copy():
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "rfc_car"
+        enc = _write(car / "model.kn5", _car_nodes(), encrypted=True)
+        clean = _write(car / "unencrypted" / "model_decrypted.kn5", _car_nodes())
+        c = K.resolve_car_kn5(car)
+        assert c.path == clean, c.message
+        assert c.skipped_encrypted == [enc] and "unencrypted copy" in c.reason
+        assert K.find_car_kn5(car) == clean
+        assert [lbl for lbl, _ in K.find_car_kn5_lods(car)] == ["A"]
+
+
+def test_resolve_refuses_when_only_encrypted():
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "car"
+        _write(car / "car.kn5", _car_nodes(), encrypted=True)
+        c = K.resolve_car_kn5(car)
+        assert c.refused and "UNENCRYPTED" in c.message
+        assert K.find_car_kn5(car) is None and K.find_car_kn5_lods(car) == []
+        try:
+            K.kn5_all_lods_to_glbs(car, Path(t) / "out")
+            raise AssertionError("expected EncryptedKn5Error")
+        except K.EncryptedKn5Error as e:
+            assert "unencrypted" in str(e).lower()
+
+
+def test_resolve_ignores_accessories_and_unrelated_models():
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "car"
+        _write(car / "car.kn5", _car_nodes(), encrypted=True)
+        # accessory folder: never considered, even though it is a clean KN5
+        _write(car / "extension" / "spoiler.kn5", _car_nodes())
+        # a clean KN5 of something else: rejected for low node overlap
+        other = _write(car / "unencrypted" / "other.kn5",
+                       N("ROOT", children=[N(f"X{i}", "mesh") for i in range(9)]))
+        c = K.resolve_car_kn5(car)
+        assert c.refused
+        assert [p for p, _ in c.rejected] == [other]
+        assert "node overlap" in c.rejected[0][1]
+
+
+def test_resolve_override():
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "car"
+        _write(car / "car.kn5", _car_nodes(), encrypted=True)
+        clean = _write(car / "elsewhere" / "x.kn5", N("ROOT", children=[N("Z", "mesh")]))
+        assert K.resolve_car_kn5(car, override=clean).path == clean
+        assert K.resolve_car_kn5(car, override=car / "car.kn5").refused
+        try:
+            K.resolve_car_kn5(car, override=car / "missing.kn5")
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+
+
+def test_export_refuses_encrypted_file():
+    with tempfile.TemporaryDirectory() as t:
+        enc = _write(Path(t) / "a.kn5", _car_nodes(), encrypted=True)
+        try:
+            K.kn5_to_glb(enc)
+            raise AssertionError("expected EncryptedKn5Error")
+        except K.EncryptedKn5Error:
+            pass
+        assert K.list_skins(enc).get("error")
+
+
+def test_skins_and_lods_follow_the_chosen_copy():
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "car"
+        _write(car / "car.kn5", _car_nodes(), encrypted=True)
+        clean = _write(car / "unencrypted" / "car_unencrypted.kn5", _car_nodes())
+        _write(car / "unencrypted" / "car_unencrypted_LOD_B.kn5", _car_nodes())
+        _write(car / "unencrypted" / "car_LOD_C.kn5", _car_nodes(), encrypted=True)
+        (car / "skins" / "red").mkdir(parents=True)
+        assert [n for n, _ in K._skin_dirs(clean)] == ["red"]       # skins in car root
+        assert [lbl for lbl, _ in K.find_car_kn5_lods(car)] == ["A", "B"]
+
+
+def test_converter_uses_unencrypted_copy():
+    import shutil
+    import pygltflib
+    from converter import build_svj, read_car_directory, _clean
+    src = Path(__file__).parent / "test_car"
+    if not src.is_dir():
+        return
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "synthcar"
+        shutil.copytree(src, car)
+        _write(car / "model.kn5", _car_nodes(), encrypted=True)
+        _write(car / "unencrypted" / "model_decrypted.kn5", _car_nodes())
+        ini, cm, ctrl, dd = read_car_directory(car)
+        out = Path(t) / "out"
+        svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
+                                glb_output_dir=out)
+        glbs = list((out / "meshes").glob("*.glb"))
+        assert [g.name for g in glbs] == ["model_decrypted.glb"], (glbs, log)
+        assert any("skipped (encrypted)" in l for l in log), log
+        assert svj["assets"]["meshes"][0]["uri"] == "meshes/model_decrypted.glb"
+        # a car with ONLY an encrypted KN5 is refused and explained, never exported
+        (car / "unencrypted" / "model_decrypted.kn5").unlink()
+        svj2, log2, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
+                                  glb_output_dir=Path(t) / "out2")
+        assert "assets" not in svj2 and any("UNENCRYPTED" in l for l in log2), log2
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

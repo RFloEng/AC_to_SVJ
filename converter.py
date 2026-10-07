@@ -94,7 +94,7 @@ from tire_lab import (
 try:
     from kn5_reader import (scan_kn5_nodes, map_ac_nodes_to_svj,
                             map_ac_nodes_to_svj_parts,
-                            find_car_kn5, find_car_kn5_lods,
+                            find_car_kn5, find_car_kn5_lods, resolve_car_kn5,
                             kn5_to_glb, kn5_all_lods_to_glbs)
     _KN5_AVAILABLE = True
 except ImportError:
@@ -768,6 +768,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               ctrl_files: Optional[dict] = None,
               glb_output_dir: Optional[Path] = None,
               include_skins: bool = True,
+              kn5_override: Optional[Path] = None,
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
@@ -1406,9 +1407,17 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     # omitted and the SVJ is still fully valid.
     if _KN5_AVAILABLE and data_dir is not None:
         car_path = data_dir.parent
-        kn5_lods = find_car_kn5_lods(car_path)   # [("A", path), ("B", path), ...]
+        try:
+            kn5_lods = find_car_kn5_lods(car_path, kn5_override)  # [("A", path), ...]
+            _choice = resolve_car_kn5(car_path, kn5_override)
+        except ValueError as _e:
+            kn5_lods, _choice = [], None
+            log.append(f"⚠ KN5 override rejected: {_e}")
+        if _choice is not None and _choice.skipped_encrypted:
+            log.append("ℹ KN5: " + _choice.message.replace("\n", "\n    "))
         if not kn5_lods:
-            log.append(f"ℹ KN5 not found in {car_path} — visual bindings and GLB skipped")
+            log.append(f"ℹ No usable KN5 in {car_path} — visual bindings and GLB skipped"
+                       + (f"\n    {_choice.message}" if _choice is not None else ""))
         else:
             kn5_path = kn5_lods[0][1]            # LOD A is always first
             try:
@@ -1473,7 +1482,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                         _glb_dir = glb_output_dir / "meshes"
                         exported = kn5_all_lods_to_glbs(
                             car_path, _glb_dir, include_skins=include_skins,
-                            node_names=node_rename)
+                            node_names=node_rename, kn5_override=kn5_override)
                         for lbl, out_p in exported.items():
                             log.append(f"✓ GLB LOD {lbl} written → meshes/{out_p.name}")
                     except Exception as _glb_err:

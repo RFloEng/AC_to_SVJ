@@ -27,6 +27,24 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Encrypted KN5s and model detection
+
+- **Encrypted KN5s are detected** (CSP marker; detection only) and never
+  exported: `kn5_to_glb` and `list_skins` refuse them with a clear message.
+  Before, such a file parsed fine but produced a GLB with placeholder textures
+  and meshes.
+- **Automatic model selection for any car** — `resolve_car_kn5()` searches the
+  top level and subfolders (not `extension/`, `skins/`, `texture/`, …). With an
+  encrypted KN5 present, an unencrypted copy of the **same** model (≥ 50 % node
+  overlap) is used instead; otherwise the car is refused with an explanation.
+  Without one, the previous rule applies (file named like the folder, else the
+  largest). LODs and skins follow the chosen file (`skins/` is found from the
+  car root even when the KN5 sits in a subfolder).
+- `kn5_override` on `build_svj` / `kn5_all_lods_to_glbs`; `kn5_reader.py`
+  accepts a car folder. The converter log reports which file was used and which
+  were skipped.
+- New `docs/ENCRYPTED_CARS.md` explaining the expected folder layout.
+
 ### KN5 → GLB exporter (`kn5_reader.py`)
 
 - **Variants** — runtime-variant meshes are now *dropped* (subtree and all)
