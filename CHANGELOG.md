@@ -27,6 +27,17 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Crash / damage textures
+
+- The crashed-state textures (`txDamage`, `txDamageMask` of AC's `*_damage` /
+  `*_damage_dirt` shaders, and damage-named maps nothing visible uses) are now
+  **left out of the GLB by default**: a static model never shows them, and they
+  were being embedded as unreferenced images. A texture that is also used as the
+  diffuse (`txDamage` often points at the same file) is kept. Opt back in with
+  `include_damage_textures=True` / `--include-damage-textures`. The export
+  report says how many were left out. (Damage *meshes* were already dropped,
+  see `*_DAMAGE` above.)
+
 ### Encrypted KN5s and model detection
 
 - **Encrypted KN5s are detected** (CSP marker; detection only) and never

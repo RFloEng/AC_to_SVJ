@@ -114,6 +114,8 @@ class Kn5Material:
     tx_normal:        Optional[str] = None
     tx_detail:        Optional[str] = None   # detail/overlay tiling texture
     tx_normal_detail: Optional[str] = None   # detail normal map
+    tx_damage:        Optional[str] = None   # txDamage: crashed-state diffuse (damage shaders)
+    tx_damage_mask:   Optional[str] = None   # txDamageMask: where the damage shows
     use_detail:       bool  = False          # useDetail property (shader gate)
     detail_uv_mult:   float = 1.0            # detailUVMultiplier (typically 5–500)
     normal_uv_mult:   float = 1.0            # normalUVMultiplier
@@ -205,6 +207,8 @@ def _read_materials(f: io.RawIOBase, version: int) -> list[Kn5Material]:
             elif sample_name == "txNormal":        mat.tx_normal        = tex_name
             elif sample_name == "txDetail":        mat.tx_detail        = tex_name
             elif sample_name == "txNormalDetail":  mat.tx_normal_detail = tex_name
+            elif sample_name == "txDamage":        mat.tx_damage        = tex_name
+            elif sample_name == "txDamageMask":    mat.tx_damage_mask   = tex_name
 
         materials.append(mat)
     return materials
@@ -822,6 +826,29 @@ def format_skin_report(report: dict) -> str:
     return "\n".join(lines)
 
 
+_DAMAGE_TOKENS = frozenset({"damage", "damaged", "crash", "crashed", "dmg",
+                            "dent", "dents", "wreck", "wrecked"})
+
+
+def damage_texture_names(model: "Kn5Model") -> set[str]:
+    """
+    Names of textures that exist only for the crashed / damaged state.
+
+    AC's ``*_damage`` / ``*_damage_dirt`` shaders blend ``txDamage`` and
+    ``txDamageMask`` in as the car takes hits; a static GLB never shows them.
+    A texture also counts when its file name has a damage token (``damage_mask``,
+    ``body_M_damage``) and nothing visible uses it.  A texture that a material
+    *also* uses as its diffuse/normal/detail (``txDamage`` often points at the
+    same file as ``txDiffuse``) is never reported.
+    """
+    used = {n for m in model.materials
+            for n in (m.tx_diffuse, m.tx_normal, m.tx_detail, m.tx_normal_detail) if n}
+    slot = {n for m in model.materials for n in (m.tx_damage, m.tx_damage_mask) if n}
+    named = {t.name for t in model.textures
+             if any(tok in _DAMAGE_TOKENS for tok in _NAME_SPLIT.split(t.name.lower()))}
+    return (slot | named) - used
+
+
 def format_export_report(r: dict) -> str:
     """Human-readable summary of the ``report`` dict from kn5_to_glb()."""
     def fmt(v):
@@ -831,7 +858,10 @@ def format_export_report(r: dict) -> str:
         f"nodes     : {r['nodes']}  ({r['transforms']} transforms, "
         f"{r['meshes']} meshes, {r['variants_dropped']} variants dropped)",
         f"triangles : {r['triangles']:,}",
-        f"materials : {r['materials']}   images: {r['images']}",
+        f"materials : {r['materials']}   images: {r['images']}"
+        + (f"   (+{r['damage_textures_skipped']} damage textures left out, "
+           f"{r['damage_textures_skipped_bytes'] / 1e6:.1f} MB)"
+           if r.get("damage_textures_skipped") else ""),
         f"bbox      : min {fmt(r['bbox_min'])}  max {fmt(r['bbox_max'])}",
         f"size      : {sx:.3f} x {sy:.3f} x {sz:.3f} m  (X right, Y up, Z rear)",
     ])
@@ -859,6 +889,7 @@ def kn5_to_glb(
     keep_variants: bool = False,
     default_skin: Optional[str] = "first",
     node_names: Optional[dict[str, str]] = None,
+    include_damage_textures: bool = False,
     report: Optional[dict] = None,
     verbose: bool = False,
 ) -> bytes:
@@ -884,6 +915,10 @@ def kn5_to_glb(
                      ``SVJ::<category>::<id>`` names SVJ visual bindings refer
                      to.  The original AC name is kept in ``extras.ac_name``.
                      A rename that would duplicate an existing name is skipped.
+    include_damage_textures : Embed the crashed-state textures (txDamage /
+                     txDamageMask and damage-named maps that nothing visible
+                     uses).  Default False: they only matter to AC's runtime
+                     damage blending, so they are left out of the GLB.
     report         : Optional dict, filled with export statistics: ``nodes``,
                      ``transforms``, ``meshes``, ``triangles``, ``materials``,
                      ``images``, ``variants_dropped``, ``bbox_min``, ``bbox_max``
@@ -979,9 +1014,16 @@ def kn5_to_glb(
     #   A bimodal alpha means pixels are almost entirely near-0 or near-255 —
     #   i.e. it is a cutout mask rather than a continuous transparency map.
     #   Used below to promote blend_mode==1 materials to MASK when appropriate.
+    damage_skipped: list[str] = []
+    damage_skipped_bytes = 0
+    skip_tex = set() if include_damage_textures else damage_texture_names(model)
     if embed_textures:
         for kn5_tex in model.textures:
             if not kn5_tex.data:
+                continue
+            if kn5_tex.name in skip_tex:
+                damage_skipped.append(kn5_tex.name)
+                damage_skipped_bytes += len(kn5_tex.data)
                 continue
             tidx = _embed_raw(kn5_tex.data, kn5_tex.name)
             if tidx >= 0:
@@ -1379,6 +1421,8 @@ def kn5_to_glb(
             "materials": len(gltf.materials),
             "images": len(gltf.images),
             "variants_dropped": dropped_variants,
+            "damage_textures_skipped": len(damage_skipped),
+            "damage_textures_skipped_bytes": damage_skipped_bytes,
             "bbox_min": [round(float(v), 4) for v in bmin],
             "bbox_max": [round(float(v), 4) for v in bmax],
             "size": [round(float(v), 4) for v in (bmax - bmin)],
@@ -1621,6 +1665,7 @@ def kn5_all_lods_to_glbs(
     default_skin: Optional[str] = "first",
     node_names: Optional[dict[str, str]] = None,
     kn5_override: Optional[Path] = None,
+    include_damage_textures: bool = False,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -1641,6 +1686,7 @@ def kn5_all_lods_to_glbs(
     default_skin  : Skin the base materials use ("first", a name, or "none").
     node_names    : AC node name -> glTF node name rename map, applied to every LOD.
     kn5_override  : Use this KN5 as LOD A instead of auto-detecting it.
+    include_damage_textures : Also embed crashed-state textures (default off).
 
     Returns
     -------
@@ -1661,7 +1707,8 @@ def kn5_all_lods_to_glbs(
                    skins=skins if skins else None,
                    keep_variants=keep_variants,
                    default_skin=default_skin,
-                   node_names=node_names)
+                   node_names=node_names,
+                   include_damage_textures=include_damage_textures)
         results[label] = out_path
     return results
 
@@ -1689,6 +1736,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
                          "still embedded as KHR_materials_variants.")
     ap.add_argument("--no-skins", action="store_true",
                     help="do not embed skins as variants")
+    ap.add_argument("--include-damage-textures", action="store_true",
+                    help="also embed crashed-state textures (txDamage, txDamageMask, "
+                         "damage-named maps); left out by default")
     ap.add_argument("--scan-nodes", action="store_true",
                     help="also print the node names and the SVJ body binding map")
     a = ap.parse_args(argv)
@@ -1722,6 +1772,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
     try:
         glb = kn5_to_glb(a.kn5, output_path=dst, skins=skins or None,
                          keep_variants=a.keep_variants, default_skin=a.skin,
+                         include_damage_textures=a.include_damage_textures,
                          verbose=True)
     except (ValueError, OSError) as e:
         # ValueError covers encrypted / CSP-protected or unsupported KN5s, which

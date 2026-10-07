@@ -648,6 +648,31 @@ def test_converter_uses_unencrypted_copy():
         assert "assets" not in svj2 and any("UNENCRYPTED" in l for l in log2), log2
 
 
+# --- crash / damage textures --------------------------------------------------
+
+def test_damage_textures_left_out_by_default():
+    mats = [("PAINT", "ksPerPixelMultiMap_damage_dirt", {},
+             {"txDiffuse": "skin.png", "txDamage": "skin.png",       # same file: kept
+              "txDamageMask": "damage_mask.png"})]                    # only damage: dropped
+    tex = [("skin.png", noisy_png()), ("damage_mask.png", noisy_png()),
+           ("body_crash_dirt.png", noisy_png()),                      # name token, unused
+           ("undamaged_panel.png", noisy_png())]                      # not a token match
+    root = N("ROOT", children=[N("A", "mesh")])
+    with tempfile.TemporaryDirectory() as t:
+        g, _ = _export(root, Path(t), materials=mats, textures=tex)
+        rep = {}
+        _export(root, Path(t), materials=mats, textures=tex, report=rep)
+        g_all, _ = _export(root, Path(t), materials=mats, textures=tex,
+                           include_damage_textures=True)
+    names = {im.name for im in g.images}
+    assert "skin.png" in names                                  # still used as diffuse
+    assert "damage_mask.png" not in names and "body_crash_dirt.png" not in names
+    assert "undamaged_panel.png" in names
+    assert rep["damage_textures_skipped"] == 2 and rep["damage_textures_skipped_bytes"] > 0
+    assert {"damage_mask.png", "body_crash_dirt.png"} <= {im.name for im in g_all.images}
+    assert "damage textures left out" in K.format_export_report(rep)
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
