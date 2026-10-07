@@ -392,6 +392,56 @@ _AC_TO_SVJ_BODY: list[tuple[list[str], str]] = [
 ]
 
 
+# AC corner suffixes -> SVJ station
+_AC_CORNERS = {"LF": "FL", "FL": "FL", "RF": "FR", "FR": "FR",
+               "LR": "RL", "RL": "RL", "RR": "RR"}
+
+# AC node prefix (before the corner suffix) -> (SVJ category, part).  Order matters
+# inside a part: the first prefix found in the file wins.
+_AC_CORNER_PARTS: list[tuple[str, str, list[str]]] = [
+    ("suspension", "upright", ["SUSP", "UPRIGHT", "HUB"]),
+    ("wheel",      "wheel",   ["WHEEL"]),
+    ("brake",      "disc",    ["DISC"]),
+]
+
+
+def map_ac_nodes_to_svj_parts(node_names: list[str]) -> list[dict]:
+    """
+    Map AC node names to SVJ visual bindings (SVJ v0.99.2 categories).
+
+    Returns a list of ``{"ac_name", "category", "part", "station", "id",
+    "node"}`` dicts, where ``node`` is the glTF node name
+    ``SVJ::<category>::<id>`` the exporter should give that node (see
+    ``kn5_to_glb(node_names=...)``).  Recognised: the chassis, and per corner the
+    upright (SUSP_/UPRIGHT_/HUB_), the wheel (WHEEL_) and the brake disc
+    (DISC_).  Nothing is invented: a part is only returned when the KN5 has a
+    node for it.
+    """
+    upper = {n.upper(): n for n in node_names}
+    out: list[dict] = []
+
+    for pat in ("BODY", "CHASSIS", "CAR_BODY", "BODY_HR", "COCKPIT_HR",
+                "EXTERIOR", "SHELL", "BODYSHELL"):
+        if pat in upper:
+            out.append({"ac_name": upper[pat], "category": "body", "part": "chassis",
+                        "station": None, "id": "chassis",
+                        "node": "SVJ::body::chassis"})
+            break
+
+    for category, part, prefixes in _AC_CORNER_PARTS:
+        for ac_suffix, station in _AC_CORNERS.items():
+            for prefix in prefixes:
+                key = f"{prefix}_{ac_suffix}"
+                if key in upper and not any(
+                        b["part"] == part and b["station"] == station for b in out):
+                    pid = f"{part}_{station.lower()}"
+                    out.append({"ac_name": upper[key], "category": category,
+                                "part": part, "station": station, "id": pid,
+                                "node": f"SVJ::{category}::{pid}"})
+                    break
+    return out
+
+
 def map_ac_nodes_to_svj(node_names: list[str]) -> dict[str, str]:
     """
     Map AC node names to SVJ body ids.
@@ -798,6 +848,7 @@ def kn5_to_glb(
     skins: Optional[list[tuple[str, Path]]] = None,
     keep_variants: bool = False,
     default_skin: Optional[str] = "first",
+    node_names: Optional[dict[str, str]] = None,
     report: Optional[dict] = None,
     verbose: bool = False,
 ) -> bytes:
@@ -818,6 +869,11 @@ def kn5_to_glb(
     default_skin   : Skin the base materials are resolved against: "first"
                      (default; what AC itself loads), a skin name, or "none"
                      to keep the KN5's embedded (template) textures.
+    node_names     : Optional ``{ac_node_name: gltf_node_name}`` rename map
+                     (e.g. from map_ac_nodes_to_svj_parts) so nodes carry the
+                     ``SVJ::<category>::<id>`` names SVJ visual bindings refer
+                     to.  The original AC name is kept in ``extras.ac_name``.
+                     A rename that would duplicate an existing name is skipped.
     report         : Optional dict, filled with export statistics: ``nodes``,
                      ``transforms``, ``meshes``, ``triangles``, ``materials``,
                      ``images``, ``variants_dropped``, ``bbox_min``, ``bbox_max``
@@ -919,6 +975,8 @@ def kn5_to_glb(
                 tex_idx[kn5_tex.name] = tidx
 
     ext_used: set[str] = set()
+    rename = dict(node_names or {})
+    used_names: set[str] = set()      # filled as nodes are renamed
 
     # -- Livery / paint resolution ---------------------------------------------
     # The game replaces KN5 textures by name with files from skins/<name>/.  The
@@ -1108,6 +1166,11 @@ def kn5_to_glb(
             dropped_variants += 1       # subtree goes with it
             return None
         gnode = pygltflib.Node(name=kn5_node.name)
+        new_name = rename.get(kn5_node.name)
+        if new_name and new_name not in used_names:
+            gnode.name = new_name
+            gnode.extras = {"ac_name": kn5_node.name}
+            used_names.add(new_name)
         world = parent_world
 
         if kn5_node.node_type == 1 and kn5_node.matrix:
@@ -1391,6 +1454,7 @@ def kn5_all_lods_to_glbs(
     include_skins: bool = True,
     keep_variants: bool = False,
     default_skin: Optional[str] = "first",
+    node_names: Optional[dict[str, str]] = None,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -1409,6 +1473,7 @@ def kn5_all_lods_to_glbs(
                     KHR_materials_variants inside the GLB.
     keep_variants : Keep *_BLUR / *_DAMAGE / in-file low-res meshes.
     default_skin  : Skin the base materials use ("first", a name, or "none").
+    node_names    : AC node name -> glTF node name rename map, applied to every LOD.
 
     Returns
     -------
@@ -1426,7 +1491,8 @@ def kn5_all_lods_to_glbs(
                    embed_textures=embed_textures,
                    skins=skins if skins else None,
                    keep_variants=keep_variants,
-                   default_skin=default_skin)
+                   default_skin=default_skin,
+                   node_names=node_names)
         results[label] = out_path
     return results
 

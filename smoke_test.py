@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from converter import build_svj, read_car_directory, _clean
+from converter import build_svj, read_car_directory, _clean, SVJ_VERSION
 
 def main():
     # KN5 -> GLB exporter checks use a synthetic KN5 (no AC content). They run
@@ -51,7 +51,7 @@ def main():
 
     checks = {
         "metadata ok": svj["_metadata"]["specification"] == "SVJ"
-                       and svj["_metadata"]["version"] == "0.95"
+                       and svj["_metadata"]["version"] == SVJ_VERSION
                        and "ac_to_svj_converter" in svj["_metadata"]["author"],
         "data_origin present": (
             svj["_metadata"].get("data_origin", {}).get("type") == "simulation"
@@ -175,12 +175,12 @@ def main():
     print(f"tire sets: {ts_names}")
     for ts_name in ts_names:
         ts = svj["tires"]["sets"][ts_name]
-        has = "pacejka_mf52" in ts.get("models", {})
-        print(f"  {'✓' if has else '✗'}  '{ts_name}' has models.pacejka_mf52")
+        has = "pacejka_mf52" in ts
+        print(f"  {'✓' if has else '✗'}  '{ts_name}' has pacejka_mf52")
         if has:
-            mf = ts["models"]["pacejka_mf52"]
-            print(f"      lat  R² = {mf['pure_slip_lateral']['_metrics']['r2']:.4f}")
-            print(f"      long R² = {mf['pure_slip_longitudinal']['_metrics']['r2']:.4f}")
+            mf = ts["pacejka_mf52"]
+            print(f"      lat  R² = {mf['_metrics']['lateral']['r2']:.4f}")
+            print(f"      long R² = {mf['_metrics']['longitudinal']['r2']:.4f}")
 
     print("\n──── BENCH RESULTS ────")
     for axle, br in bench.items():

@@ -104,6 +104,25 @@ The SVJ `assets.meshes` block lists every LOD that was found:
 }
 ```
 
+**Visual bindings (SVJ v0.99.2)**
+
+The converter targets SVJ **0.99.2** and, when a KN5 is present, binds the parts
+it can find to glTF nodes named `SVJ::<category>::<id>`. The exported GLB's
+nodes are **renamed to match** (the original AC name is kept in the node's
+`extras.ac_name`), so every binding resolves:
+
+| AC node | SVJ `visual.node` | Carrier in the SVJ file |
+|---------|-------------------|-------------------------|
+| `BODY` (and aliases) | `SVJ::body::chassis` | `chassis.visual` |
+| `SUSP_xx` / `UPRIGHT_xx` / `HUB_xx` | `SVJ::suspension::upright_fl` … | `suspension.<station>.visual` |
+| `WHEEL_xx` | `SVJ::wheel::wheel_fl` … | `suspension.<station>.wheel.visual` |
+| `DISC_xx` | `SVJ::brake::disc_fl` … | `suspension.<station>.brake.disc.visual` |
+
+A part is bound only when the KN5 actually has a node for it. Not bound (no
+reliable AC source, or no carrier object in the converter's output): wishbones
+and other links (`placement: link_between_points`), steering wheel/rack,
+calipers, springs and dampers.
+
 **Mesh cleaning applied automatically:**
 
 - **Runtime variants dropped** — blur-rim discs (`RIM_BLUR_*`,

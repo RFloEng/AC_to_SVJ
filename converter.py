@@ -93,6 +93,7 @@ from tire_lab import (
 )
 try:
     from kn5_reader import (scan_kn5_nodes, map_ac_nodes_to_svj,
+                            map_ac_nodes_to_svj_parts,
                             find_car_kn5, find_car_kn5_lods,
                             kn5_to_glb, kn5_all_lods_to_glbs)
     _KN5_AVAILABLE = True
@@ -101,7 +102,7 @@ except ImportError:
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-SVJ_VERSION = "0.97"
+SVJ_VERSION = "0.99.2"
 SVJ_SPEC    = "SVJ"
 CONV_VER    = "0.9.1"
 REPO_URL    = "https://github.com/RFloEng/SVJ-standard-vehicle-json"
@@ -149,6 +150,16 @@ def susp_type(raw) -> str:
 
 def drive_layout(raw: str) -> str:
     return DRIVE_LAYOUT_MAP.get((raw or "").upper().strip(), "FR")
+
+
+_DRIVE_TYPE_BY_LAYOUT = {"FR": "RWD", "MR": "RWD", "RR": "RWD", "FF": "FWD"}
+
+
+def drive_type(layout: str) -> Optional[str]:
+    """vehicle_info.drive_type (FWD/RWD/AWD/4WD) from a layout code (FR/MR/RR/FF)."""
+    if layout in ("FWD", "RWD", "AWD", "4WD"):
+        return layout
+    return _DRIVE_TYPE_BY_LAYOUT.get(layout)
 
 
 # ─── Coordinate transform ────────────────────────────────────────────────────
@@ -725,12 +736,17 @@ def build_corner(corner_id: str, susp_axle: dict,
 
 def fit_tyre_axle_section(
         tyres_ini_dict: dict, section: str, axle: str, log: list,
+        data_dir: Optional[Path] = None,
 ) -> tuple[Optional[dict], Optional[dict], Optional[BenchResult]]:
     """
     Returns (mf52_block, mf62_block, BenchResult).
     Both blocks are None when the section has no usable AC parameters.
+
+    data_dir — car's data/ directory; required to resolve DY_CURVE / DX_CURVE
+               LUT files for advanced CSP tyres.  Pass None to skip LUT reading.
     """
-    p = parse_tyre_section(tyres_ini_dict, section=section, axle=axle)
+    p = parse_tyre_section(tyres_ini_dict, section=section, axle=axle,
+                           data_dir=data_dir)
     if p.source == "defaults":
         log.append(f"  ⚠ {axle} [{section}]: no usable params — Pacejka blocks omitted")
         return None, None, None
@@ -970,8 +986,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         name_r = tire_set_name("rear",  suffix, tw_r, asp_r, rim_r)
 
         # Pacejka fit — returns (mf52, mf62, BenchResult)
-        pf52, pf62, br_f = fit_tyre_axle_section(t, f_sec, f"front{suffix}", log)
-        pr52, pr62, br_r = fit_tyre_axle_section(t, r_sec, f"rear{suffix}",  log)
+        pf52, pf62, br_f = fit_tyre_axle_section(t, f_sec, f"front{suffix}", log, data_dir)
+        pr52, pr62, br_r = fit_tyre_axle_section(t, r_sec, f"rear{suffix}",  log, data_dir)
         if pair_idx == 0:
             pacejka_front    = pf62  # MF62 is now the primary reference
             pacejka_rear     = pr62
@@ -1225,7 +1241,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         },
         "vehicle_info": {
             "make": brand or None, "model": _model, "year": year or None,
-            "variant": car_class or None, "drive_type": layout,
+            "variant": car_class or None, "drive_type": drive_type(layout),
         },
         "chassis": {
             "mass_total":               total_mass,
@@ -1397,7 +1413,6 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
             kn5_path = kn5_lods[0][1]            # LOD A is always first
             try:
                 node_names = scan_kn5_nodes(kn5_path)
-                body_map   = map_ac_nodes_to_svj(node_names)  # {svj_id: ac_name}
                 glb_uri    = f"meshes/{kn5_path.stem}.glb"
                 mesh_id    = kn5_path.stem.lower().replace("-", "_").replace(" ", "_")
 
@@ -1421,30 +1436,34 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
 
                 svj["assets"] = {"meshes": mesh_entries}
 
-                # chassis visual binding (always points at LOD A mesh)
-                if "chassis" in body_map:
-                    svj["chassis"]["visual"] = {
-                        "mesh_ref": mesh_id,
-                        "node":     f"SVJ::body::chassis",
-                    }
-
-                # suspension corner visual bindings (upright per corner)
-                _CORNER_MAP = {
-                    "FL": "upright_fl",
-                    "FR": "upright_fr",
-                    "RL": "upright_rl",
-                    "RR": "upright_rr",
-                }
-                for corner, svj_id in _CORNER_MAP.items():
-                    if svj_id in body_map and corner in svj.get("suspension", {}):
-                        svj["suspension"][corner]["visual"] = {
-                            "mesh_ref": mesh_id,
-                            "node":     f"SVJ::body::{svj_id}",
-                        }
+                # Visual bindings (SVJ v0.99.2 categories).  Every binding points
+                # at LOD A and names the glTF node the exporter will create
+                # (SVJ::<category>::<id>); a part is bound only when the KN5 has
+                # a node for it AND the SVJ output has the part to carry it.
+                node_rename: dict = {}
+                for part in map_ac_nodes_to_svj_parts(node_names):
+                    vis = {"mesh_ref": mesh_id, "node": part["node"]}
+                    st = part["station"]
+                    corner = svj.get("suspension", {}).get(st) if st else None
+                    carrier = None
+                    if part["part"] == "chassis":
+                        carrier = svj["chassis"]
+                    elif corner is not None:
+                        if part["part"] == "upright":
+                            carrier = corner
+                        elif part["part"] == "wheel":
+                            carrier = corner.setdefault("wheel", {})
+                        elif part["part"] == "disc":
+                            disc = (corner.get("brake") or {}).get("disc")
+                            carrier = disc if isinstance(disc, dict) else None
+                    if carrier is None:
+                        continue
+                    carrier["visual"] = vis
+                    node_rename[part["ac_name"]] = part["node"]
 
                 lod_labels = [lbl for lbl, _ in kn5_lods]
                 log.append(
-                    f"✓ KN5 visual bindings: {len(body_map)} nodes mapped "
+                    f"✓ KN5 visual bindings: {len(node_rename)} parts bound "
                     f"from {kn5_path.name} (LODs: {', '.join(lod_labels)}) → {glb_uri}"
                 )
 
@@ -1453,7 +1472,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                     try:
                         _glb_dir = glb_output_dir / "meshes"
                         exported = kn5_all_lods_to_glbs(
-                            car_path, _glb_dir, include_skins=include_skins)
+                            car_path, _glb_dir, include_skins=include_skins,
+                            node_names=node_rename)
                         for lbl, out_p in exported.items():
                             log.append(f"✓ GLB LOD {lbl} written → meshes/{out_p.name}")
                     except Exception as _glb_err:

@@ -442,6 +442,75 @@ def test_export_report_verbose_prints():
     assert "nodes" in out and "bbox" in out and "materials" in out
 
 
+# --- SVJ v0.99.2 visual bindings ----------------------------------------------
+
+def test_part_mapping():
+    names = ["BODY", "SUSP_LF", "WHEEL_LF", "DISC_LF", "WHEEL_RR", "HUB_RF",
+             "WHEEL_LR", "STEER_HR", "STEER_LR"]
+    parts = {(b["part"], b["station"]): b for b in K.map_ac_nodes_to_svj_parts(names)}
+    assert parts[("chassis", None)]["node"] == "SVJ::body::chassis"
+    assert parts[("upright", "FL")]["node"] == "SVJ::suspension::upright_fl"
+    assert parts[("upright", "FR")]["ac_name"] == "HUB_RF"      # fallback prefix
+    assert parts[("wheel", "FL")]["node"] == "SVJ::wheel::wheel_fl"
+    assert parts[("wheel", "RR")]["node"] == "SVJ::wheel::wheel_rr"
+    assert parts[("wheel", "RL")]["ac_name"] == "WHEEL_LR"      # LR = Left Rear
+    assert parts[("disc", "FL")]["node"] == "SVJ::brake::disc_fl"
+    assert ("disc", "FR") not in parts                          # nothing invented
+
+
+def test_node_rename():
+    root = N("ROOT", children=[N("WHEEL_LF", "mesh"), N("DISC_LF", "mesh")])
+    with tempfile.TemporaryDirectory() as t:
+        g, _ = _export(root, Path(t), node_names={
+            "WHEEL_LF": "SVJ::wheel::wheel_fl",
+            "DISC_LF": "SVJ::wheel::wheel_fl"})        # duplicate target: skipped
+    by = {n.name: n for n in g.nodes}
+    assert by["SVJ::wheel::wheel_fl"].extras == {"ac_name": "WHEEL_LF"}
+    assert "DISC_LF" in by                                # not renamed onto a duplicate
+
+
+def test_converter_emits_v0992_bindings():
+    """Synthetic car folder -> real build_svj: bindings exist, are named by the
+    SVJ::<category>::<id> convention, and the exported GLB contains those nodes."""
+    import shutil
+    import pygltflib
+    from converter import build_svj, read_car_directory, _clean
+    src = Path(__file__).parent / "test_car"
+    if not src.is_dir():
+        return
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "synthcar"
+        shutil.copytree(src, car)
+        tree = N("ROOT", children=[
+            N("BODY", "mesh"), N("SUSP_LF", "mesh"), N("WHEEL_LF", "mesh"),
+            N("DISC_LF", "mesh"), N("WHEEL_RR", "mesh")])
+        (car / "synthcar.kn5").write_bytes(make_kn5(tree, materials=[
+            ("MAT", "ksPerPixel", {}, {})]))
+        ini, cm, ctrl, dd = read_car_directory(car)
+        out = Path(t) / "out"
+        svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
+                                glb_output_dir=out)
+        svj = _clean(svj)
+        glb = out / "meshes" / "synthcar.glb"
+        assert glb.is_file(), log
+        names = {n.name for n in pygltflib.GLTF2().load(str(glb)).nodes}
+    assert svj["_metadata"]["version"] == "0.99.2"
+    assert svj["vehicle_info"]["drive_type"] in ("FWD", "RWD", "AWD", "4WD")
+    sus = svj["suspension"]
+    assert svj["chassis"]["visual"]["node"] == "SVJ::body::chassis"
+    assert sus["FL"]["visual"]["node"] == "SVJ::suspension::upright_fl"
+    assert sus["FL"]["wheel"]["visual"]["node"] == "SVJ::wheel::wheel_fl"
+    assert sus["RR"]["wheel"]["visual"]["node"] == "SVJ::wheel::wheel_rr"
+    assert "visual" not in sus["FR"] and "visual" not in sus["FR"]["wheel"]
+    bound = [sus["FL"]["visual"]["node"], sus["FL"]["wheel"]["visual"]["node"],
+             sus["RR"]["wheel"]["visual"]["node"], svj["chassis"]["visual"]["node"]]
+    disc = (sus["FL"].get("brake") or {}).get("disc") or {}
+    if "visual" in disc:
+        bound.append(disc["visual"]["node"])
+    for node in bound:
+        assert node in names, (node, sorted(names))     # bindings resolve in the GLB
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

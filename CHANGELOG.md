@@ -4,6 +4,29 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### SVJ v0.99.2 alignment
+
+- **Target version** `0.97` → `0.99.2`.
+- **Visual bindings** extended to the v0.99.2 categories: wheels
+  (`SVJ::wheel::wheel_fl`) and brake discs (`SVJ::brake::disc_fl`) are bound
+  alongside the chassis and uprights, and uprights now use the preferred
+  `SVJ::suspension::upright_fl` form (the legacy `SVJ::body::upright_fl` is
+  still valid in the standard). New `map_ac_nodes_to_svj_parts()`; the old
+  `map_ac_nodes_to_svj()` is unchanged.
+- **GLB nodes are renamed to the bound names** (`kn5_to_glb(node_names=...)`,
+  original AC name kept in `extras.ac_name`). Previously the SVJ file named
+  `SVJ::body::chassis` etc. but the exported GLB still used raw AC names
+  (`BODY`, `WHEEL_LF`), so the bindings pointed at nodes that did not exist.
+- **`vehicle_info.drive_type`** is now `FWD` / `RWD` (derived from the layout
+  code) instead of the invalid `FR`; the layout code stays in
+  `powertrain.layout`.
+- `smoke_test.py`: the stale `version == "0.95"` check now compares against the
+  converter's `SVJ_VERSION`, and the Pacejka checks read the tyre-set layout the
+  converter actually emits.
+- Known gap: `suspension.<station>.wheel.rim_width` is required by the schema
+  but AC does not store a rim width, so the converter still omits it (4 schema
+  errors on any car).
+
 ### KN5 → GLB exporter (`kn5_reader.py`)
 
 - **Variants** — runtime-variant meshes are now *dropped* (subtree and all)
