@@ -44,6 +44,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from ac_parsers import parse_lut as _parse_lut
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1.  AC tyre parameters
@@ -72,7 +74,7 @@ class ACTyreParams:
     PRESSURE_NOW_PSI: float = 27.0
     PRESSURE_GAIN: float = 0.005
 
-    source: str = "defaults"     # "defaults" | "tyres.ini" | "mixed" | "csp_extended" | "csp_mixed"
+    source: str = "defaults"     # "defaults"|"tyres.ini"|"mixed"|"csp_extended"|"csp_mixed"|"csp_lut"
 
 
 def _f(raw, default: Optional[float]) -> Optional[float]:
@@ -80,6 +82,63 @@ def _f(raw, default: Optional[float]) -> Optional[float]:
         return float(raw)
     except (TypeError, ValueError):
         return default
+
+
+# ─── LUT friction helpers (CSP DY_CURVE / DX_CURVE format) ──────────────────
+
+def _lut_interp(pairs: list, x: float) -> float:
+    """Linear interpolation on sorted (x, y) LUT pairs.  Clamps at ends."""
+    if not pairs:
+        return 0.0
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+    if x <= xs[0]:
+        return float(ys[0])
+    if x >= xs[-1]:
+        return float(ys[-1])
+    for i in range(len(xs) - 1):
+        if xs[i] <= x <= xs[i + 1]:
+            t = (x - xs[i]) / (xs[i + 1] - xs[i])
+            return float(ys[i] + t * (ys[i + 1] - ys[i]))
+    return float(ys[-1])
+
+
+def _fit_mu_lut(pairs: list, fz0: float) -> tuple[float, float]:
+    """
+    Fit DY0, DY1 from a (Fz_N, mu) friction LUT using linear regression.
+
+    The CSP brush model with LS_EXPY=1 reduces to:
+        mu(Fz) = DY0 + DY1 * (Fz/FZ0 − 1)
+
+    We sample the LUT at several load fractions around FZ0, then solve the
+    2-parameter OLS system.  Returns (DY0, DY1) ready to drop into ACTyreParams.
+    DY0 ≥ 0.01 is guaranteed; DY1 is unconstrained (typically negative).
+    """
+    fracs = np.array([0.25, 0.43, 0.67, 1.0, 1.43, 2.0, 2.33])
+    sample_fz = fracs * fz0
+    mu_vals = np.array([_lut_interp(pairs, fz) for fz in sample_fz])
+    x = fracs - 1.0                                  # (fz_n − 1)
+    A = np.column_stack([np.ones_like(x), x])
+    coeff, *_ = np.linalg.lstsq(A, mu_vals, rcond=None)
+    dy0 = max(float(coeff[0]), 0.01)
+    dy1 = float(coeff[1])
+    return dy0, dy1
+
+
+def _read_tyre_lut(data_dir: Path, ref: str) -> Optional[list]:
+    """Resolve and parse a tyre friction LUT referenced in tyres.ini."""
+    ref = str(ref).strip().strip('"').strip("'")
+    candidate = data_dir / ref
+    if not candidate.is_file():
+        alt = data_dir / (ref + ".lut")
+        if alt.is_file():
+            candidate = alt
+        else:
+            return None
+    try:
+        return _parse_lut(candidate.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
 
 
 def _is_csp_tyre(sec: dict) -> bool:
@@ -99,7 +158,8 @@ def _is_csp_tyre(sec: dict) -> bool:
 
 
 def parse_tyre_section(parsed_ini: dict, section: str = "FRONT",
-                       axle: str = "front") -> ACTyreParams:
+                       axle: str = "front",
+                       data_dir: Optional[Path] = None) -> ACTyreParams:
     """
     Build an ACTyreParams from an already-parsed `tyres.ini` dict.
     Missing fields fall back to defaults. Section name is typically
@@ -135,6 +195,34 @@ def parse_tyre_section(parsed_ini: dict, section: str = "FRONT",
         if v is not None:
             setattr(d, attr, v)
             matched += 1
+
+    # ── CSP LUT-based friction (DY_CURVE / DX_CURVE) ────────────────────────
+    # Advanced CSP tyres store friction as load-indexed LUT files (Fz_N → μ)
+    # rather than scalar DY0/DY1.  In this format DY0=DY1=DX0=DX1=0 in the ini
+    # and LS_EXPY=0 acts as a sentinel.  We detect this when DY_CURVE is present
+    # AND DY0 is still zero after standard mapping, then fit DY0/DY1 from the LUT
+    # via linear regression (equivalent to LS_EXPY=1 model).  This gives the
+    # sweep generator realistic peak forces to fit Pacejka coefficients against.
+    is_lut_friction = False
+    if data_dir is not None:
+        dy_curve_ref = sec.get("DY_CURVE")
+        dx_curve_ref = sec.get("DX_CURVE")
+
+        if dy_curve_ref is not None and abs(d.DY0) < 1e-6:
+            dy_lut = _read_tyre_lut(data_dir, dy_curve_ref)
+            if dy_lut:
+                d.DY0, d.DY1 = _fit_mu_lut(dy_lut, d.FZ0)
+                d.LS_EXPY = 1.0   # linear load model; non-linearity baked into LUT fit
+                matched += 2
+                is_lut_friction = True
+
+        if dx_curve_ref is not None and abs(d.DX0) < 1e-6:
+            dx_lut = _read_tyre_lut(data_dir, dx_curve_ref)
+            if dx_lut:
+                d.DX0, d.DX1 = _fit_mu_lut(dx_lut, d.FZ0)
+                d.LS_EXPX = 1.0
+                matched += 2
+                is_lut_friction = True
 
     # ── CSP Extended Physics tyre parameters ─────────────────────────────────
     # Detected when LS_EXPY / FALLOFF_LEVEL / FRICTION_LIMIT_ANGLE are present
@@ -183,7 +271,11 @@ def parse_tyre_section(parsed_ini: dict, section: str = "FRONT",
             d.KINETIC_RATIO = xmu
             matched += 1
 
-    if is_csp and matched >= 4:
+    if is_lut_friction and matched >= 4:
+        d.source = "csp_lut"
+    elif is_lut_friction:
+        d.source = "csp_mixed"
+    elif is_csp and matched >= 4:
         d.source = "csp_extended"
     elif is_csp and matched > 0:
         d.source = "csp_mixed"

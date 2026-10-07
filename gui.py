@@ -1049,7 +1049,8 @@ class App(tk.Tk):
             )
         text   = tyres_ini.read_text(encoding="utf-8", errors="replace")
         parsed = parse_ini(text)
-        p = parse_tyre_section(parsed, section="FRONT", axle="front")
+        p = parse_tyre_section(parsed, section="FRONT", axle="front",
+                               data_dir=car_path / "data")
         if p.source == "defaults":
             return (None,)*5 + ("No usable AC tyre parameters found in tyres.ini.",)
         return self._bench(p, header=f"Car: {car_path.name}")
