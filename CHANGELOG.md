@@ -27,6 +27,19 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Output files
+
+- **Fix: conversion failed at the very end for cars whose display name holds
+  characters Windows forbids in file names** (e.g. `3.2 (E36) "Regional Rally"`
+  -> `OSError: Invalid argument`). Output stems are now filesystem-safe
+  (`<>:"/\|?*` and control characters removed, trailing dots/spaces trimmed,
+  reserved names such as `CON` rejected, falling back to the folder name); names
+  that were already safe are unchanged.
+- **Meshes next to the JSON** — new `meshes_subdir` option on `build_svj`
+  (default `"meshes"`; `""` puts the GLBs in the same folder as the JSON and
+  writes bare `assets.meshes[].uri` values such as `car.glb`) and a GUI checkbox
+  "Meshes next to the JSON (no meshes/ folder)".
+
 ### Crash / damage textures
 
 - The crashed-state textures (`txDamage`, `txDamageMask` of AC's `*_damage` /

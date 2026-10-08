@@ -673,6 +673,53 @@ def test_damage_textures_left_out_by_default():
     assert "damage textures left out" in K.format_export_report(rep)
 
 
+# --- output file names --------------------------------------------------------
+
+def test_car_stem_is_filesystem_safe():
+    from converter import _car_stem
+    stem = lambda model, fb="fallback_dir": _car_stem({"vehicle_info": {"model": model}}, fb)
+    # the car that failed: quotes in the display name
+    assert stem('M3 E36 3.2 (E36) "Regional Rally"') == "m3_e36_3.2_(e36)_regional_rally"
+    # names that were already safe are unchanged
+    assert stem("MX-5 ND Club") == "mx-5_nd_club"
+    assert stem("Golf 1.8T (Mk4)") == "golf_1.8t_(mk4)"
+    # every character Windows forbids is dropped; trailing dots/spaces trimmed
+    assert stem('a<b>c:d"e/f\\g|h?i*j') == "abcdefghij"
+    assert stem("Rally. ") == "rally"
+    # empty or reserved results fall back to the folder name, then to "car"
+    assert stem('???') == "fallback_dir"
+    assert stem("CON") == "fallback_dir" and stem("nul.txt") == "fallback_dir"
+    assert stem(None) == "fallback_dir"
+    assert stem('???', fb="???") == "car"
+    assert len(stem("x" * 100)) == 40
+    # and the result really can be used as a file name
+    with tempfile.TemporaryDirectory() as t:
+        (Path(t) / f"{stem(chr(34) + 'Regional Rally' + chr(34))}.svj.json").write_text("{}")
+
+
+def test_meshes_next_to_json():
+    """meshes_subdir="" puts the GLB beside the JSON and writes bare URIs."""
+    import shutil
+    from converter import build_svj, read_car_directory, _clean
+    src = Path(__file__).parent / "test_car"
+    if not src.is_dir():
+        return
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "synthcar"
+        shutil.copytree(src, car)
+        _write(car / "synthcar.kn5", _car_nodes())
+        ini, cm, ctrl, dd = read_car_directory(car)
+        for sub, uri, where in (("meshes", "meshes/synthcar.glb", "out_sub/meshes"),
+                                ("", "synthcar.glb", "out_flat")):
+            out = Path(t) / Path(where).parts[0]
+            svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
+                                    glb_output_dir=out, meshes_subdir=sub)
+            svj = _clean(svj)
+            assert svj["assets"]["meshes"][0]["uri"] == uri, svj["assets"]
+            assert (Path(t) / where / "synthcar.glb").is_file(), (where, log)
+            assert not (sub == "" and (out / "meshes").exists())
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

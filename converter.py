@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -769,6 +770,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               glb_output_dir: Optional[Path] = None,
               include_skins: bool = True,
               kn5_override: Optional[Path] = None,
+              meshes_subdir: str = "meshes",
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
@@ -1422,7 +1424,10 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
             kn5_path = kn5_lods[0][1]            # LOD A is always first
             try:
                 node_names = scan_kn5_nodes(kn5_path)
-                glb_uri    = f"meshes/{kn5_path.stem}.glb"
+                # GLBs live in <meshes_subdir>/ next to the JSON, or directly
+                # beside it when meshes_subdir is "" (URIs are relative to the JSON).
+                _mp        = f"{meshes_subdir}/" if meshes_subdir else ""
+                glb_uri    = f"{_mp}{kn5_path.stem}.glb"
                 mesh_id    = kn5_path.stem.lower().replace("-", "_").replace(" ", "_")
 
                 # Build assets.meshes list — LOD A first, then B/C/D entries
@@ -1435,7 +1440,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 ]
                 for lod_label, lod_path in kn5_lods[1:]:
                     lod_id  = lod_path.stem.lower().replace("-", "_").replace(" ", "_")
-                    lod_uri = f"meshes/{lod_path.stem}.glb"
+                    lod_uri = f"{_mp}{lod_path.stem}.glb"
                     mesh_entries.append({
                         "id":          lod_id,
                         "uri":         lod_uri,
@@ -1479,12 +1484,13 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 # ── GLB export (only when caller supplies an output dir) ───
                 if glb_output_dir is not None:
                     try:
-                        _glb_dir = glb_output_dir / "meshes"
+                        _glb_dir = (glb_output_dir / meshes_subdir
+                                    if meshes_subdir else glb_output_dir)
                         exported = kn5_all_lods_to_glbs(
                             car_path, _glb_dir, include_skins=include_skins,
                             node_names=node_rename, kn5_override=kn5_override)
                         for lbl, out_p in exported.items():
-                            log.append(f"✓ GLB LOD {lbl} written → meshes/{out_p.name}")
+                            log.append(f"✓ GLB LOD {lbl} written → {_mp}{out_p.name}")
                     except Exception as _glb_err:
                         log.append(f"⚠ GLB export failed: {_glb_err}")
 
@@ -1574,9 +1580,26 @@ def read_car_directory(car_path: Path) -> tuple[dict, Optional[dict], dict, Path
     return ini_files, cm_meta, ctrl_files, data_dir
 
 
+_FS_INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_FS_RESERVED = frozenset({"con", "prn", "aux", "nul",
+                          *(f"com{i}" for i in range(1, 10)),
+                          *(f"lpt{i}" for i in range(1, 10))})
+
+
+def _fs_safe(name: str) -> str:
+    """Lowercase, spaces -> '_', and characters Windows forbids in file names
+    (< > : " / \\ | ? * and control chars) removed; trailing dots/spaces trimmed;
+    reserved device names (CON, NUL, COM1, ...) rejected. May return ''."""
+    stem = _FS_INVALID.sub("", str(name)).strip().lower().replace(" ", "_")[:40].rstrip(" .")
+    return "" if stem.split(".")[0] in _FS_RESERVED else stem
+
+
 def _car_stem(svj: dict, fallback: str) -> str:
+    """File-name stem for a car's outputs, from its model name. The display name
+    can hold anything (e.g. ``3.2 (E36) "Regional Rally"``), so it is made safe
+    for use as a file name; names that were already safe are unchanged."""
     name = svj.get("vehicle_info", {}).get("model") or fallback
-    return name.lower().replace(" ", "_")[:40]
+    return _fs_safe(name) or _fs_safe(fallback) or "car"
 
 
 if __name__ == "__main__":

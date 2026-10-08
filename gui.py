@@ -335,10 +335,11 @@ def _write_car_log(car_out: Path, stem: str, car_path: Path,
                 for suffix in ("lateral", "longitudinal", "mu_vs_fz"):
                     lines.append(f"  {stem}.tires_{tag}_{suffix}.png")
         if convert_glb:
-            glb_dir = car_out / "meshes"
-            if glb_dir.is_dir():
-                for g in sorted(glb_dir.glob("*.glb")):
-                    lines.append(f"  meshes/{g.name}")
+            for sub in ("meshes", ""):
+                glb_dir = car_out / sub if sub else car_out
+                if glb_dir.is_dir():
+                    for g in sorted(glb_dir.glob("*.glb")):
+                        lines.append(f"  {sub + '/' if sub else ''}{g.name}")
 
     lines += ["", hdr, ""]
     (car_out / "conversion_log.txt").write_text(
@@ -535,6 +536,12 @@ class App(tk.Tk):
             variable=self._b_skins_var,
             state="normal" if _KN5 else "disabled",
         ).pack(side="left", padx=4)
+        self._b_flat_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opts, text="Meshes next to the JSON (no meshes/ folder)",
+            variable=self._b_flat_var,
+            state="normal" if _KN5 else "disabled",
+        ).pack(side="left", padx=4)
         if not _KN5:
             ttk.Label(opts, text="(kn5_reader unavailable)",
                       foreground="gray").pack(side="left")
@@ -644,6 +651,7 @@ class App(tk.Tk):
                 self._b_glb_var.get(),
                 self._b_skins_var.get(),
                 selected,
+                self._b_flat_var.get(),
             ),
             daemon=True,
         ).start()
@@ -652,7 +660,10 @@ class App(tk.Tk):
 
     def _batch_worker(self, cars_folder: str, out_folder: str,
                       include_plots: bool, convert_glb: bool,
-                      include_skins: bool, selected: list[str]) -> None:
+                      include_skins: bool, selected: list[str],
+                      flat_meshes: bool = False) -> None:
+        # flat_meshes: put the GLBs beside the JSON instead of in meshes/
+        mesh_sub = "" if flat_meshes else "meshes"
         q   = self._q
         put = lambda *a: q.put(a)
 
@@ -749,6 +760,7 @@ class App(tk.Tk):
                         ctrl_files=ctrl_files,
                         glb_output_dir=glb_dir,
                         include_skins=include_skins,
+                        meshes_subdir=mesh_sub,
                     )
                     svj  = _clean(svj)
                     stem = _car_stem(svj, car_path.name)
@@ -763,10 +775,12 @@ class App(tk.Tk):
                         json.dumps(svj, indent=2), encoding="utf-8")
 
                     # ── Copy GLBs ─────────────────────────────────────────────
-                    if glb_dir and (glb_dir / "meshes").is_dir():
-                        mesh_out = car_out / "meshes"
+                    glb_src = ((glb_dir / mesh_sub if mesh_sub else glb_dir)
+                               if glb_dir else None)
+                    if glb_src is not None and glb_src.is_dir():
+                        mesh_out = car_out / mesh_sub if mesh_sub else car_out
                         mesh_out.mkdir(exist_ok=True)
-                        for g in (glb_dir / "meshes").glob("*.glb"):
+                        for g in glb_src.glob("*.glb"):
                             shutil.copy2(str(g), str(mesh_out / g.name))
 
                     # ── Tire plots + CSV ──────────────────────────────────────
@@ -813,9 +827,8 @@ class App(tk.Tk):
 
                     glb_note = ""
                     if convert_glb:
-                        glb_ok = (glb_dir is not None
-                                  and (glb_dir / "meshes").is_dir()
-                                  and any((glb_dir / "meshes").glob("*.glb")))
+                        glb_ok = (glb_src is not None and glb_src.is_dir()
+                                  and any(glb_src.glob("*.glb")))
                         glb_note = "  ✓ GLB exported" if glb_ok else "  ⚠ no GLB"
                     put("b_log",
                         f"✓ Done: {car_path.name} — "
