@@ -27,6 +27,20 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Mesh height: wheels floating or sunk
+
+- **Fix: wheels floating above (or sunk below) the ground when the GLB is
+  loaded with the SVJ.** AC models carry an arbitrary vertical offset, while the
+  SVJ physics has its ground at z = 0 with each wheel centre one tyre radius
+  above it. The exporter only aligned the front axle front-to-back. It now also
+  moves the mesh vertically so the lowest tyre vertex (under the `WHEEL_xx`
+  nodes; blur discs and other dropped variants ignored) sits on y = 0.
+  Measured on installed cars: `av_fiat_punto_s1600` floated 9.0 cm,
+  `S2000_Fiat_Punto` sat 12.1 cm low, `lf_punto_abarth` 16.6 cm low.
+  Cars without `WHEEL_xx` nodes are left as they are.
+- Opt out with `ground_align=False` / `--no-ground-align`. The export report
+  shows how far the mesh was moved.
+
 ### Output files
 
 - **Fix: conversion failed at the very end for cars whose display name holds

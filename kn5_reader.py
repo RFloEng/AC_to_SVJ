@@ -547,6 +547,46 @@ _mat4_ac_to_sae = _mat4_ac_to_three  # backward-compat alias
 
 # --- Front-axle Z finder (for mesh origin alignment) -------------------------
 
+_WHEEL_NODES = frozenset({"WHEEL_LF", "WHEEL_RF", "WHEEL_LR", "WHEEL_RR",
+                          "WHEEL_FL", "WHEEL_FR", "WHEEL_RL"})
+
+
+def _lowest_wheel_y(root: "Kn5Node", skip_names: Optional[set] = None,
+                    drop_variants: bool = True) -> Optional[float]:
+    """
+    Lowest world-space Y (AC axes, Y up) of any vertex under a WHEEL_xx node:
+    the tyre's contact point.  ``None`` when the car has no WHEEL_xx node with
+    geometry.  Runtime variants (blur discs, ...) and ``skip_names`` are ignored
+    so the value matches what is actually exported.
+
+    AC models are authored with an arbitrary vertical offset (some sit a few
+    centimetres high, some a few low).  The SVJ physics has its ground at z = 0
+    with each wheel centre one tyre radius above it, so the mesh has to be
+    lowered/raised until the tyres touch that plane.
+    """
+    skip_names = skip_names or set()
+    best: list = [None]
+
+    def walk(n: "Kn5Node", parent: np.ndarray, in_wheel: bool) -> None:
+        if n.name in skip_names or (drop_variants and _is_variant_name(n.name)):
+            return
+        world = parent
+        if n.node_type == 1 and n.matrix:
+            world = np.array(n.matrix, dtype="f8").reshape(4, 4) @ parent
+        wheel = in_wheel or n.name.upper() in _WHEEL_NODES
+        if wheel and n.node_type in (2, 3) and n.positions is not None \
+                and len(n.positions):
+            # row-vector convention: p_world = p_local @ world; we need Y only
+            ys = n.positions.astype("f8") @ world[:3, 1] + world[3, 1]
+            lo = float(ys.min())
+            best[0] = lo if best[0] is None else min(best[0], lo)
+        for c in n.children:
+            walk(c, world, wheel)
+
+    walk(root, np.eye(4), False)
+    return best[0]
+
+
 def _find_front_axle_z(root: "Kn5Node") -> Optional[float]:
     """
     Walk the KN5 node tree and return the front-axle Z coordinate in AC space.
@@ -863,6 +903,8 @@ def format_export_report(r: dict) -> str:
            f"{r['damage_textures_skipped_bytes'] / 1e6:.1f} MB)"
            if r.get("damage_textures_skipped") else ""),
         f"bbox      : min {fmt(r['bbox_min'])}  max {fmt(r['bbox_max'])}",
+        *([f"ground    : mesh moved {r['ground_shift']:+.3f} m so the tyres touch y = 0"]
+          if r.get("ground_shift") else []),
         f"size      : {sx:.3f} x {sy:.3f} x {sz:.3f} m  (X right, Y up, Z rear)",
     ])
 
@@ -890,6 +932,7 @@ def kn5_to_glb(
     default_skin: Optional[str] = "first",
     node_names: Optional[dict[str, str]] = None,
     include_damage_textures: bool = False,
+    ground_align: bool = True,
     report: Optional[dict] = None,
     verbose: bool = False,
 ) -> bytes:
@@ -919,6 +962,11 @@ def kn5_to_glb(
                      txDamageMask and damage-named maps that nothing visible
                      uses).  Default False: they only matter to AC's runtime
                      damage blending, so they are left out of the GLB.
+    ground_align   : Shift the mesh vertically so the lowest tyre vertex sits on
+                     y = 0, the SVJ physics ground (default True).  AC models
+                     carry an arbitrary vertical offset, which showed as wheels
+                     floating above (or sunk below) the ground plane.  Needs
+                     WHEEL_xx nodes; otherwise nothing is shifted.
     report         : Optional dict, filled with export statistics: ``nodes``,
                      ``transforms``, ``meshes``, ``triangles``, ``materials``,
                      ``images``, ``variants_dropped``, ``bbox_min``, ``bbox_max``
@@ -1174,6 +1222,7 @@ def kn5_to_glb(
     # Runtime variants (blur / damage / in-file low-res twins) are dropped
     # outright rather than hidden behind a transparent material.
     dropped_variants = 0
+    ground_shift = 0.0          # AC-space Y of the lowest tyre vertex (see ground_align)
     stats: dict = {"transforms": 0, "meshes": 0, "tris": 0,
                    "bmin": None, "bmax": None}
     lowres: set[str] = (set() if keep_variants or model.root is None
@@ -1382,10 +1431,20 @@ def kn5_to_glb(
         scene.nodes.append(rot_idx)
 
         front_axle_z = _find_front_axle_z(model.root)
-        if front_axle_z is not None and abs(front_axle_z) > 0.01:
+        fz = (float(front_axle_z)
+              if front_axle_z is not None and abs(front_axle_z) > 0.01 else 0.0)
+        if ground_align:
+            low = _lowest_wheel_y(model.root, lowres, not keep_variants)
+            if low is not None and abs(low) > 1e-4:
+                ground_shift = float(low)
+        # The wrapper sits under the 180 degree Z rotation, which flips Y, and the
+        # exporter flips Y once more (AC -> glTF): translating by +low in this
+        # frame moves the mesh by -low in the final Y-up frame, putting the lowest
+        # tyre vertex at y = 0.
+        if fz != 0.0 or ground_shift != 0.0:
             wrapper = pygltflib.Node(
                 name="_ac_front_axle_align",
-                translation=[0.0, 0.0, float(front_axle_z)],
+                translation=[0.0, ground_shift, fz],
             )
             gltf.nodes.append(wrapper)
             wrapper_idx = len(gltf.nodes) - 1
@@ -1393,9 +1452,8 @@ def kn5_to_glb(
                 gltf.nodes[rot_idx].children = []
             gltf.nodes[rot_idx].children.append(wrapper_idx)
             w0 = np.diag([-1.0, -1.0, 1.0, 1.0])
-            w0 = w0 @ np.array([[1, 0, 0, 0], [0, 1, 0, 0],
-                                [0, 0, 1, float(front_axle_z)], [0, 0, 0, 1]],
-                               dtype="f8")
+            w0 = w0 @ np.array([[1, 0, 0, 0], [0, 1, 0, ground_shift],
+                                [0, 0, 1, fz], [0, 0, 0, 1]], dtype="f8")
             _process_node(model.root, wrapper_idx, w0)
         else:
             _process_node(model.root, rot_idx, np.diag([-1.0, -1.0, 1.0, 1.0]))
@@ -1421,6 +1479,7 @@ def kn5_to_glb(
             "materials": len(gltf.materials),
             "images": len(gltf.images),
             "variants_dropped": dropped_variants,
+            "ground_shift": round(-ground_shift, 4),   # metres the mesh was moved (+ = up)
             "damage_textures_skipped": len(damage_skipped),
             "damage_textures_skipped_bytes": damage_skipped_bytes,
             "bbox_min": [round(float(v), 4) for v in bmin],
@@ -1666,6 +1725,7 @@ def kn5_all_lods_to_glbs(
     node_names: Optional[dict[str, str]] = None,
     kn5_override: Optional[Path] = None,
     include_damage_textures: bool = False,
+    ground_align: bool = True,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -1687,6 +1747,7 @@ def kn5_all_lods_to_glbs(
     node_names    : AC node name -> glTF node name rename map, applied to every LOD.
     kn5_override  : Use this KN5 as LOD A instead of auto-detecting it.
     include_damage_textures : Also embed crashed-state textures (default off).
+    ground_align  : Put the lowest tyre vertex on y = 0 in every LOD (default on).
 
     Returns
     -------
@@ -1708,7 +1769,8 @@ def kn5_all_lods_to_glbs(
                    keep_variants=keep_variants,
                    default_skin=default_skin,
                    node_names=node_names,
-                   include_damage_textures=include_damage_textures)
+                   include_damage_textures=include_damage_textures,
+                   ground_align=ground_align)
         results[label] = out_path
     return results
 
@@ -1739,6 +1801,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--include-damage-textures", action="store_true",
                     help="also embed crashed-state textures (txDamage, txDamageMask, "
                          "damage-named maps); left out by default")
+    ap.add_argument("--no-ground-align", action="store_true",
+                    help="keep the KN5's own vertical placement instead of moving the "
+                         "mesh so the tyres touch the physics ground (y = 0)")
     ap.add_argument("--scan-nodes", action="store_true",
                     help="also print the node names and the SVJ body binding map")
     a = ap.parse_args(argv)
@@ -1773,6 +1838,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         glb = kn5_to_glb(a.kn5, output_path=dst, skins=skins or None,
                          keep_variants=a.keep_variants, default_skin=a.skin,
                          include_damage_textures=a.include_damage_textures,
+                         ground_align=not a.no_ground_align,
                          verbose=True)
     except (ValueError, OSError) as e:
         # ValueError covers encrypted / CSP-protected or unsupported KN5s, which

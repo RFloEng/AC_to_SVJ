@@ -720,6 +720,66 @@ def test_meshes_next_to_json():
             assert not (sub == "" and (out / "meshes").exists())
 
 
+# --- ground alignment ----------------------------------------------------------
+
+def _wheel_car(tyre_bottom_y: float) -> N:
+    """A body plus WHEEL_LF whose lowest vertex is at AC y = tyre_bottom_y."""
+    tyre = N("TYRE_LF", "mesh", verts=[
+        ((0, tyre_bottom_y, 0), (0, 1, 0), (0, 0), (1, 0, 0)),
+        ((0.2, tyre_bottom_y + 0.6, 0), (0, 1, 0), (1, 0), (1, 0, 0)),
+        ((0, tyre_bottom_y + 0.6, 0.2), (0, 1, 0), (0, 1), (1, 0, 0))])
+    return N("ROOT", children=[N("BODY", "mesh"),            # body sits at y = 0
+                               N("WHEEL_LF", children=[tyre])])
+
+
+def test_ground_align_raises_and_lowers():
+    for bottom, shift in ((0.05, -0.05),      # model sits high  -> mesh moves down
+                          (-0.03, 0.03),      # tyres sunk below -> mesh moves up
+                          (0.0, 0.0)):        # already on the ground
+        rep = {}
+        with tempfile.TemporaryDirectory() as t:
+            g, _ = _export(_wheel_car(bottom), Path(t), report=rep)
+        tyre_y = rep["bbox_min"][1]
+        # the BODY (y = 0 in the model) moves with the tyres; the lowest vertex of
+        # the whole export is the tyre bottom or the body, whichever is lower
+        assert abs(rep["ground_shift"] - shift) < 1e-6, (bottom, rep["ground_shift"])
+        assert min(0.0, 0.0 + shift, bottom + shift) - 1e-6 <= tyre_y <= 1e-6
+        if bottom != 0.0:
+            assert "mesh moved" in K.format_export_report(rep)
+
+
+def test_ground_align_puts_tyre_on_zero_and_can_be_disabled():
+    # no BODY mesh here, so the bbox minimum IS the tyre bottom
+    root = N("ROOT", children=[_wheel_car(0.07).children[1]])
+    rep, rep_off = {}, {}
+    with tempfile.TemporaryDirectory() as t:
+        _export(root, Path(t), report=rep)
+        _export(root, Path(t), report=rep_off, ground_align=False)
+    assert abs(rep["bbox_min"][1]) < 1e-6                   # touching y = 0
+    assert abs(rep_off["bbox_min"][1] - 0.07) < 1e-6        # untouched (floating)
+    assert rep_off["ground_shift"] == 0.0
+
+
+def test_ground_align_ignores_cars_without_wheel_nodes():
+    rep = {}
+    with tempfile.TemporaryDirectory() as t:
+        _export(N("ROOT", children=[N("BODY", "mesh")]), Path(t), report=rep)
+    assert rep["ground_shift"] == 0.0
+
+
+def test_ground_align_ignores_blur_discs():
+    low_blur = N("RIM_BLUR_LF", "mesh", verts=[
+        ((0, -0.5, 0), (0, 1, 0), (0, 0), (1, 0, 0)),
+        ((1, -0.5, 0), (0, 1, 0), (1, 0), (1, 0, 0)),
+        ((0, -0.5, 1), (0, 1, 0), (0, 1), (1, 0, 0))])
+    wheel = _wheel_car(0.02).children[1]
+    wheel.children.append(low_blur)               # dropped from the export, so ignored
+    rep = {}
+    with tempfile.TemporaryDirectory() as t:
+        _export(N("ROOT", children=[wheel]), Path(t), report=rep)
+    assert abs(rep["ground_shift"] + 0.02) < 1e-6
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
