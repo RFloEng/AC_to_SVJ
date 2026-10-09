@@ -27,6 +27,37 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Exact mesh placement from AC's physics link, and CG fixes
+
+- **Mesh placement uses AC's own link between model and physics**: `car.ini`
+  `[BASIC] GRAPHICS_OFFSET` maps the KN5 model into the physics frame (origin at
+  the CG). The body is translated by `GRAPHICS_OFFSET` + the physics-origin to
+  ground/front-axle shift, and each wheel (with its `SUSP`/`HUB`/`UPRIGHT`/`DISC`
+  nodes) is placed individually at its physics wheel centre, as the game does at
+  runtime. A wheel whose node is more than 0.15 m from its physics position (a
+  model that disagrees with its physics) is left alone and reported.
+- **Wheel mesh centre = physics wheel centre.** The tyre mesh keeps its own
+  radius, so a tyre slightly larger than the physics radius sinks a little into
+  the ground (the loaded-tyre look) instead of being forced to touch at y = 0.
+  Without a usable `GRAPHICS_OFFSET` the wheel centres are matched the same way;
+  the older tyre-contact alignment below is now only a last resort (no wheel
+  centres at all). `GRAPHICS_PITCH_ROTATION` is recorded in
+  `x_assettocorsa.graphics` but not applied (its sign convention is not settled).
+- **Fix: centre-of-gravity position was mirrored.** `center_of_gravity[0]` put the
+  CG `front_weight x wheelbase` behind the front axle; it is
+  `rear_weight x wheelbase` (a front-heavy car's CG is nearer the front axle),
+  as the KN5 + `GRAPHICS_OFFSET` geometry of installed cars confirms.
+- **Fix: CG height was the constant 0.42 m for every car.** It is now derived
+  from the car's data: `tyre radius - BASEY` per axle, interpolated at the CG
+  (an explicit `CG_HEIGHT` still wins; the old default remains only when neither
+  exists, and is logged as a default).
+- **Fix: numbers with a trailing annotation were rejected** (`WHEELBASE=2.530
+  (2.52)` fell back to the 2.6 m default, moving the rear axle and the CG). The
+  numeric parsers now accept a leading number followed by whitespace, a
+  parenthesis or the end.
+- The conversion log reports the placement mode, wheels placed/skipped and the
+  mesh's lowest point and height.
+
 ### Mesh height: wheels floating or sunk
 
 - **Fix: wheels floating above (or sunk below) the ground when the GLB is

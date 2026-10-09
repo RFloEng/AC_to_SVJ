@@ -92,6 +92,7 @@ from tire_lab import (
     build_svj_pacejka_block, build_svj_mf62_block,
     build_svj_pacejka_blocks, BenchResult,
 )
+from ac_parsers import _parse_vec3 as _vec3
 try:
     from kn5_reader import (scan_kn5_nodes, map_ac_nodes_to_svj,
                             map_ac_nodes_to_svj_parts,
@@ -876,8 +877,19 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     cg_loc = _f(sB.get("CG_LOCATION"), -1.0)
     if cg_loc > 0.0:
         rear_bias = 1.0 - cg_loc
-    cg_x = -round(wheelbase * (1.0 - rear_bias), 3)
+    # The CG sits (1 - front_weight) = rear_weight x wheelbase behind the front axle:
+    # the more weight on the front, the closer the CG is to the front axle. (This
+    # was mirrored - front_weight x wheelbase - which put the CG of a front-heavy
+    # car near the rear axle. Verified against the KN5 + GRAPHICS_OFFSET geometry of
+    # installed cars: front axle -> CG = (1 - CG_LOCATION) x wheelbase.)
+    cg_x = -round(wheelbase * rear_bias, 3)
     cg_z = -round(_f(cB.get("CG_HEIGHT") or cB.get("CGHEIGHT"), 0.42), 3)
+    cg_derived = False   # True once the height comes from the car's own data (below)
+    _cg_explicit = bool(cB.get("CG_HEIGHT") or cB.get("CGHEIGHT"))
+    # car.ini [BASIC] GRAPHICS_OFFSET / GRAPHICS_PITCH_ROTATION: how AC maps the
+    # KN5 model into its physics frame (origin at the CG).
+    _gfx_off   = _vec3(cB.get("GRAPHICS_OFFSET"))
+    _gfx_pitch = _f(cB.get("GRAPHICS_PITCH_ROTATION"), 0.0)
     log.append(f"✓ CG: [{cg_x}, 0.0, {cg_z}] m  (wheelbase {wheelbase} m, rear bias {rear_bias:.1%})")
 
     # ── Engine (NEW: full parse) ─────────────────────────────────────────────
@@ -1223,6 +1235,28 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     else:
         _origin_confidence = "low"
 
+    # ── CG height ────────────────────────────────────────────────────────────
+    # car.ini has no CG height, so this used to be the constant 0.42 m for every
+    # car.  AC defines it through BASEY (suspensions.ini, per axle): the physics
+    # origin is the CG and the wheel centre sits BASEY from it, so the CG is
+    # (tyre radius - BASEY) above the ground at that axle.  The two axles can
+    # differ (the car sits with some rake), so interpolate at the CG position,
+    # i.e. weight each axle by the OTHER axle's share: front share = cg_loc.
+    if _cg_explicit:
+        cg_derived = True            # the car states it: the most trustworthy source
+        log.append(f"✓ CG height {-cg_z} m from car.ini")
+    elif sa_f.get("basey") is not None and sa_r.get("basey") is not None:
+        _fw = 1.0 - rear_bias
+        _h_f = rolling_radius_f - sa_f["basey"]
+        _h_r = rolling_radius_r - sa_r["basey"]
+        cg_z = -round(_fw * _h_f + (1.0 - _fw) * _h_r, 3)
+        cg_derived = True
+        log.append(f"✓ CG height {-cg_z} m from tyre radius - BASEY "
+                   f"(F {_h_f:.3f} / R {_h_r:.3f} m at the axles)")
+    else:
+        log.append(f"⚠ CG height {-cg_z} m is a default: no CG_HEIGHT in car.ini and "
+                   f"no BASEY in suspensions.ini")
+
     svj: dict = {
         "_metadata": {
             "specification":        SVJ_SPEC,
@@ -1396,6 +1430,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     if ac_versions:
         x_ac["versions"] = ac_versions
 
+    if _gfx_off is not None:
+        x_ac["graphics"] = {"offset": _gfx_off, "pitch_rotation_deg": _gfx_pitch}
     if x_ac:
         svj["x_assettocorsa"] = x_ac
 
@@ -1481,16 +1517,44 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                     f"from {kn5_path.name} (LODs: {', '.join(lod_labels)}) → {glb_uri}"
                 )
 
+                # Exact model placement from GRAPHICS_OFFSET; None = fall back to
+                # putting the tyres on the ground.
+                _placement = _visual_placement(svj, _gfx_off, cg_derived)
+                if _placement and _placement["translation"] is not None:
+                    log.append(f"✓ Mesh placement: GRAPHICS_OFFSET {_gfx_off} + derived CG "
+                               f"(physics frame)")
+                elif _placement:
+                    log.append("ℹ Mesh placement: wheel centres matched to the physics "
+                               "(GRAPHICS_OFFSET or a known CG height is missing)")
+                else:
+                    log.append("ℹ Mesh placement: tyre-contact fallback (no wheel centres)")
+                if _gfx_pitch:
+                    log.append(f"ℹ GRAPHICS_PITCH_ROTATION {_gfx_pitch}° recorded in "
+                               f"x_assettocorsa.graphics but not applied to the mesh")
+
                 # ── GLB export (only when caller supplies an output dir) ───
                 if glb_output_dir is not None:
                     try:
+                        _reports: dict = {}
                         _glb_dir = (glb_output_dir / meshes_subdir
                                     if meshes_subdir else glb_output_dir)
                         exported = kn5_all_lods_to_glbs(
                             car_path, _glb_dir, include_skins=include_skins,
-                            node_names=node_rename, kn5_override=kn5_override)
+                            node_names=node_rename, kn5_override=kn5_override,
+                            placement=_placement, reports=_reports)
                         for lbl, out_p in exported.items():
                             log.append(f"✓ GLB LOD {lbl} written → {_mp}{out_p.name}")
+                        _ra = _reports.get("A") or {}
+                        if _ra.get("bbox_min"):
+                            log.append(f"  mesh: lowest point y={_ra['bbox_min'][1]:+.3f} m, "
+                                       f"height {_ra['size'][1]:.3f} m, "
+                                       f"length {_ra['size'][2]:.3f} m")
+                        if _ra.get("placement_mode") == "physics":
+                            log.append(
+                                f"  wheels placed from physics: "
+                                f"{', '.join(_ra['wheels_moved']) or 'none'}")
+                            for _st, _why in _ra.get("wheels_skipped", []):
+                                log.append(f"  ⚠ wheel {_st} not repositioned: {_why}")
                     except Exception as _glb_err:
                         log.append(f"⚠ GLB export failed: {_glb_err}")
 
@@ -1584,6 +1648,44 @@ _FS_INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _FS_RESERVED = frozenset({"con", "prn", "aux", "nul",
                           *(f"com{i}" for i in range(1, 10)),
                           *(f"lpt{i}" for i in range(1, 10))})
+
+
+def _visual_placement(svj: dict, gfx_off: Optional[list],
+                      cg_derived: bool) -> Optional[dict]:
+    """
+    Exact placement of the KN5 model in the SVJ frame, from car.ini.
+
+    AC maps the model into its physics frame with ``GRAPHICS_OFFSET`` (origin at
+    the centre of gravity).  The SVJ frame has its origin on the ground under the
+    front axle, so the model->SVJ shift in AC axes is::
+
+        Tx = 0                      (the lateral offset is not applied)
+        Ty = GRAPHICS_OFFSET.y + CG height
+        Tz = GRAPHICS_OFFSET.z - (CG to front axle distance)
+
+    and each wheel centre is placed where the SVJ puts it (one tyre radius above
+    ground).  Returns None when the CG height was not derived from the car's own
+    data (the shift would rest on a guess) or GRAPHICS_OFFSET is missing; the
+    ``translation`` is then None and the exporter works it out so the wheel
+    nodes' centres match the physics wheel centres.  None only when the SVJ has no
+    wheel centres at all.
+    """
+    cg = (svj.get("chassis") or {}).get("center_of_gravity")
+    use_offset = (gfx_off is not None and cg_derived and cg is not None
+                  and len(cg) >= 3)
+    centers: dict = {}
+    for st in ("FL", "FR", "RL", "RR"):
+        hp = ((((svj.get("suspension") or {}).get(st) or {}).get("topology") or {})
+              .get("upright") or {}).get("hardpoints", {}).get("wheel_center")
+        if hp and len(hp) == 3:
+            centers[st] = (-float(hp[2]), float(hp[0]))   # (height, forward of front axle)
+    if not centers:
+        return None
+    translation = None
+    if use_offset:
+        h_cg, d_f = -float(cg[2]), -float(cg[0])
+        translation = (0.0, float(gfx_off[1]) + h_cg, float(gfx_off[2]) - d_f)
+    return {"translation": translation, "wheel_centers": centers, "tolerance": 0.15}
 
 
 def _fs_safe(name: str) -> str:

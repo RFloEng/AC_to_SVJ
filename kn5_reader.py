@@ -547,6 +547,126 @@ _mat4_ac_to_sae = _mat4_ac_to_three  # backward-compat alias
 
 # --- Front-axle Z finder (for mesh origin alignment) -------------------------
 
+_STATION_SUFFIXES = {"FL": ("LF", "FL"), "FR": ("RF", "FR"),
+                     "RL": ("LR", "RL"), "RR": ("RR",)}
+_HUB_PREFIXES = ("WHEEL", "SUSP", "HUB", "UPRIGHT", "DISC")
+
+
+def _apply_wheel_placement(root: "Kn5Node", targets: dict, tol: float) -> dict:
+    """
+    Move each corner's wheel (and the nodes that follow its hub) to the position
+    the physics gives it.
+
+    AC's game code repositions WHEEL_xx / SUSP_xx every frame from the physics,
+    so their rest positions in the KN5 only need to be roughly right and often
+    are not; the body, in contrast, is placed by ``GRAPHICS_OFFSET``.  To show
+    what the game shows, each corner's WHEEL, SUSP, HUB, UPRIGHT and DISC nodes
+    are moved by the same (Y, Z) delta that takes the wheel node to its target
+    (a node under an already-moved ancestor follows it and is not moved twice).
+
+    ``targets`` is ``{station: (y, z)}`` - the wheel-centre target in MODEL space
+    (AC axes).  X is left alone.  A corner whose wheel node is more than ``tol``
+    metres away from its target is skipped: the model and the physics disagree
+    too much to trust either.  Mutates the node matrices; returns
+    ``{"wheels_moved": [stations], "wheels_skipped": [(station, why)]}``.
+    """
+    moved: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    pos: dict[str, np.ndarray] = {}
+
+    def walk1(n: "Kn5Node", parent: np.ndarray) -> None:
+        w = parent
+        if n.node_type == 1 and n.matrix:
+            w = np.array(n.matrix, dtype="f8").reshape(4, 4) @ parent
+        pos.setdefault(n.name.upper(), w[3, :3].copy())
+        for c in n.children:
+            walk1(c, w)
+    walk1(root, np.eye(4))
+
+    deltas: dict[str, np.ndarray] = {}
+    for st, (ty, tz) in targets.items():
+        for suf in _STATION_SUFFIXES.get(st, ()):
+            cur = pos.get(f"WHEEL_{suf}")
+            if cur is None:
+                continue
+            d = np.array([0.0, ty - cur[1], tz - cur[2]])
+            if max(abs(d[1]), abs(d[2])) > tol:
+                skipped.append((st, f"model wheel node is {abs(d[1]):.3f} m (Y) / "
+                                    f"{abs(d[2]):.3f} m (Z) from the physics position"))
+            else:
+                for pre in _HUB_PREFIXES:
+                    deltas[f"{pre}_{suf}"] = d
+                moved.append(st)
+            break
+        else:
+            skipped.append((st, "no WHEEL node in the model"))
+
+    def walk2(n: "Kn5Node", parent: np.ndarray, ancestor_moved: bool) -> None:
+        local = (np.array(n.matrix, dtype="f8").reshape(4, 4)
+                 if n.node_type == 1 and n.matrix else None)
+        d = None if ancestor_moved else deltas.get(n.name.upper())
+        if d is not None and local is not None:
+            try:
+                inv = np.linalg.inv(parent[:3, :3])
+            except np.linalg.LinAlgError:
+                inv = None
+            if inv is not None:
+                # row-vector convention: world_t = local_t @ R_parent + t_parent
+                local[3, :3] = local[3, :3] + d @ inv
+                n.matrix = local.flatten().tolist()
+                ancestor_moved = True
+        world = (local @ parent) if local is not None else parent
+        for c in n.children:
+            walk2(c, world, ancestor_moved)
+    if deltas:
+        walk2(root, np.eye(4), False)
+    return {"wheels_moved": moved, "wheels_skipped": skipped}
+
+
+def _translation_from_wheels(root: "Kn5Node", centers: dict) -> Optional[tuple]:
+    """
+    Model -> export-frame shift (AC axes) that puts the wheel nodes' centres where
+    the physics has them, for cars with no GRAPHICS_OFFSET to say how the model is
+    placed.  Y: the mean height difference over the corners found.  Z: the mean
+    forward difference of the FRONT wheels (the SVJ origin is the front axle),
+    else of all of them.  X is not shifted.  ``centers`` is ``{station: (height,
+    forward)}``.  None when no wheel node matches.
+
+    The wheel node's origin IS the wheel centre in AC, so this matches the wheel
+    MESH centre to the physics centre.  The tyre mesh keeps its own radius, so a
+    tyre slightly larger than the physics radius sinks a little into the ground,
+    which is how a loaded tyre looks.
+    """
+    pos: dict[str, np.ndarray] = {}
+
+    def walk(n: "Kn5Node", parent: np.ndarray) -> None:
+        w = parent
+        if n.node_type == 1 and n.matrix:
+            w = np.array(n.matrix, dtype="f8").reshape(4, 4) @ parent
+        pos.setdefault(n.name.upper(), w[3, :3].copy())
+        for c in n.children:
+            walk(c, w)
+    walk(root, np.eye(4))
+
+    dy: list[float] = []
+    dz_front: list[float] = []
+    dz_all: list[float] = []
+    for st, (h, zf) in centers.items():
+        for suf in _STATION_SUFFIXES.get(st, ()):
+            pw = pos.get(f"WHEEL_{suf}")
+            if pw is None:
+                continue
+            dy.append(h - pw[1])
+            dz_all.append(zf - pw[2])
+            if st in ("FL", "FR"):
+                dz_front.append(zf - pw[2])
+            break
+    if not dy:
+        return None
+    dz = dz_front or dz_all
+    return (0.0, float(np.mean(dy)), float(np.mean(dz)))
+
+
 _WHEEL_NODES = frozenset({"WHEEL_LF", "WHEEL_RF", "WHEEL_LR", "WHEEL_RR",
                           "WHEEL_FL", "WHEEL_FR", "WHEEL_RL"})
 
@@ -903,7 +1023,13 @@ def format_export_report(r: dict) -> str:
            f"{r['damage_textures_skipped_bytes'] / 1e6:.1f} MB)"
            if r.get("damage_textures_skipped") else ""),
         f"bbox      : min {fmt(r['bbox_min'])}  max {fmt(r['bbox_max'])}",
-        *([f"ground    : mesh moved {r['ground_shift']:+.3f} m so the tyres touch y = 0"]
+        *([f"placement : physics ({r.get('placement_source') or 'GRAPHICS_OFFSET'}); "
+           f"body moved {r['ground_shift']:+.3f} m "
+           f"vertically; wheels placed: {', '.join(r['wheels_moved']) or 'none'}"
+           + (f"; skipped: {', '.join(st for st, _ in r['wheels_skipped'])}"
+              if r.get("wheels_skipped") else "")]
+          if r.get("placement_mode") == "physics" else
+          [f"ground    : mesh moved {r['ground_shift']:+.3f} m so the tyres touch y = 0"]
           if r.get("ground_shift") else []),
         f"size      : {sx:.3f} x {sy:.3f} x {sz:.3f} m  (X right, Y up, Z rear)",
     ])
@@ -933,6 +1059,7 @@ def kn5_to_glb(
     node_names: Optional[dict[str, str]] = None,
     include_damage_textures: bool = False,
     ground_align: bool = True,
+    placement: Optional[dict] = None,
     report: Optional[dict] = None,
     verbose: bool = False,
 ) -> bytes:
@@ -967,6 +1094,19 @@ def kn5_to_glb(
                      carry an arbitrary vertical offset, which showed as wheels
                      floating above (or sunk below) the ground plane.  Needs
                      WHEEL_xx nodes; otherwise nothing is shifted.
+    placement      : Exact model -> physics placement (see below).  When given it
+                     replaces the tyre-contact ground_align heuristic:
+                     ``{"translation": (Tx, Ty, Tz) or None, "wheel_centers":
+                     {"FL": (height, forward), ...}, "tolerance": 0.15}``.
+                     A ``translation`` of None is worked out so the wheel nodes'
+                     centres match ``wheel_centers`` (no GRAPHICS_OFFSET needed).
+                     ``translation`` is the AC-axes shift taking model space to
+                     the export frame (GRAPHICS_OFFSET plus the physics-origin to
+                     ground/front-axle shift); ``wheel_centers`` are where the
+                     physics puts each wheel centre in that frame (height above
+                     ground, metres forward of the front axle).  The body is
+                     translated rigidly; the wheels are placed individually, as
+                     the game does.  Built by the converter from car.ini.
     report         : Optional dict, filled with export statistics: ``nodes``,
                      ``transforms``, ``meshes``, ``triangles``, ``materials``,
                      ``images``, ``variants_dropped``, ``bbox_min``, ``bbox_max``
@@ -990,6 +1130,23 @@ def kn5_to_glb(
         raise EncryptedKn5Error(f"{Path(path).name}: " + ENCRYPTED_KN5_HELP)
 
     model = parse_kn5(path, geometry=True)
+
+    placement_info: dict = {"wheels_moved": [], "wheels_skipped": []}
+    placement_T: Optional[tuple] = None        # AC-axes model -> export shift, if any
+    placement_source = ""
+    if placement is not None and model.root is not None:
+        centers = placement.get("wheel_centers") or {}
+        T = placement.get("translation")
+        placement_source = "GRAPHICS_OFFSET"
+        if T is None:                                   # no GRAPHICS_OFFSET: match the
+            T = _translation_from_wheels(model.root, centers)   # wheel centres instead
+            placement_source = "wheel centres"
+        if T is not None:
+            placement_T = tuple(float(v) for v in T)
+            targets = {st: (yu - placement_T[1], zf - placement_T[2])
+                       for st, (yu, zf) in centers.items()}
+            placement_info = _apply_wheel_placement(
+                model.root, targets, float(placement.get("tolerance", 0.15)))
 
     gltf = pygltflib.GLTF2()
     gltf.asset = pygltflib.Asset(generator="ac_to_svj kn5_reader", version="2.0")
@@ -1433,7 +1590,7 @@ def kn5_to_glb(
         front_axle_z = _find_front_axle_z(model.root)
         fz = (float(front_axle_z)
               if front_axle_z is not None and abs(front_axle_z) > 0.01 else 0.0)
-        if ground_align:
+        if ground_align and placement_T is None:
             low = _lowest_wheel_y(model.root, lowres, not keep_variants)
             if low is not None and abs(low) > 1e-4:
                 ground_shift = float(low)
@@ -1441,10 +1598,15 @@ def kn5_to_glb(
         # exporter flips Y once more (AC -> glTF): translating by +low in this
         # frame moves the mesh by -low in the final Y-up frame, putting the lowest
         # tyre vertex at y = 0.
-        if fz != 0.0 or ground_shift != 0.0:
+        wt = [0.0, ground_shift, fz]
+        if placement_T is not None:
+            # AC-axes shift (Tx, Ty, Tz) -> wrapper frame (x, -y, -z): see above.
+            wt = [placement_T[0], -placement_T[1], -placement_T[2]]
+            ground_shift = wt[1]
+        if any(abs(v) > 1e-9 for v in wt):
             wrapper = pygltflib.Node(
                 name="_ac_front_axle_align",
-                translation=[0.0, ground_shift, fz],
+                translation=wt,
             )
             gltf.nodes.append(wrapper)
             wrapper_idx = len(gltf.nodes) - 1
@@ -1452,8 +1614,8 @@ def kn5_to_glb(
                 gltf.nodes[rot_idx].children = []
             gltf.nodes[rot_idx].children.append(wrapper_idx)
             w0 = np.diag([-1.0, -1.0, 1.0, 1.0])
-            w0 = w0 @ np.array([[1, 0, 0, 0], [0, 1, 0, ground_shift],
-                                [0, 0, 1, fz], [0, 0, 0, 1]], dtype="f8")
+            w0 = w0 @ np.array([[1, 0, 0, wt[0]], [0, 1, 0, wt[1]],
+                                [0, 0, 1, wt[2]], [0, 0, 0, 1]], dtype="f8")
             _process_node(model.root, wrapper_idx, w0)
         else:
             _process_node(model.root, rot_idx, np.diag([-1.0, -1.0, 1.0, 1.0]))
@@ -1480,6 +1642,11 @@ def kn5_to_glb(
             "images": len(gltf.images),
             "variants_dropped": dropped_variants,
             "ground_shift": round(-ground_shift, 4),   # metres the mesh was moved (+ = up)
+            "placement_mode": ("physics" if placement_T is not None
+                               else "tyre-contact" if ground_shift != 0.0 else "none"),
+            "placement_source": placement_source if placement_T is not None else "",
+            "wheels_moved": list(placement_info["wheels_moved"]),
+            "wheels_skipped": list(placement_info["wheels_skipped"]),
             "damage_textures_skipped": len(damage_skipped),
             "damage_textures_skipped_bytes": damage_skipped_bytes,
             "bbox_min": [round(float(v), 4) for v in bmin],
@@ -1726,6 +1893,8 @@ def kn5_all_lods_to_glbs(
     kn5_override: Optional[Path] = None,
     include_damage_textures: bool = False,
     ground_align: bool = True,
+    placement: Optional[dict] = None,
+    reports: Optional[dict] = None,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -1747,7 +1916,10 @@ def kn5_all_lods_to_glbs(
     node_names    : AC node name -> glTF node name rename map, applied to every LOD.
     kn5_override  : Use this KN5 as LOD A instead of auto-detecting it.
     include_damage_textures : Also embed crashed-state textures (default off).
-    ground_align  : Put the lowest tyre vertex on y = 0 in every LOD (default on).
+    ground_align  : Put the lowest tyre vertex on y = 0 in every LOD (default on;
+                    ignored when ``placement`` is given).
+    placement     : Exact physics placement, see kn5_to_glb().
+    reports       : Optional dict filled with ``{lod_label: export report}``.
 
     Returns
     -------
@@ -1770,7 +1942,9 @@ def kn5_all_lods_to_glbs(
                    default_skin=default_skin,
                    node_names=node_names,
                    include_damage_textures=include_damage_textures,
-                   ground_align=ground_align)
+                   ground_align=ground_align, placement=placement,
+                   report=(reports.setdefault(label, {})
+                           if reports is not None else None))
         results[label] = out_path
     return results
 

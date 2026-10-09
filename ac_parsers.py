@@ -60,25 +60,40 @@ def parse_lut(text: str) -> list[list[float]]:
     return pairs
 
 
-def _f(v, default: float = 0.0) -> float:
+_LEAD_NUM = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(?=\s|\(|$)")
+
+
+def _num(v) -> Optional[float]:
+    """
+    float(v), tolerating a trailing annotation: AC authors write things like
+    ``WHEELBASE=2.530      (2.52)``.  A bare float() rejects that and the caller
+    falls back to its default (a wrong 2.6 m wheelbase).  Only a number followed
+    by whitespace, a parenthesis or the end counts, so a vector such as ``1,2,3``
+    is still rejected.  None when v holds no usable number.
+    """
     try:
         return float(v)
     except Exception:
-        return default
+        pass
+    if isinstance(v, str):
+        m = _LEAD_NUM.match(v)
+        if m:
+            return float(m.group(1))
+    return None
+
+
+def _f(v, default: float = 0.0) -> float:
+    r = _num(v)
+    return default if r is None else r
 
 
 def _i(v, default: int = 0) -> int:
-    try:
-        return int(float(v))
-    except Exception:
-        return default
+    r = _num(v)
+    return default if r is None else int(r)
 
 
 def _m(v) -> Optional[float]:
-    try:
-        return float(v)
-    except Exception:
-        return None
+    return _num(v)
 
 
 def _b(v) -> Optional[bool]:

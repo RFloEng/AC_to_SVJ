@@ -780,6 +780,230 @@ def test_ground_align_ignores_blur_discs():
     assert abs(rep["ground_shift"] + 0.02) < 1e-6
 
 
+# --- exact physics placement + CG --------------------------------------------------
+
+def _wheel_tree(y, z, children=()):
+    return K.Kn5Node(1, "ROOT", True, children=list(children),
+                     matrix=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+
+
+def _dummy(name, tx, ty, tz, children=()):
+    return K.Kn5Node(1, name, True, children=list(children),
+                     matrix=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, tx, ty, tz, 1])
+
+
+def _world_t(node, name, parent=None):
+    """World translation of the first node called `name` (row-vector convention)."""
+    import numpy as np
+    parent = np.eye(4) if parent is None else parent
+    w = np.array(node.matrix, dtype="f8").reshape(4, 4) @ parent if node.matrix else parent
+    if node.name == name:
+        return w[3, :3]
+    for c in node.children:
+        r = _world_t(c, name, w)
+        if r is not None:
+            return r
+    return None
+
+
+def test_apply_wheel_placement():
+    import numpy as np
+    # WHEEL_LF under SUSP_LF (follows its parent), DISC_LF as a sibling hub node,
+    # WHEEL_RF too far from its target, WHEEL_LR with no target.
+    wheel_lf = _dummy("WHEEL_LF", 0.0, 0.0, 0.0)               # local to SUSP_LF
+    susp_lf = _dummy("SUSP_LF", 0.80, 0.40, 1.30, [wheel_lf])
+    disc_lf = _dummy("DISC_LF", 0.80, 0.40, 1.30)
+    wheel_rf = _dummy("WHEEL_RF", -0.80, 0.40, 1.30)
+    body = _dummy("BODY", 0.0, 0.1, 0.0)
+    root = _dummy("ROOT", 0, 0, 0, [susp_lf, disc_lf, wheel_rf, body])
+    out = K._apply_wheel_placement(root, {"FL": (0.30, 1.32), "FR": (0.90, 1.30)}, tol=0.15)
+    assert out["wheels_moved"] == ["FL"]
+    assert [st for st, _ in out["wheels_skipped"]] == ["FR"]       # 0.5 m off: not trusted
+    for n in ("SUSP_LF", "WHEEL_LF", "DISC_LF"):                    # moved together, once
+        t = _world_t(root, n)
+        assert abs(t[1] - 0.30) < 1e-9 and abs(t[2] - 1.32) < 1e-9, (n, t)
+    assert abs(_world_t(root, "SUSP_LF")[0] - 0.80) < 1e-9          # X untouched
+    assert np.allclose(_world_t(root, "WHEEL_RF"), [-0.80, 0.40, 1.30])   # skipped
+    assert np.allclose(_world_t(root, "BODY"), [0.0, 0.1, 0.0])           # body never moved
+
+
+def test_apply_wheel_placement_inside_a_rotated_parent():
+    import numpy as np
+    # parent rotated 90 degrees about X: local Y/Z are swapped in world space
+    rot = [1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1]
+    wheel = _dummy("WHEEL_LF", 0.8, 0.0, 0.0)
+    pivot = K.Kn5Node(1, "PIVOT", True, children=[wheel], matrix=rot)
+    root = _dummy("ROOT", 0, 0, 0, [pivot])
+    K._apply_wheel_placement(root, {"FL": (0.33, 1.1)}, tol=2.0)
+    t = _world_t(root, "WHEEL_LF")
+    assert abs(t[1] - 0.33) < 1e-9 and abs(t[2] - 1.1) < 1e-9, t
+
+
+def test_export_with_physics_placement():
+    # model wheel centre at AC y=0.40 (0.10 high); the physics wants it at 0.30
+    tyre = N("TYRE_LF", "mesh", verts=[
+        ((0, -0.30, 0), (0, 1, 0), (0, 0), (1, 0, 0)),
+        ((0.2, 0.30, 0), (0, 1, 0), (1, 0), (1, 0, 0)),
+        ((0, 0.30, 0.2), (0, 1, 0), (0, 1), (1, 0, 0))])
+    root = N("ROOT", children=[N("WHEEL_LF", children=[tyre],
+                                 matrix=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.8, 0.40, 1.3, 1])])
+    placement = {"translation": (0.0, 0.0, -1.3),        # model z 1.3 -> front axle at 0
+                 "wheel_centers": {"FL": (0.30, 0.0)}, "tolerance": 0.15}
+    rep = {}
+    with tempfile.TemporaryDirectory() as t:
+        _export(root, Path(t), placement=placement, report=rep)
+    assert rep["placement_mode"] == "physics" and rep["wheels_moved"] == ["FL"]
+    assert abs(rep["bbox_min"][1]) < 1e-6          # tyre bottom (centre 0.30 - 0.30) on the ground
+    assert abs(rep["bbox_max"][2]) < 1e-6          # front axle at forward = 0
+    assert "placement : physics" in K.format_export_report(rep)
+    # the tyre-contact heuristic is NOT applied on top of an exact placement
+    assert rep["ground_shift"] == 0.0
+
+
+def test_physics_placement_skips_wheels_that_disagree():
+    root = N("ROOT", children=[N("WHEEL_LF", "mesh",
+                                 matrix=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.8, 2.75, 1.3, 1])])
+    placement = {"translation": (0.0, 0.0, 0.0), "wheel_centers": {"FL": (0.30, 1.3)},
+                 "tolerance": 0.15}
+    rep = {}
+    with tempfile.TemporaryDirectory() as t:
+        _export(root, Path(t), placement=placement, report=rep)
+    assert rep["wheels_moved"] == [] and [st for st, _ in rep["wheels_skipped"]] == ["FL"]
+
+
+def _patched_car(tmp: Path, graphics_offset=None, cg_location=None, cg_height="drop"):
+    import re
+    import shutil
+    car = tmp / "synthcar"
+    shutil.copytree(Path(__file__).parent / "test_car", car)
+    ci = car / "data" / "car.ini"
+    txt = ci.read_text(encoding="utf-8")
+    txt = re.sub(r"^GRAPHICS_OFFSET=.*$", "" if graphics_offset is None
+                 else f"GRAPHICS_OFFSET={graphics_offset}", txt, flags=re.M)
+    txt = re.sub(r"^CG_HEIGHT=.*$", "" if cg_height == "drop" else f"CG_HEIGHT={cg_height}",
+                 txt, flags=re.M | re.I)
+    ci.write_text(txt, encoding="utf-8")
+    if cg_location is not None:
+        si = car / "data" / "suspensions.ini"
+        st = si.read_text(encoding="utf-8")
+        st = re.sub(r"^CG_LOCATION=.*$", "", st, flags=re.M)
+        if re.search(r"^\[BASIC\]", st, re.M):
+            st = re.sub(r"^(\[BASIC\][^\n]*\n)", rf"\1CG_LOCATION={cg_location}\n", st,
+                        count=1, flags=re.M)
+        else:                      # test_car keeps no [BASIC] section in suspensions.ini
+            st = st.replace("[FRONT]", f"[BASIC]\nCG_LOCATION={cg_location}\n\n[FRONT]", 1)
+        si.write_text(st, encoding="utf-8")
+    return car
+
+
+def test_cg_height_and_position_are_derived():
+    from converter import build_svj, read_car_directory
+    with tempfile.TemporaryDirectory() as t:
+        car = _patched_car(Path(t))
+        ini, cm, ctrl, dd = read_car_directory(car)
+        svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl)
+    cg = svj["chassis"]["center_of_gravity"]
+    wb = svj["chassis"]["wheelbase"]
+    # test_car: RADIUS 0.305 both axles, BASEY 0.095 / 0.100, REAR_BIAS 0.52
+    # -> h = 0.48 * (0.305 - 0.095) + 0.52 * (0.305 - 0.100)
+    assert abs(cg[2] + (0.48 * 0.210 + 0.52 * 0.205)) < 1e-3, cg
+    assert abs(cg[0] + round(wb * 0.52, 3)) < 1e-9, (cg, wb)
+    assert any("CG height" in l and "from tyre radius" in l for l in log), log
+
+
+def test_explicit_cg_height_is_respected():
+    from converter import build_svj, read_car_directory
+    with tempfile.TemporaryDirectory() as t:
+        car = _patched_car(Path(t), cg_height="0.55")
+        ini, cm, ctrl, dd = read_car_directory(car)
+        svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl)
+    assert abs(svj["chassis"]["center_of_gravity"][2] + 0.55) < 1e-9
+    assert any("CG height 0.55 m from car.ini" in l for l in log), log
+
+
+def test_cg_is_nearer_the_heavier_axle():
+    from converter import build_svj, read_car_directory
+    with tempfile.TemporaryDirectory() as t:
+        car = _patched_car(Path(t), cg_location=0.60)         # 60 % of the weight on the front
+        ini, cm, ctrl, dd = read_car_directory(car)
+        svj, _, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl)
+    cg_x, wb = svj["chassis"]["center_of_gravity"][0], svj["chassis"]["wheelbase"]
+    assert abs(cg_x + 0.40 * wb) < 1e-3 and abs(cg_x) < wb / 2, (cg_x, wb)
+
+
+def test_converter_places_the_mesh_from_graphics_offset():
+    import pygltflib
+    from converter import build_svj, read_car_directory
+    with tempfile.TemporaryDirectory() as t:
+        car = _patched_car(Path(t), graphics_offset="0,-0.50,-0.19")
+        ini, cm, ctrl, dd = read_car_directory(car)
+        svj0, _, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl)       # no KN5 yet
+        wb, cg = svj0["chassis"]["wheelbase"], svj0["chassis"]["center_of_gravity"]
+        h_cg, d_f, R = -cg[2], -cg[0], 0.305
+        ty, tz = -0.50 + h_cg, -0.19 - d_f
+        y_model = R - ty                                   # where the model's wheels must be
+        zf, zr = 0.0 - tz, -wb - tz
+        wheels = [N(f"WHEEL_{s}", matrix=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y_model + 0.05, z, 1])
+                  for s, x, z in (("LF", 0.75, zf), ("RF", -0.75, zf),
+                                  ("LR", 0.75, zr), ("RR", -0.75, zr))]
+        _write(car / "synthcar.kn5", N("ROOT", children=[N("BODY", "mesh"), *wheels]))
+        ini, cm, ctrl, dd = read_car_directory(car)
+        svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
+                                glb_output_dir=Path(t) / "out")
+    assert any("Mesh placement: GRAPHICS_OFFSET" in l for l in log), log
+    assert any("wheels placed from physics: FL, FR, RL, RR" in l for l in log), log
+    assert svj["x_assettocorsa"]["graphics"]["offset"] == [0.0, -0.5, -0.19]
+
+
+def test_converter_falls_back_without_graphics_offset():
+    from converter import build_svj, read_car_directory
+    with tempfile.TemporaryDirectory() as t:
+        car = _patched_car(Path(t), graphics_offset=None)
+        _write(car / "synthcar.kn5", _wheel_car(0.04))
+        ini, cm, ctrl, dd = read_car_directory(car)
+        svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
+                                glb_output_dir=Path(t) / "out")
+    assert any("wheel centres matched to the physics" in l for l in log), log
+
+
+def test_numeric_helpers_tolerate_annotations():
+    from ac_parsers import _f, _i, _m
+    assert _f("2.530              (2.52)", 9.0) == 2.53          # the Impreza's WHEELBASE
+    assert _f("0.565", 9.0) == 0.565 and _f("-1e-3 ", 9.0) == -0.001
+    assert _m("12 kg") == 12.0 and _i("7 (rpm)") == 7
+    assert _f("1,2,3", 9.0) == 9.0 and _m("abc") is None          # vectors / text rejected
+    assert _f(None, 4.0) == 4.0 and _f("", 4.0) == 4.0
+
+
+
+def test_wheel_centre_placement_without_graphics_offset():
+    """translation=None: the wheel node centres are matched to the physics centres,
+    and the tyre mesh keeps its own radius (a bigger tyre sinks into the ground)."""
+    tyre = N("TYRE_LF", "mesh", verts=[                 # mesh radius 0.32 around the node
+        ((0, -0.32, 0), (0, 1, 0), (0, 0), (1, 0, 0)),
+        ((0.2, 0.32, 0), (0, 1, 0), (1, 0), (1, 0, 0)),
+        ((0, 0.32, 0.2), (0, 1, 0), (0, 1), (1, 0, 0))])
+    root = N("ROOT", children=[N("WHEEL_LF", children=[tyre],
+                                 matrix=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.8, 0.45, 1.3, 1])])
+    placement = {"translation": None, "wheel_centers": {"FL": (0.30, 0.0)}, "tolerance": 0.15}
+    rep = {}
+    with tempfile.TemporaryDirectory() as t:
+        _export(root, Path(t), placement=placement, report=rep)
+    assert rep["placement_mode"] == "physics" and rep["placement_source"] == "wheel centres"
+    # centre at the physics height 0.30; mesh radius 0.32 -> the tyre sinks 2 cm
+    assert abs(rep["bbox_min"][1] + 0.02) < 1e-6, rep["bbox_min"]
+    assert abs(rep["bbox_max"][2]) < 1e-6                 # front axle at forward = 0
+
+
+def test_placement_without_matching_wheel_nodes_falls_back_to_tyre_contact():
+    rep = {}
+    placement = {"translation": None, "wheel_centers": {"FL": (0.30, 0.0)}, "tolerance": 0.15}
+    with tempfile.TemporaryDirectory() as t:
+        _export(_wheel_car(0.05).__class__("ROOT", children=[N("BODY", "mesh")]), Path(t),
+                placement=placement, report=rep)
+    assert rep["placement_mode"] == "none" and rep["ground_shift"] == 0.0
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
