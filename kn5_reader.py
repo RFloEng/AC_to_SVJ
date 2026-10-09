@@ -568,10 +568,13 @@ def _apply_wheel_placement(root: "Kn5Node", targets: dict, tol: float) -> dict:
     (AC axes).  X is left alone.  A corner whose wheel node is more than ``tol``
     metres away from its target is skipped: the model and the physics disagree
     too much to trust either.  Mutates the node matrices; returns
-    ``{"wheels_moved": [stations], "wheels_skipped": [(station, why)]}``.
+    ``{"wheels_moved": [stations], "wheels_skipped": [(station, why)],
+    "wheel_deltas": {station: (dy, dz)}}`` - the (Y, Z) distance each wheel had to
+    be moved, i.e. how far the model's own wheel positions were from the physics.
     """
     moved: list[str] = []
     skipped: list[tuple[str, str]] = []
+    wheel_deltas: dict[str, tuple[float, float]] = {}
     pos: dict[str, np.ndarray] = {}
 
     def walk1(n: "Kn5Node", parent: np.ndarray) -> None:
@@ -597,6 +600,7 @@ def _apply_wheel_placement(root: "Kn5Node", targets: dict, tol: float) -> dict:
                 for pre in _HUB_PREFIXES:
                     deltas[f"{pre}_{suf}"] = d
                 moved.append(st)
+                wheel_deltas[st] = (round(float(d[1]), 4), round(float(d[2]), 4))
             break
         else:
             skipped.append((st, "no WHEEL node in the model"))
@@ -620,7 +624,8 @@ def _apply_wheel_placement(root: "Kn5Node", targets: dict, tol: float) -> dict:
             walk2(c, world, ancestor_moved)
     if deltas:
         walk2(root, np.eye(4), False)
-    return {"wheels_moved": moved, "wheels_skipped": skipped}
+    return {"wheels_moved": moved, "wheels_skipped": skipped,
+            "wheel_deltas": wheel_deltas}
 
 
 def _translation_from_wheels(root: "Kn5Node", centers: dict) -> Optional[tuple]:
@@ -1097,7 +1102,11 @@ def kn5_to_glb(
     placement      : Exact model -> physics placement (see below).  When given it
                      replaces the tyre-contact ground_align heuristic:
                      ``{"translation": (Tx, Ty, Tz) or None, "wheel_centers":
-                     {"FL": (height, forward), ...}, "tolerance": 0.15}``.
+                     {"FL": (height, forward), ...}, "tolerance": 0.15,
+                     "pitch_deg": 0.0}``.  ``pitch_deg`` rotates the body about the
+                     lateral axis through the CG (positive = nose down, see
+                     GRAPHICS_PITCH_ROTATION); ``translation`` must then already
+                     include the rotated offset.
                      A ``translation`` of None is worked out so the wheel nodes'
                      centres match ``wheel_centers`` (no GRAPHICS_OFFSET needed).
                      ``translation`` is the AC-axes shift taking model space to
@@ -1133,6 +1142,7 @@ def kn5_to_glb(
 
     placement_info: dict = {"wheels_moved": [], "wheels_skipped": []}
     placement_T: Optional[tuple] = None        # AC-axes model -> export shift, if any
+    placement_pitch = 0.0                      # radians; body pitch about the CG
     placement_source = ""
     if placement is not None and model.root is not None:
         centers = placement.get("wheel_centers") or {}
@@ -1143,8 +1153,17 @@ def kn5_to_glb(
             placement_source = "wheel centres"
         if T is not None:
             placement_T = tuple(float(v) for v in T)
-            targets = {st: (yu - placement_T[1], zf - placement_T[2])
-                       for st, (yu, zf) in centers.items()}
+            # GRAPHICS_PITCH_ROTATION: the body is rotated about the lateral axis
+            # (through the CG) before the translation, so a wheel target in the
+            # export frame maps back to the model through the inverse rotation.
+            # Only with an explicit GRAPHICS_OFFSET (the pivot reference).
+            if placement.get("translation") is not None:
+                placement_pitch = math.radians(float(placement.get("pitch_deg", 0.0)))
+            c_, s_ = math.cos(placement_pitch), math.sin(placement_pitch)
+            targets = {}
+            for st, (yu, zf) in centers.items():
+                yp, zp = yu - placement_T[1], zf - placement_T[2]
+                targets[st] = (c_ * yp + s_ * zp, -s_ * yp + c_ * zp)
             placement_info = _apply_wheel_placement(
                 model.root, targets, float(placement.get("tolerance", 0.15)))
 
@@ -1603,10 +1622,14 @@ def kn5_to_glb(
             # AC-axes shift (Tx, Ty, Tz) -> wrapper frame (x, -y, -z): see above.
             wt = [placement_T[0], -placement_T[1], -placement_T[2]]
             ground_shift = wt[1]
-        if any(abs(v) > 1e-9 for v in wt):
+        if any(abs(v) > 1e-9 for v in wt) or placement_pitch:
             wrapper = pygltflib.Node(
                 name="_ac_front_axle_align",
                 translation=wt,
+                # rotation about the lateral X axis; the AC->glTF axis flip
+                # (a 180 degree turn about X) leaves such a rotation unchanged
+                rotation=([math.sin(placement_pitch / 2), 0.0, 0.0,
+                           math.cos(placement_pitch / 2)] if placement_pitch else None),
             )
             gltf.nodes.append(wrapper)
             wrapper_idx = len(gltf.nodes) - 1
@@ -1616,6 +1639,9 @@ def kn5_to_glb(
             w0 = np.diag([-1.0, -1.0, 1.0, 1.0])
             w0 = w0 @ np.array([[1, 0, 0, wt[0]], [0, 1, 0, wt[1]],
                                 [0, 0, 1, wt[2]], [0, 0, 0, 1]], dtype="f8")
+            cp_, sp_ = math.cos(placement_pitch), math.sin(placement_pitch)
+            w0 = w0 @ np.array([[1, 0, 0, 0], [0, cp_, -sp_, 0],
+                                [0, sp_, cp_, 0], [0, 0, 0, 1]], dtype="f8")
             _process_node(model.root, wrapper_idx, w0)
         else:
             _process_node(model.root, rot_idx, np.diag([-1.0, -1.0, 1.0, 1.0]))
@@ -1645,8 +1671,10 @@ def kn5_to_glb(
             "placement_mode": ("physics" if placement_T is not None
                                else "tyre-contact" if ground_shift != 0.0 else "none"),
             "placement_source": placement_source if placement_T is not None else "",
+            "pitch_deg": round(math.degrees(placement_pitch), 4),
             "wheels_moved": list(placement_info["wheels_moved"]),
             "wheels_skipped": list(placement_info["wheels_skipped"]),
+            "wheel_deltas": dict(placement_info.get("wheel_deltas", {})),
             "damage_textures_skipped": len(damage_skipped),
             "damage_textures_skipped_bytes": damage_skipped_bytes,
             "bbox_min": [round(float(v), 4) for v in bmin],

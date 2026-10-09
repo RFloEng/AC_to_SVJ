@@ -41,8 +41,20 @@ All notable changes are documented here.
   the ground (the loaded-tyre look) instead of being forced to touch at y = 0.
   Without a usable `GRAPHICS_OFFSET` the wheel centres are matched the same way;
   the older tyre-contact alignment below is now only a last resort (no wheel
-  centres at all). `GRAPHICS_PITCH_ROTATION` is recorded in
-  `x_assettocorsa.graphics` but not applied (its sign convention is not settled).
+  centres at all).
+- **`GRAPHICS_PITCH_ROTATION` researched, recorded, not applied by default.**
+  Fitted on ~700 installed cars: the unit is degrees and a positive value lowers
+  the nose (`y' = y - pitch * z`, about the CG) - applying it with the opposite sign
+  is clearly worse. But it compensates the **rake** of AC's physics frame (the body
+  is tilted against the ground: `lf_punto_abarth` has front/rear ground heights 8 cm
+  apart, ~1.8 deg, and pitch 1.5), whereas the SVJ frame is level. Measured as the
+  front/rear wheel-height mismatch between the model and the SVJ wheel centres
+  (all cars, RMS): not applied 1.35 cm, pitch applied 2.13 cm; for |pitch| >= 1:
+  2.38 cm vs 4.94 cm. So the model is left un-rotated; the value is kept in
+  `x_assettocorsa.graphics.pitch_rotation_deg`. `build_svj(apply_graphics_pitch=True)`
+  rotates the body about the CG (wheels are still placed individually) for anyone
+  who wants AC's tilted attitude. The log also shows how far each model's own wheel
+  positions were from the physics.
 - **Fix: centre-of-gravity position was mirrored.** `center_of_gravity[0]` put the
   CG `front_weight x wheelbase` behind the front axle; it is
   `rear_weight x wheelbase` (a front-heavy car's CG is nearer the front axle),

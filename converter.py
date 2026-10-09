@@ -772,6 +772,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               include_skins: bool = True,
               kn5_override: Optional[Path] = None,
               meshes_subdir: str = "meshes",
+              apply_graphics_pitch: bool = False,
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
@@ -1519,7 +1520,15 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
 
                 # Exact model placement from GRAPHICS_OFFSET; None = fall back to
                 # putting the tyres on the ground.
-                _placement = _visual_placement(svj, _gfx_off, cg_derived)
+                # GRAPHICS_PITCH_ROTATION (positive = nose down, degrees, about the CG;
+                # sign and unit fitted on ~700 installed cars) is OFF by default: it
+                # compensates the RAKE of AC's physics frame (body tilted against the
+                # ground), whereas the SVJ frame is level, and fleet data shows the
+                # un-rotated model matches the SVJ wheel positions best (see CHANGELOG).
+                # Opt in with apply_graphics_pitch=True; values beyond +-6 deg are ignored.
+                _pitch = (_gfx_pitch if apply_graphics_pitch and abs(_gfx_pitch) <= 6.0
+                          else 0.0)
+                _placement = _visual_placement(svj, _gfx_off, cg_derived, _pitch)
                 if _placement and _placement["translation"] is not None:
                     log.append(f"✓ Mesh placement: GRAPHICS_OFFSET {_gfx_off} + derived CG "
                                f"(physics frame)")
@@ -1528,9 +1537,13 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                                "(GRAPHICS_OFFSET or a known CG height is missing)")
                 else:
                     log.append("ℹ Mesh placement: tyre-contact fallback (no wheel centres)")
-                if _gfx_pitch:
+                if _gfx_pitch and _placement and _placement.get("pitch_deg"):
+                    log.append(f"✓ GRAPHICS_PITCH_ROTATION {_gfx_pitch}° applied "
+                               f"(positive = nose down, about the CG)")
+                elif _gfx_pitch:
                     log.append(f"ℹ GRAPHICS_PITCH_ROTATION {_gfx_pitch}° recorded in "
-                               f"x_assettocorsa.graphics but not applied to the mesh")
+                               f"x_assettocorsa.graphics, not applied to the mesh (the SVJ "
+                               f"frame is level; AC's pitch compensates its physics rake)")
 
                 # ── GLB export (only when caller supplies an output dir) ───
                 if glb_output_dir is not None:
@@ -1550,9 +1563,14 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                                        f"height {_ra['size'][1]:.3f} m, "
                                        f"length {_ra['size'][2]:.3f} m")
                         if _ra.get("placement_mode") == "physics":
+                            _wd = _ra.get("wheel_deltas") or {}
+                            _worst = max((abs(v) for d in _wd.values() for v in d),
+                                         default=0.0)
                             log.append(
                                 f"  wheels placed from physics: "
-                                f"{', '.join(_ra['wheels_moved']) or 'none'}")
+                                f"{', '.join(_ra['wheels_moved']) or 'none'}"
+                                + (f" (model was off by up to {_worst * 100:.1f} cm)"
+                                   if _wd else ""))
                             for _st, _why in _ra.get("wheels_skipped", []):
                                 log.append(f"  ⚠ wheel {_st} not repositioned: {_why}")
                     except Exception as _glb_err:
@@ -1651,7 +1669,7 @@ _FS_RESERVED = frozenset({"con", "prn", "aux", "nul",
 
 
 def _visual_placement(svj: dict, gfx_off: Optional[list],
-                      cg_derived: bool) -> Optional[dict]:
+                      cg_derived: bool, pitch_deg: float = 0.0) -> Optional[dict]:
     """
     Exact placement of the KN5 model in the SVJ frame, from car.ini.
 
@@ -1684,8 +1702,16 @@ def _visual_placement(svj: dict, gfx_off: Optional[list],
     translation = None
     if use_offset:
         h_cg, d_f = -float(cg[2]), -float(cg[0])
-        translation = (0.0, float(gfx_off[1]) + h_cg, float(gfx_off[2]) - d_f)
-    return {"translation": translation, "wheel_centers": centers, "tolerance": 0.15}
+        # The body is pitched about the CG (origin of the physics frame) AFTER the
+        # offset: p' = Rx(pitch) (p + offset), then moved to the SVJ frame.  Positive
+        # GRAPHICS_PITCH_ROTATION (degrees) lowers the nose: y' = y cos - z sin.
+        th = math.radians(pitch_deg)
+        oy, oz = float(gfx_off[1]), float(gfx_off[2])
+        translation = (0.0,
+                       oy * math.cos(th) - oz * math.sin(th) + h_cg,
+                       oz * math.cos(th) + oy * math.sin(th) - d_f)
+    return {"translation": translation, "wheel_centers": centers, "tolerance": 0.15,
+            "pitch_deg": pitch_deg if translation is not None else 0.0}
 
 
 def _fs_safe(name: str) -> str:

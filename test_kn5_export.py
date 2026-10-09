@@ -1004,6 +1004,86 @@ def test_placement_without_matching_wheel_nodes_falls_back_to_tyre_contact():
     assert rep["placement_mode"] == "none" and rep["ground_shift"] == 0.0
 
 
+# --- GRAPHICS_PITCH_ROTATION -------------------------------------------------------
+
+def _pitch_body():
+    """BODY with ONE point at the front (z=+1) and two on the pivot axis (z=0), all
+    at y = 0, so a pitch moves only the front point and its direction is visible."""
+    return N("ROOT", children=[N("BODY", "mesh", verts=[
+        ((0, 0, 1), (0, 1, 0), (0, 0), (1, 0, 0)),
+        ((0.1, 0, 0), (0, 1, 0), (1, 0), (1, 0, 0)),
+        ((-0.1, 0, 0), (0, 1, 0), (0, 1), (1, 0, 0))])])
+
+
+def test_positive_pitch_lowers_the_nose():
+    import math
+    sin2 = math.sin(math.radians(2.0))
+    for pitch in (2.0, -2.0, 0.0):
+        rep = {}
+        placement = {"translation": (0.0, 0.0, 0.0), "wheel_centers": {}, "tolerance": 0.15,
+                     "pitch_deg": pitch}
+        # only the body rotation about the CG (origin): the front point (AC z=+1) moves
+        with tempfile.TemporaryDirectory() as t:
+            _export(_pitch_body(), Path(t), placement=placement, report=rep)
+        lo, hi = rep["bbox_min"][1], rep["bbox_max"][1]
+        assert abs(rep["pitch_deg"] - pitch) < 1e-6
+        if pitch > 0:                                   # nose DOWN
+            assert abs(lo + sin2) < 1e-4 and abs(hi) < 1e-9, (lo, hi)
+        elif pitch < 0:                                 # nose up
+            assert abs(lo) < 1e-9 and abs(hi - sin2) < 1e-4, (lo, hi)
+        else:
+            assert abs(lo) < 1e-9 and abs(hi) < 1e-9
+
+
+def test_wheel_targets_survive_a_pitched_body():
+    """With a pitch, a wheel target in the export frame must map back through the
+    inverse rotation: place it and read the wheel node's final position."""
+    import math
+    import numpy as np
+    tyre = N("TYRE_LF", "mesh", verts=[                  # all on the wheel axis (X): a
+        ((0, 0, 0), (0, 1, 0), (0, 0), (1, 0, 0)),         # pitch cannot move them
+        ((0.1, 0, 0), (0, 1, 0), (1, 0), (1, 0, 0)),
+        ((-0.1, 0, 0), (0, 1, 0), (0, 1), (1, 0, 0))])
+    root = N("ROOT", children=[N("WHEEL_LF", children=[tyre],
+                                 matrix=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.8, 0.40, 1.3, 1])])
+    pitch = 2.0
+    th = math.radians(pitch)
+    off = (0.0, -0.5, -0.19)
+    h_cg, d_f = 0.45, 1.1
+    tau = (0.0, off[1] * math.cos(th) - off[2] * math.sin(th) + h_cg,
+           off[2] * math.cos(th) + off[1] * math.sin(th) - d_f)
+    target = (0.305, 0.0)                      # wheel centre: height, forward of front axle
+    placement = {"translation": tau, "wheel_centers": {"FL": target}, "tolerance": 2.0,
+                 "pitch_deg": pitch}
+    rep = {}
+    with tempfile.TemporaryDirectory() as t:
+        _export(root, Path(t), placement=placement, report=rep)
+    assert rep["wheels_moved"] == ["FL"]
+    # the wheel node origin (= the tiny tyre's vertex at the node origin) must land on the
+    # target: lowest point of the tyre IS the node origin (all vertices at y >= 0 local)
+    assert abs(rep["bbox_min"][1] - target[0]) < 1e-6, rep["bbox_min"]     # height
+    assert abs(rep["bbox_min"][2]) < 1e-6 and abs(rep["bbox_max"][2]) < 1e-6   # at the front axle
+
+
+def test_converter_applies_graphics_pitch_only_when_asked():
+    from converter import build_svj, read_car_directory
+    import re
+    with tempfile.TemporaryDirectory() as t:
+        car = _patched_car(Path(t), graphics_offset="0,-0.50,-0.19")
+        ci = car / "data" / "car.ini"
+        ci.write_text(re.sub(r"^GRAPHICS_PITCH_ROTATION=.*$", "GRAPHICS_PITCH_ROTATION=1.5",
+                             ci.read_text(encoding="utf-8"), flags=re.M), encoding="utf-8")
+        _write(car / "synthcar.kn5", _wheel_car(0.04))
+        ini, cm, ctrl, dd = read_car_directory(car)
+        svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
+                                glb_output_dir=Path(t) / "o1", apply_graphics_pitch=True)
+        _, log_off, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
+                                  glb_output_dir=Path(t) / "o2")      # default: off
+    assert any("GRAPHICS_PITCH_ROTATION 1.5° applied" in l for l in log), log
+    assert any("not applied" in l and "GRAPHICS_PITCH_ROTATION" in l for l in log_off), log_off
+    assert svj["x_assettocorsa"]["graphics"]["pitch_rotation_deg"] == 1.5
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
