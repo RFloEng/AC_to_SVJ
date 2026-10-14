@@ -154,6 +154,29 @@ def drive_layout(raw: str) -> str:
     return DRIVE_LAYOUT_MAP.get((raw or "").upper().strip(), "FR")
 
 
+# Rear-engined road cars whose weight split alone looks like a mid-engine car.
+_RR_NAME_HINT = re.compile(
+    r"porsche.*(911|930|964|993|996|997|991|992)|ruf|singer|fiat[ _]?126|a110",
+    re.IGNORECASE)
+
+
+def infer_engine_layout(layout: str, front_weight: float, car_key: str = "") -> tuple:
+    """Refine AC's RWD (AC has no engine position) into FR / MR / RR.
+
+    Heuristic from the static front weight fraction (suspensions.ini CG_LOCATION):
+    a rear-driven car with < 46 % of its weight on the front axle has its engine
+    behind the driver (MR); a name hint promotes known rear-engined families to RR.
+    Returns (layout, source) where source is "weight", "name" or None when unchanged.
+    """
+    if layout != "FR" or not (0.0 < front_weight < 1.0):
+        return layout, None
+    if front_weight >= 0.46:
+        return "FR", None
+    if _RR_NAME_HINT.search(car_key or ""):
+        return "RR", "name"
+    return "MR", "weight"
+
+
 _DRIVE_TYPE_BY_LAYOUT = {"FR": "RWD", "MR": "RWD", "RR": "RWD", "FF": "FWD"}
 
 
@@ -915,6 +938,10 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     # ── Drivetrain (NEW: full parse) ─────────────────────────────────────────
     dt = parse_drivetrain(d)
     layout = drive_layout(dt["layout_raw"])
+    layout, _layout_src = infer_engine_layout(layout, 1.0 - rear_bias, f"{car_name} {cB.get('SCREEN_NAME', '')}")
+    if _layout_src:
+        log.append(f"✓ Engine layout inferred as {layout} from {_layout_src}"
+                   f" (front weight {1.0 - rear_bias:.1%}; AC has no engine position)")
     diff_type_raw = dt["differential"]["type"]
     diff_type = DIFF_TYPE_MAP.get(diff_type_raw, "lsd_clutch")
     diff_loc  = "rear" if layout in ("FR", "MR", "RR") else "front"

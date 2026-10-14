@@ -27,6 +27,13 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Engine layout: MR / RR instead of FR for every rear-driven car
+
+AC has no engine position, so every RWD car came out as `FR`. The layout is now
+inferred from the static front weight (`CG_LOCATION`): below 46 % on the front axle
+-> `MR`; known rear-engined families (Porsche 911 line, RUF, Singer, Fiat 126,
+Alpine A110) -> `RR`. Heuristic: the log says when it was applied and why.
+
 ### Drivetrain: AWD structure and the settings that were dropped
 
 Audited against the 1,398 installed cars. Before, an AWD car came out with one

@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from ac_parsers import parse_drivetrain, parse_ini
 from converter import (DIFF_TYPE_MAP, _build_driveline, _load_diff_controllers,
-                       _lock_control, drive_layout, drive_type)
+                       _lock_control, drive_layout, drive_type, infer_engine_layout)
 
 AWD_INI = """[HEADER]
 VERSION=3
@@ -189,6 +189,17 @@ def test_layout_and_type_names():
     assert drive_layout("AWD2") == "AWD" and drive_type("AWD") == "AWD"
     assert drive_type("FR") == "RWD" and drive_type("FF") == "FWD"
     assert DIFF_TYPE_MAP["TORSEN"] == "lsd_torsen" and DIFF_TYPE_MAP["VISCOUS"] == "lsd_viscous"
+
+
+def test_engine_layout_inferred_from_weight_split():
+    assert infer_engine_layout("FR", 0.53, "Some Coupe") == ("FR", None)
+    assert infer_engine_layout("FR", 0.46, "Some Coupe") == ("FR", None)
+    assert infer_engine_layout("FR", 0.42, "Mid Racer") == ("MR", "weight")
+    assert infer_engine_layout("FR", 0.38, "Porsche 911 Carrera") == ("RR", "name")
+    # other layouts and missing data are left alone
+    assert infer_engine_layout("FF", 0.60, "x") == ("FF", None)
+    assert infer_engine_layout("AWD", 0.40, "x") == ("AWD", None)
+    assert infer_engine_layout("FR", 0.0, "x") == ("FR", None)
 
 
 def test_lock_control_from_controller_files():
