@@ -152,7 +152,7 @@ def test_awd2_is_a_coupling_not_a_split():
     assert dt["awd"]["centre"] == {"ramp_torque": 40.9, "max_torque": 816.6}
     diffs, tc = _build_driveline(dt, drive_layout(dt["layout_raw"]), "lsd_clutch", "front")
     assert tc["type"] == "on_demand" and "torque_split" not in tc
-    assert tc["x_coupling"] == {"type": "torque_limited", "ramp_torque": 40.9, "max_torque": 816.6}
+    assert tc["coupling"] == {"ramp_torque": 40.9, "max_torque": 816.6}
     assert "center_diff" not in tc                                    # no lock values given
     assert [d["location"] for d in diffs] == ["front", "rear"]
 
@@ -212,11 +212,11 @@ def test_lock_control_from_controller_files():
     assert lc["target"] == "lock" and lc["_source"] == ["ctr_awd_center_lock.ini"]
     s0, s1 = lc["stages"]
     assert s0 == {"input": "gear", "combine": "multiply", "curve": [[0.0, 1.0], [1.0, 12.5], [2.0, 9.9]],
-                  "filter": 0.9, "min": 0.0, "max": 1000.0}
+                  "x_filter": 0.9, "min": 0.0, "max": 1000.0}
     assert s1["combine"] == "add" and s1["max"] == 1.0 and s1["curve"][-1] == [1.0, 0.5]
-    # attached to the centre diff of an AWD car (extension key until the standard adopts it)
+    # attached to the centre diff of an AWD car (lock_control, SVJ v0.99.3)
     _, tc = _build_driveline(_dt(AWD_INI), "AWD", "lsd_clutch", "front", ctl)
-    assert tc["center_diff"]["x_lock_control"]["stages"][0]["input"] == "gear"
+    assert tc["center_diff"]["lock_control"]["stages"][0]["input"] == "gear"
 
 
 def test_converter_end_to_end_awd(schema_path: Path | None = None):

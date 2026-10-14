@@ -27,6 +27,15 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Targets SVJ v0.99.3 (differential control)
+
+The standard adopted the proposal, so the extension keys became real fields:
+`center_diff.lock_control` (was `x_lock_control`) and `transfer_case.coupling`
+(was `x_coupling`, now only `ramp_torque` / `max_torque`; no `type`). AC's `FILTER`
+is a smoothing coefficient, not seconds, so it is kept as `x_filter` per stage
+instead of `filter_time_constant`. Stages without a usable curve are dropped. All
+1,398 installed cars still give a schema-valid powertrain block (v0.99.3 schema).
+
 ### Engine layout: MR / RR instead of FR for every rear-driven car
 
 AC has no engine position, so every RWD car came out as `FR`. The layout is now

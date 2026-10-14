@@ -104,7 +104,7 @@ except ImportError:
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-SVJ_VERSION = "0.99.2"
+SVJ_VERSION = "0.99.3"
 SVJ_SPEC    = "SVJ"
 CONV_VER    = "0.9.1"
 REPO_URL    = "https://github.com/RFloEng/SVJ-standard-vehicle-json"
@@ -1803,7 +1803,9 @@ def _lock_control(controllers: dict) -> Optional[dict]:
     A differential's dynamic lock, in the shape proposed for the SVJ standard
     (``proposals/svj_differential_control_proposal.md``): an ordered list of stages,
     each reading an input, mapping it through a curve and combining the result.
-    Emitted under the extension key ``x_lock_control`` until the standard adopts it.
+    Emitted as ``lock_control`` (SVJ v0.99.3).  AC's ``FILTER`` is a smoothing
+    coefficient, not a time constant in seconds, so it is kept as ``x_filter`` rather
+    than guessed into ``filter_time_constant``.
     The AC semantics of the combination are taken from the controller files as
     written (INPUT, COMBINATOR, LUT, FILTER, UP_LIMIT, DOWN_LIMIT); ``target`` is the
     differential's lock.
@@ -1815,9 +1817,10 @@ def _lock_control(controllers: dict) -> Optional[dict]:
             st: dict = {"input": str(c.get("input") or "").lower(),
                         "combine": _COMBINE.get(str(c.get("combinator") or "").upper(),
                                                 str(c.get("combinator") or "").lower())}
-            if c.get("lut"):
-                st["curve"] = c["lut"]
-            for src, dst in (("filter", "filter"), ("down_limit", "min"), ("up_limit", "max")):
+            if not c.get("lut") or len(c["lut"]) < 2:
+                continue                      # a stage needs a curve (curve2d: >= 2 points)
+            st["curve"] = c["lut"]
+            for src, dst in (("filter", "x_filter"), ("down_limit", "min"), ("up_limit", "max")):
                 if c.get(src) is not None:
                     st[dst] = c[src]
             stages.append(st)
@@ -1869,15 +1872,21 @@ def _build_driveline(dt: dict, layout: str, diff_type: str,
                 if cen.get(src) is not None:
                     cd[dst] = min(max(float(cen[src]), 0.0), 1.0)
             tc["center_diff"] = cd
-        # AWD2: a torque-limited centre coupling (no fixed split) - no standard field
-        # yet, proposed as transfer_case.coupling (see the proposal); x_ until adopted.
-        if cen.get("max_torque") is not None or cen.get("ramp_torque") is not None:
-            tc["x_coupling"] = {"type": "torque_limited",
-                                **{k: cen[k] for k in ("ramp_torque", "max_torque")
-                                   if cen.get(k) is not None}}
+        # AWD2: a torque-limited centre coupling with no fixed split
+        # (transfer_case.coupling, SVJ v0.99.3; max_torque is required there).
+        _cpl = {k: cen[k] for k in ("ramp_torque", "max_torque") if cen.get(k) is not None}
+        if _cpl.get("max_torque", 0) > 0:
+            if _cpl.get("ramp_torque", 0) > _cpl["max_torque"]:
+                _cpl.pop("ramp_torque")           # schema: ramp_torque <= max_torque
+            tc["coupling"] = _cpl
+        elif _cpl:
+            tc["x_coupling"] = _cpl
         ctl = _lock_control(controllers or {})
         if ctl:
-            (tc.get("center_diff") or tc)["x_lock_control"] = ctl
+            if "center_diff" in tc:
+                tc["center_diff"]["lock_control"] = ctl
+            else:
+                tc["x_lock_control"] = ctl
         return diffs, tc
     return [diff(diff_loc, dt["differential"])], None
 
