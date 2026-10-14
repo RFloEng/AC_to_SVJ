@@ -542,6 +542,12 @@ class App(tk.Tk):
             variable=self._b_flat_var,
             state="normal" if _KN5 else "disabled",
         ).pack(side="left", padx=4)
+        self._b_dmg_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opts, text="Include crash/damage textures",
+            variable=self._b_dmg_var,
+            state="normal" if _KN5 else "disabled",
+        ).pack(side="left", padx=4)
         if not _KN5:
             ttk.Label(opts, text="(kn5_reader unavailable)",
                       foreground="gray").pack(side="left")
@@ -652,6 +658,7 @@ class App(tk.Tk):
                 self._b_skins_var.get(),
                 selected,
                 self._b_flat_var.get(),
+                self._b_dmg_var.get(),
             ),
             daemon=True,
         ).start()
@@ -661,7 +668,8 @@ class App(tk.Tk):
     def _batch_worker(self, cars_folder: str, out_folder: str,
                       include_plots: bool, convert_glb: bool,
                       include_skins: bool, selected: list[str],
-                      flat_meshes: bool = False) -> None:
+                      flat_meshes: bool = False,
+                      include_damage: bool = False) -> None:
         # flat_meshes: put the GLBs beside the JSON instead of in meshes/
         mesh_sub = "" if flat_meshes else "meshes"
         q   = self._q
@@ -761,6 +769,7 @@ class App(tk.Tk):
                         glb_output_dir=glb_dir,
                         include_skins=include_skins,
                         meshes_subdir=mesh_sub,
+                        include_damage_textures=include_damage,
                     )
                     svj  = _clean(svj)
                     stem = _car_stem(svj, car_path.name)

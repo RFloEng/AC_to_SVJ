@@ -796,6 +796,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               kn5_override: Optional[Path] = None,
               meshes_subdir: str = "meshes",
               apply_graphics_pitch: bool = False,
+              include_damage_textures: bool = False,
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
@@ -1604,7 +1605,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                         exported = kn5_all_lods_to_glbs(
                             car_path, _glb_dir, include_skins=include_skins,
                             node_names=node_rename, kn5_override=kn5_override,
-                            placement=_placement, reports=_reports)
+                            placement=_placement, reports=_reports,
+                            include_damage_textures=include_damage_textures)
                         for lbl, out_p in exported.items():
                             log.append(f"✓ GLB LOD {lbl} written → {_mp}{out_p.name}")
                         _ra = _reports.get("A") or {}
