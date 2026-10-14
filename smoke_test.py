@@ -17,6 +17,11 @@ def main():
     if not test_kn5_export.run():
         print("\n✗ KN5 exporter checks failed")
         sys.exit(1)
+    print("\n──── DRIVETRAIN CHECKS ────")
+    import test_drivetrain
+    if not test_drivetrain.run():
+        print("\n✗ drivetrain checks failed")
+        sys.exit(1)
     print()
 
     car = Path(__file__).parent / "test_car"

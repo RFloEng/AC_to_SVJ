@@ -27,6 +27,38 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Drivetrain: AWD structure and the settings that were dropped
+
+Audited against the 1,398 installed cars. Before, an AWD car came out with one
+`diff_front` carrying the generic `[DIFFERENTIAL]` values and nothing else.
+
+- **AWD is now described.** `[AWD]` (459 cars) gives a `front` and a `rear`
+  differential (own lock under power / coast and preload), a `transfer_case`
+  (`full_time`) with `torque_split = [front, 1 - front]` and a `center_diff`.
+  `FRONT_SHARE` is read as a percentage (47) or a fraction (0.4). A leftover
+  `[AWD]` section on a RWD/FWD car is ignored.
+- **`TYPE=AWD2`** (35 cars, previously labelled FR/RWD): layout `AWD`,
+  `transfer_case.type = on_demand`, no fixed split; the torque-limited centre
+  coupling (`CENTRE_RAMP_TORQUE` / `CENTRE_MAX_TORQUE`) goes to
+  `transfer_case.x_coupling`.
+- **Clutch `MAX_TORQUE`** -> `powertrain.clutch.max_torque`; **reverse ratio**
+  (`GEAR_R`, stored positive) -> `gearbox.reverse_ratios`.
+- **Autoclutch shift profiles** are found by the name `[AUTOCLUTCH]` gives them
+  (they were looked up under a fixed name and lost on 1,370 cars):
+  `driver_aids.shift_profiler.{upshift,downshift}`.
+- **AWD centre-diff controllers** (`ctr_awd_center_lock.ini`, 102 cars) are kept
+  with their LUT curves: `x_assettocorsa.drivetrain.controllers`, and as
+  `center_diff.x_lock_control` in the shape proposed for the standard. Also kept:
+  `auto_shifter`, `downshift_protection`, extra `[DIFFERENTIAL]` keys.
+- Diff type names now use the schema's `lsd_torsen` / `lsd_viscous`.
+- All 1,398 cars produce a schema-valid powertrain block (checked against the
+  SVJ v0.99.2 schema).
+- **What the SVJ cannot express yet** (dynamic differential lock, centre
+  coupling): see `proposals/svj_differential_control_proposal.md` in the standard
+  repository. The converter already writes those two as `x_lock_control` and
+  `x_coupling`, so adopting the proposal is a key rename.
+- New `test_drivetrain.py`, run by `smoke_test.py`.
+
 ### Exact mesh placement from AC's physics link, and CG fixes
 
 - **Mesh placement uses AC's own link between model and physics**: `car.ini`

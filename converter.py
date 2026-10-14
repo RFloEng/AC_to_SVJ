@@ -85,7 +85,7 @@ from ac_parsers import (
     parse_brakes, parse_aero, parse_car_extras,
     detect_tyre_compounds, parse_tyre_extras, parse_tyre_thermal,
     parse_controller_ini, parse_setup_ranges,
-    _parse_vec3, _f, _i, _m, _b, _first,
+    _parse_vec3, _f, _i, _m, _b, _first, _resolve_lut,
 )
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench,
@@ -132,11 +132,11 @@ SUSP_TYPE_MAP = {
     "TRAILING": "trailing_arm", "TRAILING_ARM": "trailing_arm",
     "SEMI_TRAILING": "semi_trailing_arm", "SEMITRAILING": "semi_trailing_arm",
 }
-DRIVE_LAYOUT_MAP = {"RWD": "FR", "FWD": "FF", "AWD": "AWD", "4WD": "4WD"}
+DRIVE_LAYOUT_MAP = {"RWD": "FR", "FWD": "FF", "AWD": "AWD", "AWD2": "AWD", "4WD": "4WD"}
 DIFF_TYPE_MAP = {
     "LSD": "lsd_clutch", "SALISBURY": "lsd_clutch",
     "CLUTCH": "lsd_clutch", "OPEN": "open", "SPOOL": "spool",
-    "TORSEN": "torsen", "VISCOUS": "viscous",
+    "TORSEN": "lsd_torsen", "VISCOUS": "lsd_viscous",
 }
 
 
@@ -1227,6 +1227,21 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         if dt["gearbox"].get(k_from) is not None:
             gearbox_out[k_to] = dt["gearbox"][k_from]
 
+    if dt["gearbox"].get("reverse_ratio"):
+        gearbox_out["reverse_ratios"] = [dt["gearbox"]["reverse_ratio"]]
+    _diff_ctl = _load_diff_controllers(ini_files, data_dir, log)
+    _diffs, _tc = _build_driveline(dt, layout, diff_type, diff_loc, _diff_ctl)
+    _clutch = ({"max_torque": dt["clutch"]["max_torque"]}
+               if dt.get("clutch", {}).get("max_torque") else None)
+    if layout in ("AWD", "4WD") and _tc is None:
+        log.append("⚠ AWD car without an [AWD]/[AWD2] section: single differential "
+                   "emitted from [DIFFERENTIAL]")
+    elif _tc is not None:
+        _fs = _tc.get("torque_split")
+        log.append(f"✓ Driveline: {_tc['type']} transfer case"
+                   + (f", {_fs[0]:.0%} front" if _fs else "")
+                   + f", {len(_diffs)} axle differential(s)")
+
     # data_origin (SVJ 0.95 §1) — confidence reflects how the AC data
     # reached us: unpacked data/ is verbatim from the car; uploads are
     # less verifiable so we drop a notch.
@@ -1335,15 +1350,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 },
             },
             "gearbox": gearbox_out,
-            "differentials": [{
-                "id":          f"diff_{diff_loc}",
-                "location":    diff_loc,
-                "type":        diff_type,
-                "final_drive": dt["gearbox"].get("final_drive", 3.5),
-                "preload":     dt["differential"]["preload"],
-                "lock_power":  dt["differential"]["power"],
-                "lock_coast":  dt["differential"]["coast"],
-            }],
+            "differentials": _diffs,
         },
         "aerodynamics": {
             "reference": {
@@ -1371,6 +1378,11 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
             "active_systems": (active_systems or None),
         },
     }
+
+    if _clutch:
+        svj["powertrain"]["clutch"] = _clutch
+    if _tc:
+        svj["powertrain"]["transfer_case"] = _tc
 
     # ── x_assettocorsa extension block ───────────────────────────────────────
     cm_ext: dict = {}
@@ -1408,7 +1420,18 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     if ae.get("active_aero"):
         x_ac_aero["active_aero_raw"] = ae["active_aero"]
 
+    # Drivetrain details with no SVJ home: raw AWD values, shift automation, the
+    # extra [DIFFERENTIAL] keys and the AWD centre-diff controller (with its LUTs).
+    x_ac_dt: dict = {}
+    if dt.get("awd"):                 x_ac_dt["awd"] = dt["awd"]
+    if dt.get("auto_shifter"):        x_ac_dt["auto_shifter"] = dt["auto_shifter"]
+    if dt.get("downshift_protection"): x_ac_dt["downshift_protection"] = dt["downshift_protection"]
+    if dt.get("differential_extra"):  x_ac_dt["differential_extra"] = dt["differential_extra"]
+    if _diff_ctl:
+        x_ac_dt["controllers"] = _diff_ctl
+
     x_ac: dict = {}
+    if x_ac_dt:          x_ac["drivetrain"]      = x_ac_dt
     if cm_ext:           x_ac["cm_specs"]        = cm_ext
     if damage_all:       x_ac["damage"]          = damage_all
     if driver_aids:      x_ac["driver_aids"]     = driver_aids
@@ -1627,6 +1650,11 @@ def read_car_directory(car_path: Path) -> tuple[dict, Optional[dict], dict, Path
     for fname in CORE_INI_FILES:
         if fname in loaded:
             ini_files[fname] = loaded[fname]
+    # AWD centre-diff controllers (ctr_awd_center_lock.ini): kept beside the core
+    # files; build_svj reads them for x_assettocorsa.drivetrain.
+    for fname, text in loaded.items():
+        if fname.lower().startswith("ctr_") and fname.lower().endswith(".ini"):
+            ini_files[fname] = text
     # …plus any ctrl_*.ini / electric_controllers.ini from the same source.
     for fname, text in loaded.items():
         low = fname.lower()
@@ -1712,6 +1740,119 @@ def _visual_placement(svj: dict, gfx_off: Optional[list],
                        oz * math.cos(th) + oy * math.sin(th) - d_f)
     return {"translation": translation, "wheel_centers": centers, "tolerance": 0.15,
             "pitch_deg": pitch_deg if translation is not None else 0.0}
+
+
+def _load_diff_controllers(ini_files: dict, data_dir: Optional[Path],
+                           log: Optional[list] = None) -> dict:
+    """
+    AWD centre-diff controllers (``ctr_*.ini``) parsed, with the LUT each controller
+    points at read into ``controller["lut"]`` ([[x, y], ...]).  ``{file: parsed}``.
+    """
+    out: dict = {}
+    for name, text in ini_files.items():
+        if not name.lower().startswith("ctr_"):
+            continue
+        try:
+            ctl = parse_controller_ini(text)
+            for c in ctl.get("controllers", []):
+                lut = _resolve_lut(data_dir, c.get("lut_raw")) if data_dir else None
+                if lut:
+                    c["lut"] = lut
+            out[name] = ctl
+            if log is not None:
+                log.append(f"✓ Drivetrain controller kept: {name} "
+                           f"({len(ctl.get('controllers', []))} curves)")
+        except Exception as ex:                                   # noqa: BLE001
+            if log is not None:
+                log.append(f"⚠ {name} not parsed: {ex}")
+    return out
+
+
+_COMBINE = {"MULT": "multiply", "ADD": "add"}
+
+
+def _lock_control(controllers: dict) -> Optional[dict]:
+    """
+    A differential's dynamic lock, in the shape proposed for the SVJ standard
+    (``proposals/svj_differential_control_proposal.md``): an ordered list of stages,
+    each reading an input, mapping it through a curve and combining the result.
+    Emitted under the extension key ``x_lock_control`` until the standard adopts it.
+    The AC semantics of the combination are taken from the controller files as
+    written (INPUT, COMBINATOR, LUT, FILTER, UP_LIMIT, DOWN_LIMIT); ``target`` is the
+    differential's lock.
+    """
+    stages: list = []
+    sources: list = []
+    for name, ctl in controllers.items():
+        for c in ctl.get("controllers", []):
+            st: dict = {"input": str(c.get("input") or "").lower(),
+                        "combine": _COMBINE.get(str(c.get("combinator") or "").upper(),
+                                                str(c.get("combinator") or "").lower())}
+            if c.get("lut"):
+                st["curve"] = c["lut"]
+            for src, dst in (("filter", "filter"), ("down_limit", "min"), ("up_limit", "max")):
+                if c.get(src) is not None:
+                    st[dst] = c[src]
+            stages.append(st)
+        sources.append(name)
+    if not stages:
+        return None
+    return {"target": "lock", "stages": stages, "_source": sources}
+
+
+def _build_driveline(dt: dict, layout: str, diff_type: str,
+                     diff_loc: str,
+                     controllers: Optional[dict] = None) -> tuple[list, Optional[dict]]:
+    """
+    ``(differentials, transfer_case)`` from the parsed drivetrain.ini.
+
+    AWD (``[AWD]``): a front and a rear differential from ``FRONT_DIFF_*`` /
+    ``REAR_DIFF_*`` and a ``full_time`` transfer case whose ``torque_split`` is
+    ``[front_share, 1 - front_share]`` and whose ``center_diff`` carries
+    ``CENTRE_DIFF_*``.  ``TYPE=AWD2`` (``[AWD2]``) has no fixed split: a torque-limited
+    centre coupling, so ``on_demand`` with ``max_torque`` / ``ramp_torque`` on the
+    centre diff and no ``torque_split``.  Without AWD data (or for RWD / FWD) the
+    single ``[DIFFERENTIAL]`` differential is emitted as before.
+    """
+    final = dt["gearbox"].get("final_drive", 3.5)
+
+    def diff(loc: str, vals: dict) -> dict:
+        d = {"id": f"diff_{loc}", "location": loc, "type": diff_type, "final_drive": final}
+        if vals.get("preload") is not None:
+            d["preload"] = max(float(vals["preload"]), 0.0)
+        for src, dst in (("power", "lock_power"), ("coast", "lock_coast")):
+            if vals.get(src) is not None:
+                d[dst] = min(max(float(vals[src]), 0.0), 1.0)
+        return d
+
+    awd = dt.get("awd")
+    if awd and (awd.get("front") or awd.get("rear")):
+        diffs = [diff(loc, awd[loc]) for loc in ("front", "rear") if awd.get(loc)]
+        tc: dict = {"type": "on_demand" if awd["model"] == "awd2" else "full_time"}
+        fs = awd.get("front_share")
+        if fs is not None:
+            fs = min(max(float(fs), 0.0), 1.0)
+            tc["torque_split"] = [round(fs, 4), round(1.0 - fs, 4)]
+        cen = awd.get("centre") or {}
+        if any(cen.get(k) is not None for k in ("power", "coast", "preload")):
+            cd = {"type": diff_type, "location": "center"}
+            if cen.get("preload") is not None:
+                cd["preload"] = max(float(cen["preload"]), 0.0)
+            for src, dst in (("power", "lock_power"), ("coast", "lock_coast")):
+                if cen.get(src) is not None:
+                    cd[dst] = min(max(float(cen[src]), 0.0), 1.0)
+            tc["center_diff"] = cd
+        # AWD2: a torque-limited centre coupling (no fixed split) - no standard field
+        # yet, proposed as transfer_case.coupling (see the proposal); x_ until adopted.
+        if cen.get("max_torque") is not None or cen.get("ramp_torque") is not None:
+            tc["x_coupling"] = {"type": "torque_limited",
+                                **{k: cen[k] for k in ("ramp_torque", "max_torque")
+                                   if cen.get(k) is not None}}
+        ctl = _lock_control(controllers or {})
+        if ctl:
+            (tc.get("center_diff") or tc)["x_lock_control"] = ctl
+        return diffs, tc
+    return [diff(diff_loc, dt["differential"])], None
 
 
 def _fs_safe(name: str) -> str:

@@ -249,6 +249,93 @@ def parse_engine(ini: dict, data_dir: Optional[Path]) -> dict:
 
 # ─── drivetrain.ini parsing (beyond ratios) ───────────────────────────────────
 
+def _numdict(sec: Optional[dict]) -> dict:
+    """{key.lower(): number-or-text} for a section; {} when absent."""
+    out = {}
+    for k, v in (sec or {}).items():
+        n = _m(v)
+        out[k.lower()] = n if n is not None else v
+    return out
+
+
+def _front_share(v) -> Optional[float]:
+    """AC's FRONT_SHARE is a percentage in practice (47 = 47 %); a few cars write a
+    fraction (0.4).  Values above 1 are read as percent, 1 and below as a fraction."""
+    x = _m(v)
+    if x is None:
+        return None
+    return round(x / 100.0 if x > 1.0 else x, 4)
+
+
+def _axle_diff(sec: dict, prefix: str) -> dict:
+    d = {"power": _m(sec.get(f"{prefix}_POWER")),
+         "coast": _m(sec.get(f"{prefix}_COAST")),
+         "preload": _m(sec.get(f"{prefix}_PRELOAD"))}
+    return {k: v for k, v in d.items() if v is not None}
+
+
+def _parse_awd(ini: dict, traction: str) -> Optional[dict]:
+    """
+    All-wheel-drive description.  AC uses ``[AWD]`` (a fixed split ``FRONT_SHARE``
+    plus front / centre / rear diff lock settings) or, for ``TYPE=AWD2``,
+    ``[AWD2]`` (front / rear diffs and a torque-limited centre coupling:
+    ``CENTRE_RAMP_TORQUE`` / ``CENTRE_MAX_TORQUE``).  A few cars keep the ``[AWD]``
+    keys inside ``[DIFFERENTIAL]``.  Returns
+    ``{"model": "awd"|"awd2", "front_share"?, "front"?, "rear"?, "centre"?}`` or None.
+    """
+    t = traction.upper()
+    if t not in ("AWD", "AWD2", "4WD"):       # a leftover [AWD] on a RWD/FWD car is not used
+        return None
+    sec, model = ini.get("AWD"), "awd"
+    if t == "AWD2" and ini.get("AWD2"):
+        sec, model = ini["AWD2"], "awd2"
+    elif sec is None and t in ("AWD", "AWD2", "4WD"):
+        dsec = ini.get("DIFFERENTIAL", {})
+        if any(k.startswith(("FRONT_", "CENTRE_", "REAR_")) for k in dsec):
+            sec = dsec
+        elif ini.get("AWD2"):
+            sec, model = ini["AWD2"], "awd2"
+    if not sec:
+        return None
+    out: dict = {"model": model}
+    fs = _front_share(sec.get("FRONT_SHARE"))
+    if fs is not None:
+        out["front_share"] = fs
+    for loc, pre in (("front", "FRONT_DIFF"), ("rear", "REAR_DIFF")):
+        d = _axle_diff(sec, pre)
+        if d:
+            out[loc] = d
+    cen = _axle_diff(sec, "CENTRE_DIFF")
+    for key, name in (("ramp_torque", "CENTRE_RAMP_TORQUE"), ("max_torque", "CENTRE_MAX_TORQUE")):
+        v = _m(sec.get(name))
+        if v is not None:
+            cen[key] = v
+    if cen:
+        out["centre"] = cen
+    return out if len(out) > 1 else None
+
+
+def _shift_profiles(ini: dict, autoc: dict, legacy: dict) -> dict:
+    """
+    Autoclutch shift profiles.  The section holding a profile is named by the
+    ``UPSHIFT_PROFILE`` / ``DOWNSHIFT_PROFILE`` value in ``[AUTOCLUTCH]`` (usually
+    ``DOWNSHIFT_PROFILE``), not a fixed name.  ``NONE`` means no profile.
+    """
+    out: dict = {}
+    for kind, key in (("upshift", "UPSHIFT_PROFILE"), ("downshift", "DOWNSHIFT_PROFILE")):
+        name = str(autoc.get(key) or "").strip()
+        if not name or name.upper() == "NONE":
+            continue
+        sec = ini.get(name.upper())
+        pts = {k.lower(): _m(v) for k, v in (sec or {}).items() if _m(v) is not None}
+        out[kind] = {"name": name, **({"points": pts} if pts else {})}
+    if legacy and "downshift" not in out:       # older name some mods use
+        pts = {k.lower(): _m(v) for k, v in legacy.items() if _m(v) is not None}
+        if pts:
+            out["downshift"] = {"name": "DOWNSHIFT_PROFILER", "points": pts}
+    return out
+
+
 def parse_drivetrain(ini: dict) -> dict:
     hdr = ini.get("HEADER", {})
     trac = ini.get("TRACTION", {})
@@ -292,13 +379,28 @@ def parse_drivetrain(ini: dict) -> dict:
         },
         "autoclutch":     {k.lower(): _m(v) or _b(v) or v for k, v in autoc.items()} if autoc else None,
         "autoblip":       {k.lower(): _m(v) or _b(v) or v for k, v in autob.items()} if autob else None,
-        "shift_profiler": {k.lower(): _m(v) or v for k, v in dsp.items()} if dsp else None,
+        "shift_profiler": _shift_profiles(ini, autoc, dsp) or None,
         "damage": {
             "clutch_torque": _m(dmg.get("CLUTCH_TORQUE")),
             "rpm_threshold": _m(dmg.get("RPM_THRESHOLD")),
             "gear_damage":   _m(dmg.get("GEAR_DAMAGE_RATE")),
         } if dmg else {},
     }
+    # Reverse ratio (AC writes it negative), clutch, AWD description and the
+    # smaller sections that used to be dropped.
+    gr = _m(grs.get("GEAR_R") or grs.get("RATIO_R"))
+    if gr:
+        out["gearbox"]["reverse_ratio"] = round(abs(gr), 4)
+    mt = _m(ini.get("CLUTCH", {}).get("MAX_TORQUE"))
+    out["clutch"] = {"max_torque": mt} if mt else {}
+    out["awd"] = _parse_awd(ini, out["layout_raw"])
+    out["auto_shifter"] = _numdict(ini.get("AUTO_SHIFTER"))
+    out["downshift_protection"] = _numdict(ini.get("DOWNSHIFT_PROTECTION"))
+    out["differential_extra"] = {
+        k.lower(): (_m(v) if _m(v) is not None else v)
+        for k, v in diff.items()
+        if k not in ("POWER", "COAST", "PRELOAD", "TYPE")
+        and not k.startswith(("FRONT_", "CENTRE_", "REAR_"))}
     # Strip Nones from gearbox
     out["gearbox"] = {k: v for k, v in out["gearbox"].items() if v is not None}
     if out["damage"]:
