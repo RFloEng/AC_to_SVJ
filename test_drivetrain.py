@@ -126,6 +126,8 @@ def test_awd_section_parsed_and_normalised():
     assert awd["centre"] == {"power": 0.7, "coast": 0.6, "preload": 60.0}
     # a share written as a fraction stays a fraction
     assert _dt(AWD_INI.replace("FRONT_SHARE=47", "FRONT_SHARE=0.4"))["awd"]["front_share"] == 0.4
+    # 1 means 1 % (rear-biased GT-Rs, Lamborghinis), not 100 %
+    assert _dt(AWD_INI.replace("FRONT_SHARE=47", "FRONT_SHARE=1"))["awd"]["front_share"] == 0.01
 
 
 def test_clutch_reverse_ratio_and_extras():
@@ -200,6 +202,19 @@ def test_engine_layout_inferred_from_weight_split():
     assert infer_engine_layout("FF", 0.60, "x") == ("FF", None)
     assert infer_engine_layout("AWD", 0.40, "x") == ("AWD", None)
     assert infer_engine_layout("FR", 0.0, "x") == ("FR", None)
+
+
+def test_unusable_cm_weight_does_not_abort_the_conversion():
+    import copy
+    from converter import build_svj, read_car_directory
+    src = Path(__file__).parent / "test_car"
+    if not src.is_dir():
+        return
+    ini, cm, ctrl, dd = read_car_directory(src)
+    for bad in ("_kg*", "-", ""):
+        cm2 = copy.deepcopy(cm) or {}
+        cm2.setdefault("specs", {})["weight"] = bad
+        build_svj(ini, cm2, data_dir=dd, ctrl_files=ctrl)       # must not raise
 
 
 def test_lock_control_from_controller_files():

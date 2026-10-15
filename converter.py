@@ -879,7 +879,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         log.append("✓ Content Manager metadata loaded")
 
     cm_weight_str = cm_specs.get("weight", "")
-    cm_weight = float(re.sub(r"[^0-9.]", "", cm_weight_str)) if cm_weight_str else None
+    cm_weight = parse_cm_num("weight")      # None for "-", "" or text without a number
     total_mass = _f(cW.get("MINIMUM"), cm_weight or 1200.0)
 
     # ── Suspension parsed blocks ─────────────────────────────────────────────

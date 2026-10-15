@@ -260,11 +260,12 @@ def _numdict(sec: Optional[dict]) -> dict:
 
 def _front_share(v) -> Optional[float]:
     """AC's FRONT_SHARE is a percentage in practice (47 = 47 %); a few cars write a
-    fraction (0.4).  Values above 1 are read as percent, 1 and below as a fraction."""
+    fraction (0.4).  1 and above is percent - FRONT_SHARE=1 on the rear-biased GT-Rs and
+    Lamborghinis means 1 %, not 100 % - and anything below 1 is a fraction."""
     x = _m(v)
     if x is None:
         return None
-    return round(x / 100.0 if x > 1.0 else x, 4)
+    return round(x / 100.0 if x >= 1.0 else x, 4)
 
 
 def _axle_diff(sec: dict, prefix: str) -> dict:
