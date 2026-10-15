@@ -27,6 +27,11 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Option: highest-quality LOD only
+
+`highest_lod_only` (GUI: "Highest LOD only"; `build_svj` / `kn5_all_lods_to_glbs`)
+exports only LOD A and leaves out LOD B-D, in the GLBs and in `assets.meshes`.
+
 ### Targets SVJ v0.99.4 (strut ends, mount names) and two schema fixes
 
 - **Strut:** the strut link now ends at `hardpoints.strut_lower` (the lower clamp

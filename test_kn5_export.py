@@ -555,6 +555,17 @@ def test_resolve_uses_unencrypted_subfolder_copy():
         assert [lbl for lbl, _ in K.find_car_kn5_lods(car)] == ["A"]
 
 
+def test_highest_lod_only_exports_just_lod_a():
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "car"
+        _write(car / "car.kn5", _car_nodes())
+        _write(car / "car_LOD_B.kn5", _car_nodes())
+        both = K.kn5_all_lods_to_glbs(car, Path(t) / "all")
+        only = K.kn5_all_lods_to_glbs(car, Path(t) / "one", highest_lod_only=True)
+        assert sorted(both) == ["A", "B"] and sorted(only) == ["A"]
+        assert [p.name for p in (Path(t) / "one").glob("*.glb")] == ["car.glb"]
+
+
 def test_resolve_refuses_when_only_encrypted():
     with tempfile.TemporaryDirectory() as t:
         car = Path(t) / "car"

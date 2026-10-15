@@ -1923,6 +1923,7 @@ def kn5_all_lods_to_glbs(
     ground_align: bool = True,
     placement: Optional[dict] = None,
     reports: Optional[dict] = None,
+    highest_lod_only: bool = False,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -1948,6 +1949,7 @@ def kn5_all_lods_to_glbs(
                     ignored when ``placement`` is given).
     placement     : Exact physics placement, see kn5_to_glb().
     reports       : Optional dict filled with ``{lod_label: export report}``.
+    highest_lod_only : Export only LOD A (the highest quality), skipping B-D.
 
     Returns
     -------
@@ -1959,6 +1961,8 @@ def kn5_all_lods_to_glbs(
     lods = find_car_kn5_lods(car_path, kn5_override)
     if not lods:
         raise EncryptedKn5Error(resolve_car_kn5(car_path, kn5_override).message)
+    if highest_lod_only:
+        lods = lods[:1]
     skins = _find_skins(car_path) if include_skins else []
     results: dict[str, Path] = {}
     for label, kn5_path in lods:

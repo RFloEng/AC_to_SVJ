@@ -858,6 +858,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               meshes_subdir: str = "meshes",
               apply_graphics_pitch: bool = False,
               include_damage_textures: bool = False,
+              highest_lod_only: bool = False,
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
@@ -1560,6 +1561,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         car_path = data_dir.parent
         try:
             kn5_lods = find_car_kn5_lods(car_path, kn5_override)  # [("A", path), ...]
+            if highest_lod_only:
+                kn5_lods = kn5_lods[:1]              # LOD A only
             _choice = resolve_car_kn5(car_path, kn5_override)
         except ValueError as _e:
             kn5_lods, _choice = [], None
@@ -1667,7 +1670,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                             car_path, _glb_dir, include_skins=include_skins,
                             node_names=node_rename, kn5_override=kn5_override,
                             placement=_placement, reports=_reports,
-                            include_damage_textures=include_damage_textures)
+                            include_damage_textures=include_damage_textures,
+                            highest_lod_only=highest_lod_only)
                         for lbl, out_p in exported.items():
                             log.append(f"✓ GLB LOD {lbl} written → {_mp}{out_p.name}")
                         _ra = _reports.get("A") or {}
