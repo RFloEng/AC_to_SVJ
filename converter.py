@@ -398,6 +398,7 @@ def build_corner(corner_id: str, susp_axle: dict,
         # `damper_outboard` is retained for back-compat with v0.99 consumers.
         if sys_type == "macpherson":
             hp_svj["strut_outboard"] = strut_tyre
+            hp_svj["strut_top"] = strut_tyre          # spec §9.2.2.1 name
 
     # Control-arm inboard points in vehicle frame (chassis-space).
     # `chassis_z_offset` lifts each WBCAR pickup from CG-relative to
@@ -411,7 +412,10 @@ def build_corner(corner_id: str, susp_axle: dict,
     strut_car   = ac_hp_to_vehicle(hp_ac.get("STRUT_CAR"),           axle_x, y_sign, chassis_z_offset, wheel_y)
 
     links: list = []
-    if upper_front and upper_rear:
+    is_axle = sys_type == "solid_axle"
+    # AC type STRUT has no upper arm: a WBCAR_TOP_* left in the file is unused
+    # boilerplate, and an upper arm on a MacPherson over-constrains the corner.
+    if upper_front and upper_rear and not is_axle and sys_type != "macpherson":
         links.append({
             # "wishbone" is reserved for true double-A-arm geometry; multi-link
             # and MacPherson equivalents use "control_arm" (matches svjrepo
@@ -421,14 +425,31 @@ def build_corner(corner_id: str, susp_axle: dict,
             "inboard_points": [upper_front, upper_rear],
             "outboard_ref": "hardpoints.upper_ball_joint",
         })
-    if lower_front and lower_rear:
+    if is_axle and upper_front and upper_rear and hp_svj.get("upper_ball_joint"):
+        # AC type AXLE reuses the two-pivot WBCAR_* sets as the axle's locating links.
+        # SVJ solid_axle wants one rod per link (§9.2.1): chassis end = midpoint of
+        # the two pivots, axle end = the matching WBTYRE_* point.
+        for nm, a, b, hp in (("upper_link", upper_front, upper_rear, "upper_link_end"),
+                             ("lower_link", lower_front, lower_rear, "lower_link_end")):
+            if not (a and b):
+                continue
+            hp_svj[hp] = hp_svj["upper_ball_joint" if nm == "upper_link" else "lower_ball_joint"]
+            links.append({
+                "name": nm, "type": "rod",
+                "inboard_points": [[round((a[i] + b[i]) / 2.0, 4) for i in range(3)]],
+                "outboard_ref": f"hardpoints.{hp}",
+                "_est": True,
+                "_est_note": "AC TYPE=AXLE: two-pivot WBCAR_* pickups collapsed to one "
+                             "rod at their midpoint (solid_axle, spec 9.2.1)",
+            })
+    elif lower_front and lower_rear and not is_axle:
         links.append({
             "name": ("lower_wishbone" if sys_type == "double_wishbone" else "trailing_arm_lower" if sys_type == "trailing_arm" else "semi_trailing_arm_lower" if sys_type == "semi_trailing_arm" else "lower_control_arm"),
             "type": "arm",
             "inboard_points": [lower_front, lower_rear],
             "outboard_ref": "hardpoints.lower_ball_joint",
         })
-    if tie_chassis and hp_svj.get("steering_tie_rod_end"):
+    if tie_chassis and hp_svj.get("steering_tie_rod_end") and not is_axle:
         # AC's WBCAR_STEER / WBTYRE_STEER define the toe-control link's
         # inboard / outboard pickups. On the front axle this IS the steering
         # tie rod; on the rear it's a passive toe link (no steering box on
@@ -462,17 +483,12 @@ def build_corner(corner_id: str, susp_axle: dict,
         if sys_type == "macpherson":
             links.append({
                 "name": "strut",
-                "type": "rod",
+                "type": "strut",
                 "inboard_points": [strut_car],
-                "outboard_ref": "hardpoints.strut_outboard",
+                "outboard_ref": "hardpoints.strut_top",
             })
-        else:
-            links.append({
-                "name": "damper_link",
-                "type": "rod",
-                "inboard_points": [strut_car],
-                "outboard_ref": "hardpoints.damper_outboard",
-            })
+        # On any other axle STRUT_* is not a locating member (a damper does not
+        # locate the wheel): it stays out of `links`, kept under damper.x_ac_strut.
 
     # ── Solid-axle / live-axle links (TYPE=3) ────────────────────────────────
     # AC solid-axle cars use LINK_N_CAR / LINK_N_AXLE pairs for trailing and
@@ -652,40 +668,80 @@ def build_corner(corner_id: str, susp_axle: dict,
                        round(wheel_center[2] - tower_h, 4)]
     spring_outboard = wheel_center
 
+    # MacPherson: the strut IS the damper, so its real mounts (STRUT_CAR -> STRUT_TYRE)
+    # give the axis and the motion ratio (|strut_z| / strut length).
+    strut_mr = None
+    if sys_type == "macpherson" and strut_car and strut_tyre:
+        _dx = [strut_car[i] - strut_tyre[i] for i in range(3)]
+        _len = math.sqrt(sum(c * c for c in _dx))
+        if _len > 0.05:
+            _mr = abs(_dx[2]) / _len
+            if 0.5 <= _mr <= 1.0:
+                strut_mr = round(_mr, 4)
+                spring_inboard, spring_outboard = list(strut_car), list(strut_tyre)
+
     spring = {
         "type":          "coilover",
         "rate":          round(spring_k, 1),
-        "motion_ratio":  1.0,
-        "axis":          "vertical",
+        "motion_ratio":  strut_mr or 1.0,
+        "axis":          "strut" if strut_mr else "vertical",
+        "inboard_mount":  spring_inboard,
+        "outboard_mount": spring_outboard,
+        # legacy names (pre spec-9.3 mount keys), kept for older readers
         "inboard_point":  spring_inboard,
         "outboard_point": spring_outboard,
-        "_note": "AC spring rate is already wheel-rate — axis taken as vertical "
-                 "through the wheel centre (AC does not model pickup points)",
+        "_note": ("AC spring rate is already wheel-rate; mounts are the strut's "
+                  "STRUT_CAR / STRUT_TYRE, motion ratio from the strut inclination"
+                  if strut_mr else
+                  "AC spring rate is already wheel-rate — axis taken as vertical "
+                  "through the wheel centre (AC does not model pickup points)"),
     }
     if susp_axle.get("progressive"):
         spring["progressive_factor"] = susp_axle["progressive"]
     if susp_axle.get("rod_length"):
         spring["rod_length"] = susp_axle["rod_length"]
 
+    _bump_c = make_damper_curve(bump_raw)
+    _reb_c = make_damper_curve(reb_raw, factor=1.5)
+    if strut_mr:
+        # AC damping is given at the wheel; the curves are on the damper: v*MR, F/MR
+        _bump_c = [[round(v * strut_mr, 5), round(f / strut_mr, 2)] for v, f in _bump_c]
+        _reb_c = [[round(v * strut_mr, 5), round(f / strut_mr, 2)] for v, f in _reb_c]
     damper = {
         "type":           "monotube",
-        "bump_curve":     make_damper_curve(bump_raw),
-        "rebound_curve":  make_damper_curve(reb_raw, factor=1.5),
-        "motion_ratio":   1.0,
-        "axis":           "vertical",
+        "bump_curve":     _bump_c,
+        "rebound_curve":  _reb_c,
+        "motion_ratio":   strut_mr or 1.0,
+        "axis":           "strut" if strut_mr else "vertical",
+        "inboard_mount":  spring_inboard,
+        "outboard_mount": spring_outboard,
         "inboard_point":  spring_inboard,
         "outboard_point": spring_outboard,
         "_est":           True,
-        "_note": "AC damping is specified at wheel — vertical axis at wheel centre, "
-                 "1:1 motion ratio. Curves synthesised from AC scalar bump/rebound.",
+        "_note": ("AC damping is specified at wheel; curves synthesised from AC scalar "
+                  "bump/rebound and converted to the strut axis (v*MR, F/MR)"
+                  if strut_mr else
+                  "AC damping is specified at wheel — vertical axis at wheel centre, "
+                  "1:1 motion ratio. Curves synthesised from AC scalar bump/rebound."),
     }
+    if strut_car and strut_tyre and sys_type != "macpherson":
+        damper["x_ac_strut"] = {"car": strut_car, "tyre": strut_tyre,
+                                "_note": "STRUT_* on a non-strut axle: not a locating link"}
     bump = susp_axle.get("bumpstop")
     if bump:
         damper["bumpstops"] = bump
 
     geometry_note = None
     if not links:
-        geometry_note = "Hardpoints not found in suspensions.ini — using spring/damper only"
+        geometry_note = ("No usable hardpoints in suspensions.ini (type "
+                         f"{susp_axle.get('type')}) - links left empty; spring/damper only")
+    elif is_front and sys_type in ("double_wishbone", "macpherson") \
+            and not any(L["name"] == "steering_tie_rod" for L in links):
+        geometry_note = ("No steering tie rod: WBCAR_STEER / WBTYRE_STEER missing or "
+                         "unreadable in suspensions.ini")
+    elif not is_front and sys_type == "macpherson" \
+            and not any(L["name"] == "toe_link" for L in links):
+        geometry_note = "No toe link: WBCAR_STEER / WBTYRE_STEER missing in suspensions.ini"
 
     # Resolve every link's `outboard_ref` to a literal `outboard_point`
     # alongside it, so SVJ viewers that don't walk reference strings still
@@ -705,15 +761,17 @@ def build_corner(corner_id: str, susp_axle: dict,
             "id": f"upright_{corner_id}",
             "hardpoints": hp_svj,
         },
-        "links": links if links else [{
-            "name": "spring_damper_only",
-            "type": "virtual",
-            "inboard_points": [spring_inboard],
-            "outboard_ref": "hardpoints.wheel_center",
-            "outboard_point": list(hp_svj["wheel_center"]),
-            "_note": "No AC hardpoints — vertical spring/damper axis only",
-        }],
+        "links": links,
     }
+    if is_axle:
+        # spec 9.2.4: a solid axle shares one rigid body between both corners
+        topology["axle_body"] = {
+            "id": "axle_front" if is_front else "axle_rear",
+            "position": [wheel_center[0], 0.0, wheel_center[2]],
+        }
+        if any(L["name"] in ("panhard_rod", "watts_link") for L in links):
+            topology["lateral_location"] = ("watts_link" if any(
+                L["name"] == "watts_link" for L in links) else "panhard_rod")
     if geometry_note:
         topology["_note"] = geometry_note
 

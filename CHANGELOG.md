@@ -27,6 +27,31 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Suspension topology that a kinematic solver can use
+
+Found by reading all 1,398 converted files with an independent suspension solver.
+
+- **Solid axles** (`TYPE=AXLE`, 91 rear axles): were two wishbone-style arms plus a
+  toe link under a `solid_axle` label, which over-constrains the axle. Now one
+  `upper_link` and one `lower_link` rod per side (chassis end = midpoint of the two
+  AC pivots, flagged `_est`), `topology.axle_body` shared by both sides, no toe link.
+- **MacPherson** (`TYPE=STRUT`): the `strut` link is now type `strut` ending at
+  `hardpoints.strut_top`, and a stray upper arm from boilerplate `WBCAR_TOP_*` keys
+  is dropped. The spring and damper use the strut's real mounts
+  (`STRUT_CAR` -> `STRUT_TYRE`); the motion ratio is the strut's vertical share
+  (0.81-1.00 on the installed cars) and the damper curves are converted to the
+  strut (`v * MR`, `F / MR`).
+- **`STRUT_*` on a wishbone axle** is no longer a `damper_link` rod (a damper does
+  not locate the wheel); the points are kept in `damper.x_ac_strut`.
+- **Corners without geometry** (`COSMIC`, `ML` and `AXLE` without pickups; 35
+  corners) no longer get a made-up `virtual` link: `links` is empty with a
+  `_note`. The schema asks for at least one link, so these corners fail that one
+  rule until the standard allows an empty list.
+- A missing steering tie rod or rear toe link is reported in `topology._note`
+  (for example an unreadable `WBTYRE_STEER` value).
+- Spring and damper mounts are written as `inboard_mount` / `outboard_mount`
+  (spec 9.3 / 9.4); the old `inboard_point` / `outboard_point` stay for now.
+
 ### Targets SVJ v0.99.3 (differential control)
 
 The standard adopted the proposal, so the extension keys became real fields:

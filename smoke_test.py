@@ -22,6 +22,11 @@ def main():
     if not test_drivetrain.run():
         print("\n✗ drivetrain checks failed")
         sys.exit(1)
+    print("\n──── SUSPENSION CHECKS ────")
+    import test_suspension
+    if not test_suspension.run():
+        print("\n✗ suspension checks failed")
+        sys.exit(1)
     print()
 
     car = Path(__file__).parent / "test_car"
