@@ -82,6 +82,7 @@ from typing import Optional
 from ac_parsers import (
     parse_ini, parse_lut,
     parse_engine, parse_drivetrain, parse_suspension_axle,
+    parse_damper_tables, parse_bumpstop_tables,
     parse_brakes, parse_aero, parse_car_extras,
     detect_tyre_compounds, parse_tyre_extras, parse_tyre_thermal,
     parse_controller_ini, parse_setup_ranges,
@@ -113,6 +114,7 @@ CONV_REPO   = "https://github.com/RFloEng/AC_to_SVJ"
 CORE_INI_FILES = [
     "car.ini", "engine.ini", "drivetrain.ini", "suspensions.ini",
     "tyres.ini", "brakes.ini", "aero.ini",
+    "dampers.ini", "bumpstops.ini",          # CSP extended physics (optional)
 ]
 EXTRA_INI_FILES = [
     "wing.ini", "setup.ini", "fuel_cons.ini",
@@ -273,6 +275,81 @@ def ac_wheelspace_to_vehicle(ac_vec: Optional[list[float]],
 
 
 # ─── Damper / torque synth (fallback when .lut is absent) ────────────────────
+
+def _setup_default(setup: dict, name: str) -> Optional[int]:
+    """DEFAULT click of a setup.ini entry, or None."""
+    try:
+        return int(float(str((setup.get(name) or {}).get("DEFAULT", "")).split()[0]))
+    except (ValueError, IndexError):
+        return None
+
+
+def _merge_slow_fast(slow: Optional[list], fast: Optional[list]) -> list:
+    """Slow-speed table, continued by the fast-speed table beyond its last speed."""
+    pts = [[abs(float(s)), abs(float(f))] for s, f in (slow or [])]
+    if fast:
+        last = pts[-1][0] if pts else -1.0
+        pts += [[abs(float(s)), abs(float(f))] for s, f in fast if abs(float(s)) > last]
+    pts.sort(key=lambda p: p[0])
+    if pts and pts[0][0] > 0:
+        pts.insert(0, [0.0, 0.0])
+    return pts
+
+
+def _attach_csp_tables(sa_f: dict, sa_r: dict, parsed: dict, data_dir,
+                       log: list) -> None:
+    """Put CSP damper / bump-stop tables on the parsed axle dicts (``damper_tables``,
+    ``bumpstop_table``) so ``build_corner`` can use them."""
+    setup = parsed.get("setup.ini", {})
+    dt = parse_damper_tables(parsed.get("dampers.ini", {}), data_dir)
+    bt = parse_bumpstop_tables(parsed.get("bumpstops.ini", {}), data_dir)
+    for axle, sa, corners in (("FRONT", sa_f, ("LF", "RF")), ("REAR", sa_r, ("LR", "RR"))):
+        # ── damper tables ────────────────────────────────────────────────────
+        ent = (dt.get("axles") or {}).get(axle)
+        if ent:
+            t = ent["tables"]
+            sfx = f"_C{ent['coilover']}" if ent["coilover"] is not None else ""
+            idx_b = idx_r = None
+            for c in corners:
+                idx_b = idx_b if idx_b is not None else _setup_default(setup, f"DAMPER_BUMP_{c}{sfx}")
+                idx_r = idx_r if idx_r is not None else _setup_default(setup, f"DAMPER_REBOUND_{c}{sfx}")
+
+            def pick(kind: str, want: Optional[int]):
+                d = t.get(kind) or {}
+                if not d:
+                    return None, None
+                i = want if want in d else min(d)
+                return d[i], i
+
+            bs, ib = pick("bump_slow", idx_b)
+            rs, ir = pick("rebound_slow", idx_r)
+            bf, _ = pick("bump_fast", ib)
+            rf, _ = pick("rebound_fast", ir)
+            bump = _merge_slow_fast(bs, bf)
+            reb = _merge_slow_fast(rs, rf)
+            if len(bump) >= 2 and len(reb) >= 2:
+                sa["damper_tables"] = {
+                    "bump": bump, "rebound": reb, "bump_index": ib, "rebound_index": ir,
+                    "coilover": ent["coilover"],
+                    "settings": {k: sorted(v) for k, v in t.items()},
+                }
+                n = max(len(v) for v in t.values())
+                log.append(f"✓ Damper tables ({axle.lower()}): dampers.ini, "
+                           f"setting {ib}/{ir} of {n}")
+        # ── bump-stop table (dampers.ini sibling, or the older BUMP_STOP_LUT) ──
+        be = bt.get(axle)
+        if be:
+            i = be["default"] if be["default"] in be["luts"] else min(be["luts"])
+            sa["bumpstop_table"] = {"curve": be["luts"][i], "stack": be["stack"],
+                                    "index": i, "source": "bumpstops.ini"}
+        elif sa.get("bump_stop_lut") and data_dir:
+            lut = _resolve_lut(data_dir, sa["bump_stop_lut"])
+            if lut and len(lut) >= 2:
+                sa["bumpstop_table"] = {"curve": lut, "stack": 1, "index": 0,
+                                        "source": sa["bump_stop_lut"]}
+        if sa.get("bumpstop_table"):
+            log.append(f"✓ Bump-stop table ({axle.lower()}): {sa['bumpstop_table']['source']}")
+
 
 def make_damper_curve(rate: float, factor: float = 1.0) -> list:
     r = rate * factor
@@ -700,9 +777,14 @@ def build_corner(corner_id: str, susp_axle: dict,
     if susp_axle.get("rod_length"):
         spring["rod_length"] = susp_axle["rod_length"]
 
+    _tab = susp_axle.get("damper_tables")
     _bump_c = make_damper_curve(bump_raw)
     _reb_c = make_damper_curve(reb_raw, factor=1.5)
-    if strut_mr:
+    if _tab:
+        # real force-against-speed tables (CSP): speed in m/s, force in N, sign dropped
+        _bump_c = [[round(v, 5), round(f, 2)] for v, f in _tab["bump"]]
+        _reb_c = [[round(v, 5), round(f, 2)] for v, f in _tab["rebound"]]
+    elif strut_mr:
         # AC damping is given at the wheel; the curves are on the damper: v*MR, F/MR
         _bump_c = [[round(v * strut_mr, 5), round(f / strut_mr, 2)] for v, f in _bump_c]
         _reb_c = [[round(v * strut_mr, 5), round(f / strut_mr, 2)] for v, f in _reb_c]
@@ -721,6 +803,17 @@ def build_corner(corner_id: str, susp_axle: dict,
                   "AC damping is specified at wheel — vertical axis at wheel centre, "
                   "1:1 motion ratio. Curves synthesised from AC scalar bump/rebound."),
     }
+    if _tab:
+        damper["_est"] = False
+        damper["_note"] = ("Force-against-speed tables from dampers.ini (CSP), setting "
+                           f"{_tab['bump_index']}/{_tab['rebound_index']}; "
+                           + ("component-level (COSMIC coilover): motion ratio not derived"
+                              if _tab.get("coilover") is not None else
+                              "wheel level (no motion-ratio table)"))
+        damper["reference"] = "damper" if _tab.get("coilover") is not None else "wheel"
+        if damper["reference"] == "wheel":
+            damper["motion_ratio"] = 1.0
+        damper["x_settings"] = _tab["settings"]
     if strut_car and strut_tyre and sys_type != "macpherson":
         damper["x_ac_strut"] = {"car": strut_car, "tyre": strut_tyre,
                                 "_note": "STRUT_* on a non-strut axle: not a locating link"}
@@ -810,6 +903,18 @@ def build_corner(corner_id: str, susp_axle: dict,
     if kpi is not None:
         corner["alignment"]["kpi"] = round(kpi, 5)
 
+    _bt = susp_axle.get("bumpstop_table")
+    if _bt:
+        # CSP: with these tables PACKER_RANGE is the bump-stop gap (corner springs)
+        _pr = susp_axle.get("packer_range")
+        _gap = _pr if (_pr and 0 < _pr < 0.5) else (susp_axle.get("bumpstop") or {}).get("up")
+        _curve = [[round(d, 5), round(f * _bt["stack"], 2)] for d, f in _bt["curve"]]
+        if _gap is not None and 0 < _gap < 0.5:
+            # deflection past the gap -> force (the table starts at 0 | 0)
+            corner["bump_stop"] = {"gap": round(_gap, 4), "type": "rubber",
+                                   "rate_curve": _curve}
+        else:
+            corner["static_setup"]["x_bump_stop_curve"] = _curve   # no usable gap
     wm = susp_axle.get("unsprung_mass")
     if wm:
         corner["wheel"]["mass"] = round(wm / 2, 2)
@@ -947,6 +1052,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     # ── Suspension parsed blocks ─────────────────────────────────────────────
     sa_f = parse_suspension_axle(sf)
     sa_r = parse_suspension_axle(sr)
+    _attach_csp_tables(sa_f, sa_r, parsed, data_dir, log)
 
     wm_f = sa_f.get("unsprung_mass")
     wm_r = sa_r.get("unsprung_mass")

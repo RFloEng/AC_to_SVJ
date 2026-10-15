@@ -121,7 +121,9 @@ def _resolve_lut(data_dir: Path, ref: Optional[str]) -> Optional[list[list[float
     """Locate and read a .lut file referenced from an ini header."""
     if not ref or not data_dir:
         return None
-    ref = ref.strip().strip('"').strip("'")
+    ref = ref.strip().strip('"').strip("'").replace(chr(92), "/").lstrip("/")
+    if not ref or ".." in ref.split("/"):
+        return None                      # sub-folders are fine, leaving data/ is not
     candidate = data_dir / ref
     if not candidate.is_file():
         # AC sometimes stores extension-less references
@@ -494,7 +496,91 @@ def parse_suspension_axle(sec: dict) -> dict:
         "kpi":            _m(sec.get("KINGPIN")),
         "type":           sec.get("TYPE") or "0",
         "tyre_offset":    _m(sec.get("TYRE_STATIC_OFFSET")),
+        # CSP extended physics: references to lookup tables (resolved by the caller)
+        "bump_stop_lut":  (sec.get("BUMP_STOP_LUT") or "").strip() or None,
+        "motion_ratio_lut": (sec.get("MOTION_RATIO") or "").strip() or None,
+        "packer_range":   _m(sec.get("PACKER_RANGE")),
+        "bump_stop_rate": _m(sec.get("BUMP_STOP_RATE")),
     }
+    return out
+
+
+# ─── CSP extended physics: damper and bump-stop tables ────────────────────────
+
+_AXLE_SECTION = re.compile(r"^(FRONT|REAR)(?:_C(\d+))?$", re.IGNORECASE)
+_TABLE_KEY = re.compile(r"^(BUMP|REBOUND)_(SLOW|FAST)_(\d+)$", re.IGNORECASE)
+
+
+def parse_damper_tables(ini: dict, data_dir: Optional[Path]) -> dict:
+    """
+    ``dampers.ini`` (CSP, ``[_EXTENSION] DAMPER_LUTS=1``): the damper's force against
+    speed as lookup tables instead of AC's scalar rates.
+
+    Returns ``{"enabled": bool, "axles": {"FRONT": {"coilover": 0 | None,
+    "tables": {"bump_slow": {index: [[speed, force], ...]}, "rebound_slow": ...,
+    "bump_fast": ..., "rebound_fast": ...}}, "REAR": ...}}``.  Each axle keeps the
+    section with the lowest coilover number (``[FRONT]`` / ``[FRONT_C0]`` ...).  An
+    empty dict means no usable table.
+    """
+    if not ini:
+        return {}
+    enabled = _b((ini.get("HEADER") or {}).get("ENABLE"))
+    axles: dict = {}
+    for name, sec in ini.items():
+        m = _AXLE_SECTION.match(name)
+        if not m:
+            continue
+        axle = m.group(1).upper()
+        coil = int(m.group(2)) if m.group(2) is not None else None
+        tables: dict = {}
+        for k, v in sec.items():
+            km = _TABLE_KEY.match(k)
+            if not km:
+                continue
+            lut = _resolve_lut(data_dir, v) if data_dir else None
+            if lut and len(lut) >= 2:
+                tables.setdefault(f"{km.group(1).lower()}_{km.group(2).lower()}",
+                                  {})[int(km.group(3))] = lut
+        if not tables:
+            continue
+        keep = axles.get(axle)
+        if keep is None or (coil or 0) < (keep["coilover"] or 0):
+            axles[axle] = {"coilover": coil, "tables": tables}
+    if not axles or enabled is False:
+        return {}
+    return {"enabled": True, "axles": axles}
+
+
+def parse_bumpstop_tables(ini: dict, data_dir: Optional[Path]) -> dict:
+    """
+    ``bumpstops.ini`` (CSP): bump-rubber force against deflection.
+
+    Returns ``{"FRONT": {"coilover": 0 | None, "default": 0, "stack": 1,
+    "luts": {index: [[deflection_m, force_N], ...]}}, "REAR": ...}`` (heave sections
+    are left out).
+    """
+    if not ini or _b((ini.get("HEADER") or {}).get("ENABLE")) is False:
+        return {}
+    out: dict = {}
+    for name, sec in ini.items():
+        m = re.match(r"^(FRONT|REAR)(?:_C(\d+))?$", name, re.IGNORECASE)
+        if not m:
+            continue
+        axle = m.group(1).upper()
+        coil = int(m.group(2)) if m.group(2) is not None else None
+        luts: dict = {}
+        for sname, ssec in ini.items():
+            sm = re.match(rf"^{re.escape(name)}_(\d+)$", sname, re.IGNORECASE)
+            if sm and "LUT" in ssec:
+                lut = _resolve_lut(data_dir, ssec["LUT"]) if data_dir else None
+                if lut and len(lut) >= 2:
+                    luts[int(sm.group(1))] = lut
+        if not luts:
+            continue
+        keep = out.get(axle)
+        if keep is None or (coil or 0) < (keep["coilover"] or 0):
+            out[axle] = {"coilover": coil, "default": _i(sec.get("DEFAULT"), 0),
+                         "stack": max(_i(sec.get("STACK"), 1), 1), "luts": luts}
     return out
 
 

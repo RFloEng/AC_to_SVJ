@@ -27,6 +27,29 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### CSP extended physics: real damper and bump-stop tables
+
+Cars that use Custom Shaders Patch extended physics ship lookup tables instead of
+AC's scalar rates. They were ignored, and the damper curves were synthesised.
+
+- **`dampers.ini`** (24 installed cars): force against speed for the bump and rebound
+  of each axle, with slow-speed tables continued by the fast-speed ones. They replace
+  the synthesised `bump_curve` / `rebound_curve`, and the damper is no longer flagged
+  `_est`. The setting used is the `DEFAULT` of the matching `setup.ini` damper entry
+  (lowest otherwise); all available settings are listed in `damper.x_settings`.
+  Sub-folder references (`\dampers_asymmetric\...`) are resolved, and never outside
+  `data/`.
+- **Which level the curves are at:** wishbone cars without a motion-ratio table
+  are wheel level (`damper.reference = "wheel"`, motion ratio 1). COSMIC coilover cars
+  (`[FRONT_C0]` sections) are component level (`reference = "damper"`); their geometry
+  is not converted yet, so no motion ratio is derived for them.
+- **Bump stops** (`bumpstops.ini`, or the older `BUMP_STOP_LUT`): the rubber's force
+  against deflection becomes `bump_stop.rate_curve`, with `PACKER_RANGE` as the gap
+  (the CSP meaning for corner springs). `stack` multiplies the force. When no usable
+  gap exists the curve is kept in `static_setup.x_bump_stop_curve`.
+- Not yet: motion-ratio tables (`MOTION_RATIO`), COSMIC geometry, the other
+  `[_EXTENSION]` flags.
+
 ### Cars straight from .zip / .rar / .7z files (no installation)
 
 `.rar` and `.7z` are read through the 7-Zip command line (install 7-Zip; `7z.exe` is

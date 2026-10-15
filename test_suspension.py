@@ -9,8 +9,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from ac_parsers import parse_ini, parse_suspension_axle
-from converter import build_corner
+import tempfile
+
+from ac_parsers import (_resolve_lut, parse_bumpstop_tables, parse_damper_tables, parse_ini,
+                        parse_suspension_axle)
+from converter import _attach_csp_tables, build_corner
 
 WB = """WBCAR_TOP_FRONT=0.30,0.11,0.08
 WBCAR_TOP_REAR=0.30,0.11,-0.06
@@ -99,6 +102,89 @@ def test_missing_tie_rod_is_reported():
     c = _corner("DWB", body, "FL")
     assert "steering_tie_rod" not in _names(c)
     assert "No steering tie rod" in c["topology"]["_note"]
+
+
+def _csp_dir(t) -> Path:
+    d = Path(t) / "data"
+    (d / "dampers_asym").mkdir(parents=True)
+    (d / "front_bs_0.lut").write_text("0|0\n0.1|200\n0.5|600\n", encoding="utf-8")
+    (d / "front_rs_0.lut").write_text("0|0\n0.1|-300\n0.5|-900\n", encoding="utf-8")  # sign ignored
+    (d / "dampers_asym" / "front_bs_1.lut").write_text("0|0\n0.1|250\n", encoding="utf-8")
+    (d / "dampers_asym" / "front_rs_1.lut").write_text("0|0\n0.1|350\n", encoding="utf-8")
+    (d / "front_bs_fast_1.lut").write_text("0.5|700\n2|1500\n", encoding="utf-8")
+    (d / "rubber.lut").write_text("0|0\n0.01|500\n0.02|2000\n", encoding="utf-8")
+    return d
+
+
+DAMPERS = """[HEADER]
+ENABLE=1
+[FRONT]
+BUMP_SLOW_0=front_bs_0.lut
+BUMP_SLOW_1=\\dampers_asym\\front_bs_1.lut
+BUMP_FAST_1=front_bs_fast_1.lut
+REBOUND_SLOW_0=front_rs_0.lut
+REBOUND_SLOW_1=\\dampers_asym\\front_rs_1.lut
+"""
+
+
+def test_damper_tables_are_read_with_sub_folders_and_slow_fast_merge():
+    with tempfile.TemporaryDirectory() as t:
+        d = _csp_dir(t)
+        dt = parse_damper_tables(parse_ini(DAMPERS), d)
+        tabs = dt["axles"]["FRONT"]["tables"]
+        assert sorted(tabs["bump_slow"]) == [0, 1] and tabs["bump_fast"][1][-1] == [2.0, 1500.0]
+        assert _resolve_lut(d, "..\\x.lut") is None            # never leaves data/
+        sa_f, sa_r = {}, {}
+        parsed = {"dampers.ini": parse_ini(DAMPERS),
+                  "setup.ini": parse_ini("[DAMPER_BUMP_LF]\nDEFAULT=1\n[DAMPER_REBOUND_LF]\nDEFAULT=1\n")}
+        _attach_csp_tables(sa_f, sa_r, parsed, d, [])
+        tab = sa_f["damper_tables"]
+        assert tab["bump_index"] == 1 and tab["bump"][-1] == [2.0, 1500.0]   # slow, then fast
+        assert tab["bump"][0] == [0.0, 0.0] and "damper_tables" not in sa_r
+        assert tab["settings"]["bump_slow"] == [0, 1]
+        # without a setup default the lowest setting is used, and the sign is dropped
+        sa2: dict = {}
+        _attach_csp_tables(sa2, {}, {"dampers.ini": parse_ini(DAMPERS)}, d, [])
+        assert sa2["damper_tables"]["rebound"][-1] == [0.5, 900.0]
+
+
+def test_corner_uses_the_damper_and_bump_stop_tables():
+    with tempfile.TemporaryDirectory() as t:
+        d = _csp_dir(t)
+        sec = parse_ini("[S]\nTYPE=DWB\nBASEY=-0.14\nTRACK=1.5\nSPRING_RATE=20000\n"
+                        "DAMP_BUMP=1500\nDAMP_REBOUND=3000\nPACKER_RANGE=0.12\n"
+                        "BUMP_STOP_LUT=rubber.lut\n" + WB)["S"]
+        sa = parse_suspension_axle(sec)
+        _attach_csp_tables(sa, {}, {"dampers.ini": parse_ini(DAMPERS)}, d, [])
+        c = build_corner("FL", sa, 2.6, 1.5, 1.5, 0.5, 0.15, 800, 0.6, "x", 0.3, 0.4, {})
+        dm = c["damper"]
+        assert dm["reference"] == "wheel" and dm["motion_ratio"] == 1.0 and dm["_est"] is False
+        assert dm["bump_curve"][1] == [0.1, 200.0] and dm["x_settings"]["bump_slow"] == [0, 1]
+        bs = c["bump_stop"]
+        assert bs["gap"] == 0.12 and bs["type"] == "rubber" and bs["rate_curve"][-1] == [0.02, 2000.0]
+
+
+def test_cosmic_coilover_tables_are_component_level():
+    with tempfile.TemporaryDirectory() as t:
+        d = _csp_dir(t)
+        ini = parse_ini(DAMPERS.replace("[FRONT]", "[FRONT_C0]"))
+        sa: dict = {}
+        _attach_csp_tables(sa, {}, {"dampers.ini": ini}, d, [])
+        assert sa["damper_tables"]["coilover"] == 0
+        base = parse_suspension_axle(parse_ini("[S]\nTYPE=COSMIC\nBASEY=-0.14\nTRACK=1.5\n")["S"])
+        base["damper_tables"] = sa["damper_tables"]
+        c = build_corner("FL", base, 2.6, 1.5, 1.5, 0.5, 0.15, 800, 0.6, "x", 0.3, 0.4, {})
+        assert c["damper"]["reference"] == "damper"
+
+
+def test_bumpstops_ini_tables():
+    with tempfile.TemporaryDirectory() as t:
+        d = _csp_dir(t)
+        ini = parse_ini("[HEADER]\nENABLE=1\n[FRONT_C0]\nDEFAULT=0\nSTACK=2\n"
+                        "[FRONT_C0_0]\nLUT=rubber.lut\n[HEAVE_FRONT]\nDEFAULT=0\n")
+        bt = parse_bumpstop_tables(ini, d)
+        assert list(bt) == ["FRONT"] and bt["FRONT"]["stack"] == 2
+        assert bt["FRONT"]["luts"][0][-1] == [0.02, 2000.0]
 
 
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
