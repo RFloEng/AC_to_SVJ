@@ -34,6 +34,7 @@ from converter import (
     build_svj, read_car_directory, _clean, _car_stem,
 )
 from ac_parsers import parse_ini
+from car_archives import ArchiveCar, extract_car, scan_zip_folder
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench, build_svj_pacejka_blocks,
 )
@@ -606,16 +607,22 @@ class App(tk.Tk):
         convertible = [d.name for d in subdirs if (d / "data").is_dir()]
         encrypted   = [d.name for d in subdirs
                        if not (d / "data").is_dir() and (d / "data.acd").is_file()]
+        # downloaded cars still in .zip files: "<zip>::<car folder>"
+        zipped = scan_zip_folder(root)
+        convertible += [c.label for c in zipped if c.has_data]
+        encrypted   += [c.label for c in zipped if not c.has_data and c.has_acd]
         self._car_tree.load(convertible)
         self._b_filt_var.set("")
         parts: list[str] = []
         if convertible:
-            parts.append(f"✓ {len(convertible)} convertible car(s)")
+            n_zip = sum(1 for c in zipped if c.has_data)
+            parts.append(f"✓ {len(convertible)} convertible car(s)"
+                         + (f" ({n_zip} in zip files)" if n_zip else ""))
         if encrypted:
             parts.append(
                 f"⚠ {len(encrypted)} encrypted — Content Manager → Unpack Data first")
         if not parts:
-            parts.append("No AC car folders found (need a data/ subfolder)")
+            parts.append("No AC cars found (need a car folder or a .zip with a data/ subfolder)")
         self._b_status.config(text="   ·   ".join(parts),
                               foreground="black" if convertible else "red")
         self._log.append(
@@ -703,7 +710,20 @@ class App(tk.Tk):
             out_root = Path(out_folder) if out_folder else root.parent / name
             out_root.mkdir(parents=True, exist_ok=True)
 
-            car_dirs = [root / n for n in selected if (root / n / "data").is_dir()]
+            zip_cars = {c.label: c for c in scan_zip_folder(root) if c.has_data}
+            car_dirs: list = []
+            for n in selected:
+                if n in zip_cars:
+                    car_dirs.append(zip_cars[n])
+                elif (root / n / "data").is_dir():
+                    car_dirs.append(root / n)
+            # output folder per car; a name used twice gets its zip name in front
+            out_names: list[str] = []
+            for src in car_dirs:
+                nm = src.name
+                if nm in out_names and isinstance(src, ArchiveCar):
+                    nm = f"{src.zip_path.stem}_{nm}"
+                out_names.append(nm)
             if not car_dirs:
                 put("b_log", "No convertible cars found in selection.")
                 put("b_done", "Done", None)
@@ -722,7 +742,14 @@ class App(tk.Tk):
             ok = errors = skipped = 0
             stopped = False
 
-            for i, car_path in enumerate(car_dirs):
+            for i, src in enumerate(car_dirs):
+                _zip_tmp: Optional[str] = None
+                if isinstance(src, ArchiveCar):
+                    # extracted just before conversion, removed right after
+                    _zip_tmp = tempfile.mkdtemp(prefix="ac_svj_zip_")
+                    car_path = Path(_zip_tmp) / src.name
+                else:
+                    car_path = src
 
                 # ── Check stop ────────────────────────────────────────────────
                 if self._stop_event.is_set():
@@ -734,7 +761,7 @@ class App(tk.Tk):
                 put("b_prog", fraction, f"{i+1}/{len(car_dirs)}")
                 put("b_car", car_path.name, i + 1, len(car_dirs))
 
-                car_out = out_root / car_path.name
+                car_out = out_root / out_names[i]
                 car_out.mkdir(parents=True, exist_ok=True)
 
                 _glb_tmp: Optional[str] = None
@@ -748,6 +775,9 @@ class App(tk.Tk):
                 error_detail = ""
 
                 try:
+                    if isinstance(src, ArchiveCar):
+                        put("b_log", f"ℹ Extracting {src.zip_path.name} → {src.name}")
+                        extract_car(src, Path(_zip_tmp), include_skins)
                     ini_files, cm_meta, ctrl_files, data_dir = \
                         read_car_directory(car_path)
 
@@ -878,6 +908,8 @@ class App(tk.Tk):
                     )
                     if _glb_tmp:
                         shutil.rmtree(_glb_tmp, ignore_errors=True)
+                    if _zip_tmp:
+                        shutil.rmtree(_zip_tmp, ignore_errors=True)
 
             # ── Write batch summary CSV ───────────────────────────────────────
             csv_path = out_root / "batch_summary.csv"

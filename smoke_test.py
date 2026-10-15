@@ -22,6 +22,11 @@ def main():
     if not test_drivetrain.run():
         print("\n✗ drivetrain checks failed")
         sys.exit(1)
+    print("\n──── ZIP ARCHIVE CHECKS ────")
+    import test_archives
+    if not test_archives.run():
+        print("\n✗ zip archive checks failed")
+        sys.exit(1)
     print("\n──── SUSPENSION CHECKS ────")
     import test_suspension
     if not test_suspension.run():
