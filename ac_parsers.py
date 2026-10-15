@@ -117,8 +117,24 @@ def _first(*vals, default=None):
 
 # ─── engine.ini parsing (power.lut, coast, turbos, damage, throttle) ──────────
 
+def parse_inline_lut(text: str) -> list[list[float]]:
+    """CSP inline table ``(|x=y|x=y|)`` -> ``[[x, y], ...]``."""
+    pairs: list[list[float]] = []
+    for item in text.strip().strip("()").split("|"):
+        a, sep, b = item.partition("=")
+        if not sep:
+            continue
+        try:
+            pairs.append([float(a), float(b)])
+        except ValueError:
+            continue
+    return pairs
+
+
 def _resolve_lut(data_dir: Path, ref: Optional[str]) -> Optional[list[list[float]]]:
-    """Locate and read a .lut file referenced from an ini header."""
+    """Locate and read a .lut file (or an inline ``(|x=y|...)`` table) from an ini value."""
+    if ref and ref.strip().startswith("(|"):
+        return parse_inline_lut(ref) or None
     if not ref or not data_dir:
         return None
     ref = ref.strip().strip('"').strip("'").replace(chr(92), "/").lstrip("/")

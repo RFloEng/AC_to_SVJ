@@ -27,6 +27,24 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### CSP motion-ratio tables, and anti-roll bars that were never read
+
+- **`MOTION_RATIO`** (CSP DWB2, 4 cars): the deflection | ratio table (a file or an
+  inline `(|x=y|...)` table) is kept as `x_motion_ratio_curve` on the spring and the
+  damper, and its value at the zero point becomes the scalar `motion_ratio`. The spring
+  `rate` stays the wheel rate. CSP applies the ratio to damper tables, so damper tables
+  on such a car are now `reference: "damper"` with that ratio (synthesised wheel-level
+  dampers keep ratio 1 and only carry the curve).
+- **Fix: anti-roll bars.** The converter looked for the bar in the axle sections, but
+  AC keeps it in the global `[ARB]` section (`FRONT`, `REAR`; CSP `EXTEND=1` adds
+  `FRONT_MOTION_RATIO` / `REAR_MOTION_RATIO`). Every car therefore got the placeholder
+  8000 / 6000. The real values are now read; `arb.motion_ratio` is set when given. The
+  number is written as AC gives it (documented as N/m); it is not converted to the
+  SVJ's Nm/rad, and the corner says so in `arb._note`. Cars without an `[ARB]` section
+  keep the flagged placeholder.
+- A bump-stop table that does not start at 0 | 0 and grow with the deflection is
+  ignored (one car writes a three-point table of 1 / 0 / 1).
+
 ### CSP extended physics: real damper and bump-stop tables
 
 Cars that use Custom Shaders Patch extended physics ship lookup tables instead of

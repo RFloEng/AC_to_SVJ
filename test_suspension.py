@@ -13,7 +13,7 @@ import tempfile
 
 from ac_parsers import (_resolve_lut, parse_bumpstop_tables, parse_damper_tables, parse_ini,
                         parse_suspension_axle)
-from converter import _attach_csp_tables, build_corner
+from converter import _attach_arb, _attach_csp_tables, _interp, build_corner
 
 WB = """WBCAR_TOP_FRONT=0.30,0.11,0.08
 WBCAR_TOP_REAR=0.30,0.11,-0.06
@@ -185,6 +185,48 @@ def test_bumpstops_ini_tables():
         bt = parse_bumpstop_tables(ini, d)
         assert list(bt) == ["FRONT"] and bt["FRONT"]["stack"] == 2
         assert bt["FRONT"]["luts"][0][-1] == [0.02, 2000.0]
+
+
+def test_inline_lut_and_interpolation():
+    assert _resolve_lut(None, "(|-0.2=1|0=0.85|0.2=1|)") == [[-0.2, 1.0], [0.0, 0.85], [0.2, 1.0]]
+    assert _interp([[-0.1, 1.0], [0.1, 0.8]], 0.0) == 0.9
+    assert _interp([[0.0, 1.0], [0.1, 0.8]], -5) == 1.0 and _interp([[0.0, 1.0], [0.1, 0.8]], 5) == 0.8
+
+
+def test_motion_ratio_table_becomes_geometry_and_makes_damper_tables_damper_level():
+    with tempfile.TemporaryDirectory() as t:
+        d = _csp_dir(t)
+        (d / "mr.lut").write_text("-0.05|0.95\n0|0.9\n0.05|0.85\n", encoding="utf-8")
+        sec = parse_ini("[S]\nTYPE=DWB\nBASEY=-0.14\nTRACK=1.5\nSPRING_RATE=20000\n"
+                        "MOTION_RATIO=mr.lut\n" + WB)["S"]
+        sa = parse_suspension_axle(sec)
+        _attach_csp_tables(sa, {}, {"dampers.ini": parse_ini(DAMPERS)}, d, [])
+        assert sa["motion_ratio_table"][1] == [0.0, 0.9]
+        c = build_corner("FL", sa, 2.6, 1.5, 1.5, 0.5, 0.15, 800, 0.6, "x", 0.3, 0.4, {})
+        assert c["spring"]["motion_ratio"] == 0.9 and c["spring"]["rate"] == 20000.0   # still the wheel rate
+        assert len(c["spring"]["x_motion_ratio_curve"]) == 3
+        assert c["damper"]["reference"] == "damper" and c["damper"]["motion_ratio"] == 0.9
+        # synthesised (wheel-level) dampers keep ratio 1 and only carry the curve as data
+        sa2 = parse_suspension_axle(sec)
+        sa2["motion_ratio_table"] = sa["motion_ratio_table"]
+        c2 = build_corner("FL", sa2, 2.6, 1.5, 1.5, 0.5, 0.15, 800, 0.6, "x", 0.3, 0.4, {})
+        assert c2["damper"]["motion_ratio"] == 1.0 and "x_motion_ratio_curve" in c2["damper"]
+
+
+def test_anti_roll_bar_comes_from_the_arb_section():
+    parsed = {"suspensions.ini": parse_ini("[ARB]\nEXTEND=1\nFRONT=16660\nFRONT_MOTION_RATIO=0.65\nREAR=8798\n")}
+    sa_f, sa_r = {}, {}
+    _attach_arb(sa_f, sa_r, parsed, [])
+    assert sa_f["arb_rate"] == 16660.0 and sa_f["arb_motion_ratio"] == 0.65
+    assert sa_r["arb_rate"] == 8798.0 and "arb_motion_ratio" not in sa_r
+    sa = parse_suspension_axle(parse_ini("[S]\nTYPE=DWB\nTRACK=1.5\n" + WB)["S"])
+    sa.update(sa_f)
+    c = build_corner("FL", sa, 2.6, 1.5, 1.5, 0.5, 0.15, 800, 0.6, "x", 0.3, 0.4, {})
+    assert c["arb"]["bar_rate"] == 16660.0 and c["arb"]["motion_ratio"] == 0.65 and "_est" not in c["arb"]
+    # no [ARB] section: the old placeholder, flagged
+    c0 = build_corner("FL", parse_suspension_axle(parse_ini("[S]\nTYPE=DWB\nTRACK=1.5\n" + WB)["S"]),
+                      2.6, 1.5, 1.5, 0.5, 0.15, 800, 0.6, "x", 0.3, 0.4, {})
+    assert c0["arb"]["_est"] is True
 
 
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

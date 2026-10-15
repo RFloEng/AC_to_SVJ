@@ -82,7 +82,7 @@ from typing import Optional
 from ac_parsers import (
     parse_ini, parse_lut,
     parse_engine, parse_drivetrain, parse_suspension_axle,
-    parse_damper_tables, parse_bumpstop_tables,
+    parse_damper_tables, parse_bumpstop_tables, parse_inline_lut,
     parse_brakes, parse_aero, parse_car_extras,
     detect_tyre_compounds, parse_tyre_extras, parse_tyre_thermal,
     parse_controller_ini, parse_setup_ranges,
@@ -296,6 +296,34 @@ def _merge_slow_fast(slow: Optional[list], fast: Optional[list]) -> list:
     return pts
 
 
+def _interp(curve: list, x: float) -> float:
+    """Linear interpolation in a sorted ``[[x, y], ...]`` table (clamped at the ends)."""
+    if x <= curve[0][0]:
+        return curve[0][1]
+    for (x0, y0), (x1, y1) in zip(curve, curve[1:]):
+        if x <= x1:
+            return y0 if x1 == x0 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return curve[-1][1]
+
+
+def _attach_arb(sa_f: dict, sa_r: dict, parsed: dict, log: list) -> None:
+    """Anti-roll bars live in the global ``[ARB]`` section of suspensions.ini
+    (``FRONT`` / ``REAR``; with CSP ``EXTEND=1`` also ``FRONT_MOTION_RATIO`` /
+    ``REAR_MOTION_RATIO``), not in the axle sections."""
+    arb = (parsed.get("suspensions.ini") or {}).get("ARB") or {}
+    got = []
+    for axle, sa in (("FRONT", sa_f), ("REAR", sa_r)):
+        k = _f(arb.get(axle), 0.0)
+        if k > 0:
+            sa["arb_rate"] = k
+            got.append(axle.lower())
+        mr = _f(arb.get(f"{axle}_MOTION_RATIO"), 0.0)
+        if mr > 0:
+            sa["arb_motion_ratio"] = mr
+    if got:
+        log.append(f"✓ Anti-roll bar ({', '.join(got)}): [ARB] of suspensions.ini")
+
+
 def _attach_csp_tables(sa_f: dict, sa_r: dict, parsed: dict, data_dir,
                        log: list) -> None:
     """Put CSP damper / bump-stop tables on the parsed axle dicts (``damper_tables``,
@@ -304,6 +332,15 @@ def _attach_csp_tables(sa_f: dict, sa_r: dict, parsed: dict, data_dir,
     dt = parse_damper_tables(parsed.get("dampers.ini", {}), data_dir)
     bt = parse_bumpstop_tables(parsed.get("bumpstops.ini", {}), data_dir)
     for axle, sa, corners in (("FRONT", sa_f, ("LF", "RF")), ("REAR", sa_r, ("LR", "RR"))):
+        # ── motion-ratio table: deflection from the zero point | ratio ───────
+        if sa.get("motion_ratio_lut"):
+            mrt = _resolve_lut(data_dir, sa["motion_ratio_lut"])
+            if mrt and len(mrt) >= 2:
+                mrt.sort(key=lambda p: p[0])
+                if all(p[1] > 0 for p in mrt):
+                    sa["motion_ratio_table"] = mrt
+                    log.append(f"✓ Motion-ratio table ({axle.lower()}): "
+                               f"{len(mrt)} pts, {_interp(mrt, 0.0):.3f} at the zero point")
         # ── damper tables ────────────────────────────────────────────────────
         ent = (dt.get("axles") or {}).get(axle)
         if ent:
@@ -344,7 +381,8 @@ def _attach_csp_tables(sa_f: dict, sa_r: dict, parsed: dict, data_dir,
                                     "index": i, "source": "bumpstops.ini"}
         elif sa.get("bump_stop_lut") and data_dir:
             lut = _resolve_lut(data_dir, sa["bump_stop_lut"])
-            if lut and len(lut) >= 2:
+            # a force table starts at 0 | 0 and grows with the deflection
+            if lut and len(lut) >= 2 and lut[0][0] >= 0 and lut[0][1] == 0                     and all(b[0] > a_[0] for a_, b in zip(lut, lut[1:])):
                 sa["bumpstop_table"] = {"curve": lut, "stack": 1, "index": 0,
                                         "source": sa["bump_stop_lut"]}
         if sa.get("bumpstop_table"):
@@ -814,6 +852,12 @@ def build_corner(corner_id: str, susp_axle: dict,
         if damper["reference"] == "wheel":
             damper["motion_ratio"] = 1.0
         damper["x_settings"] = _tab["settings"]
+        if susp_axle.get("motion_ratio_table"):
+            # CSP applies the motion ratio to the damper tables: they are damper level
+            damper["reference"] = "damper"
+            damper["_note"] = ("Force-against-speed tables from dampers.ini (CSP), setting "
+                               f"{_tab['bump_index']}/{_tab['rebound_index']}; damper level, "
+                               "converted to the wheel with the motion-ratio table")
     if strut_car and strut_tyre and sys_type != "macpherson":
         damper["x_ac_strut"] = {"car": strut_car, "tyre": strut_tyre,
                                 "_note": "STRUT_* on a non-strut axle: not a locating link"}
@@ -867,6 +911,15 @@ def build_corner(corner_id: str, susp_axle: dict,
 
     _tw = ((tire_sets or {}).get(tire_set_ref, {}).get("rim", {}) or {}).get("width_nominal")
     _est_rim_w = round(float(_tw) * 0.8, 3) if _tw else 0.18
+    _arb = {"bar_id": "arb_front" if is_front else "arb_rear",
+            "bar_rate": round(arb_k, 1)}
+    if susp_axle.get("arb_rate"):
+        _arb["_note"] = ("Stiffness as written in the [ARB] section of suspensions.ini "
+                         "(AC / CSP document it in N/m); not converted to Nm/rad")
+        if susp_axle.get("arb_motion_ratio"):
+            _arb["motion_ratio"] = susp_axle["arb_motion_ratio"]
+    else:
+        _arb["_est"] = True                      # no [ARB] values: placeholder
     corner = {
         "position":        wheel_center,   # corner location in vehicle frame
         "topology":        topology,
@@ -882,11 +935,7 @@ def build_corner(corner_id: str, susp_axle: dict,
         },
         "spring": spring,
         "damper": damper,
-        "arb": {
-            "bar_id":   "arb_front" if is_front else "arb_rear",
-            "bar_rate": round(arb_k, 1),
-            "_est":     True,
-        },
+        "arb": _arb,
         "alignment": {
             "camber": round(camber, 5),
             "toe":    round(toe, 5),
@@ -903,6 +952,18 @@ def build_corner(corner_id: str, susp_axle: dict,
     if kpi is not None:
         corner["alignment"]["kpi"] = round(kpi, 5)
 
+    _mrt = susp_axle.get("motion_ratio_table")
+    if _mrt:
+        _mr0 = round(_interp(_mrt, 0.0), 4)          # at the zero point (static)
+        _curve = [[round(d, 5), round(r, 4)] for d, r in _mrt]
+        corner["spring"]["motion_ratio"] = _mr0       # geometry; `rate` stays the wheel rate
+        corner["spring"]["x_motion_ratio_curve"] = _curve
+        corner["damper"]["x_motion_ratio_curve"] = _curve
+        if corner["damper"].get("reference") == "damper":
+            corner["damper"]["motion_ratio"] = _mr0
+        corner["static_setup"]["x_motion_ratio_note"] = (
+            "x_motion_ratio_curve: deflection from the zero point (m) | ratio, from "
+            "MOTION_RATIO (CSP DWB2)")
     _bt = susp_axle.get("bumpstop_table")
     if _bt:
         # CSP: with these tables PACKER_RANGE is the bump-stop gap (corner springs)
@@ -1053,6 +1114,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     sa_f = parse_suspension_axle(sf)
     sa_r = parse_suspension_axle(sr)
     _attach_csp_tables(sa_f, sa_r, parsed, data_dir, log)
+    _attach_arb(sa_f, sa_r, parsed, log)
 
     wm_f = sa_f.get("unsprung_mass")
     wm_r = sa_r.get("unsprung_mass")
