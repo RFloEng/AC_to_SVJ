@@ -8,7 +8,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from car_archives import SEP, extract_car, list_archive_cars, scan_zip_folder, split_label
+import car_archives
+from car_archives import (SEP, ArchiveToolError, extract_car, find_7zip, list_archive_cars,
+                          scan_archive_folder, scan_zip_folder, split_label)
 
 INI = "[HEADER]\nVERSION=1\n"
 
@@ -104,6 +106,61 @@ def test_extracted_car_runs_through_the_normal_reader():
         d = extract_car(car, Path(t) / "x")
         ini, cm, ctrl, dd = read_car_directory(d)
         assert "car.ini" in ini and dd == d / "data"
+
+
+def _make_7z(path: Path, files: dict) -> bool:
+    """Build a .7z with the 7-Zip command line; False when 7-Zip is not installed."""
+    tool = find_7zip()
+    if tool is None:
+        return False
+    import subprocess
+    with tempfile.TemporaryDirectory() as t:
+        for n, b in files.items():
+            f = Path(t) / n
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b if isinstance(b, bytes) else b.encode())
+        subprocess.run([tool, "a", "-bd", "-y", str(path), "*"], cwd=t, check=True,
+                       capture_output=True)
+    return True
+
+
+def test_7z_archive_lists_and_extracts_like_a_zip():
+    with tempfile.TemporaryDirectory() as t:
+        files = {"content/cars/gamma/data/car.ini": INI, "content/cars/gamma/gamma.kn5": b"k",
+                 "content/cars/gamma/ui/ui_car.json": "{}",
+                 "content/cars/gamma/sfx/e.bank": b"big", "content/cars/gamma/skins/a/x.dds": b"d"}
+        if not _make_7z(Path(t) / "dl.7z", files):
+            return                                   # no 7-Zip here: nothing to check
+        (car,) = list_archive_cars(Path(t) / "dl.7z")
+        assert car.name == "gamma" and car.has_data
+        d = extract_car(car, Path(t) / "x")
+        got = sorted(p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file())
+        assert got == ["data/car.ini", "gamma.kn5", "skins/a/x.dds", "ui/ui_car.json"], got
+        assert [c.label for c in scan_archive_folder(Path(t))] == [f"dl.7z{SEP}gamma"]
+    with tempfile.TemporaryDirectory() as t:
+        if _make_7z(Path(t) / "root.7z", {"data/car.ini": INI, "car.kn5": b"k"}):
+            (car,) = list_archive_cars(Path(t) / "root.7z")
+            assert car.name == "root" and car.prefix == ""
+            d = extract_car(car, Path(t) / "x")
+            assert (d / "data" / "car.ini").is_file() and (d / "car.kn5").is_file()
+
+
+def test_rar_without_7zip_gives_a_clear_message():
+    real = car_archives.find_7zip
+    car_archives.find_7zip = lambda: None
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            rar = Path(t) / "mod.rar"
+            rar.write_bytes(b"Rar!")
+            try:
+                list_archive_cars(rar)
+                raise AssertionError("expected ArchiveToolError")
+            except ArchiveToolError as e:
+                assert "7-Zip" in str(e) and "mod.rar" in str(e)
+            problems: list = []
+            assert scan_archive_folder(Path(t), problems.append) == [] and len(problems) == 1
+    finally:
+        car_archives.find_7zip = real
 
 
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -27,17 +27,20 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
-### Cars straight from .zip files (no installation)
+### Cars straight from .zip / .rar / .7z files (no installation)
 
-Point "AC cars folder" at a folder of downloaded mods: the `.zip` files directly inside
+`.rar` and `.7z` are read through the 7-Zip command line (install 7-Zip; `7z.exe` is
+found on PATH or in its default folder; nothing is bundled). A password-protected
+archive or a missing 7-Zip is reported in the log instead of failing silently.
+
+Point "AC cars folder" at a folder of downloaded mods: the archives directly inside
 it are scanned and each car found shows as `<zip>::<car folder>` next to the installed
 ones. A zip may hold several cars and the car folder may sit at any depth
 (`content/cars/<car>/...`) or at the zip root (then it is named after the zip). Only
 what the converter reads is unpacked into a scratch folder, per car, and deleted right
 after: `data/`, `ui/`, the `.kn5` models (including an `unencrypted/` copy and LODs)
 and skin images; sound banks, animations and `extension/` are skipped. Entries that
-would land outside the scratch folder are ignored and size limits apply. Zip only
-(not .rar / .7z). New `car_archives.py`, `test_archives.py`.
+would land outside the scratch folder are ignored and size limits apply. New `car_archives.py`, `test_archives.py`.
 
 ### Option: highest-quality LOD only
 

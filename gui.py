@@ -34,7 +34,7 @@ from converter import (
     build_svj, read_car_directory, _clean, _car_stem,
 )
 from ac_parsers import parse_ini
-from car_archives import ArchiveCar, extract_car, scan_zip_folder
+from car_archives import ArchiveCar, extract_car, scan_archive_folder
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench, build_svj_pacejka_blocks,
 )
@@ -607,8 +607,11 @@ class App(tk.Tk):
         convertible = [d.name for d in subdirs if (d / "data").is_dir()]
         encrypted   = [d.name for d in subdirs
                        if not (d / "data").is_dir() and (d / "data.acd").is_file()]
-        # downloaded cars still in .zip files: "<zip>::<car folder>"
-        zipped = scan_zip_folder(root)
+        # downloaded cars still in .zip / .rar / .7z files: "<archive>::<car folder>"
+        problems: list[str] = []
+        zipped = scan_archive_folder(root, problems.append)
+        for msg in problems:
+            self._log.append(f"⚠ {msg}", "warn")
         convertible += [c.label for c in zipped if c.has_data]
         encrypted   += [c.label for c in zipped if not c.has_data and c.has_acd]
         self._car_tree.load(convertible)
@@ -617,12 +620,12 @@ class App(tk.Tk):
         if convertible:
             n_zip = sum(1 for c in zipped if c.has_data)
             parts.append(f"✓ {len(convertible)} convertible car(s)"
-                         + (f" ({n_zip} in zip files)" if n_zip else ""))
+                         + (f" ({n_zip} in archives)" if n_zip else ""))
         if encrypted:
             parts.append(
                 f"⚠ {len(encrypted)} encrypted — Content Manager → Unpack Data first")
         if not parts:
-            parts.append("No AC cars found (need a car folder or a .zip with a data/ subfolder)")
+            parts.append("No AC cars found (need a car folder or a .zip/.rar/.7z with a data/ subfolder)")
         self._b_status.config(text="   ·   ".join(parts),
                               foreground="black" if convertible else "red")
         self._log.append(
@@ -710,7 +713,7 @@ class App(tk.Tk):
             out_root = Path(out_folder) if out_folder else root.parent / name
             out_root.mkdir(parents=True, exist_ok=True)
 
-            zip_cars = {c.label: c for c in scan_zip_folder(root) if c.has_data}
+            zip_cars = {c.label: c for c in scan_archive_folder(root) if c.has_data}
             car_dirs: list = []
             for n in selected:
                 if n in zip_cars:
