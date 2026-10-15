@@ -104,7 +104,7 @@ except ImportError:
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-SVJ_VERSION = "0.99.3"
+SVJ_VERSION = "0.99.4"
 SVJ_SPEC    = "SVJ"
 CONV_VER    = "0.9.1"
 REPO_URL    = "https://github.com/RFloEng/SVJ-standard-vehicle-json"
@@ -398,7 +398,7 @@ def build_corner(corner_id: str, susp_axle: dict,
         # `damper_outboard` is retained for back-compat with v0.99 consumers.
         if sys_type == "macpherson":
             hp_svj["strut_outboard"] = strut_tyre
-            hp_svj["strut_top"] = strut_tyre          # spec §9.2.2.1 name
+            hp_svj["strut_lower"] = strut_tyre        # lower clamp on the upright (spec 0.99.4)
 
     # Control-arm inboard points in vehicle frame (chassis-space).
     # `chassis_z_offset` lifts each WBCAR pickup from CG-relative to
@@ -410,6 +410,8 @@ def build_corner(corner_id: str, susp_axle: dict,
     tie_chassis = ac_hp_to_vehicle(hp_ac.get("WBCAR_STEER")
                                    or hp_ac.get("WBCAR_TIE"),         axle_x, y_sign, chassis_z_offset, wheel_y)
     strut_car   = ac_hp_to_vehicle(hp_ac.get("STRUT_CAR"),           axle_x, y_sign, chassis_z_offset, wheel_y)
+    if strut_car and "strut_lower" in hp_svj:
+        hp_svj["strut_top"] = strut_car          # body-side end of the strut (spec 0.99.4)
 
     links: list = []
     is_axle = sys_type == "solid_axle"
@@ -485,7 +487,7 @@ def build_corner(corner_id: str, susp_axle: dict,
                 "name": "strut",
                 "type": "strut",
                 "inboard_points": [strut_car],
-                "outboard_ref": "hardpoints.strut_top",
+                "outboard_ref": "hardpoints.strut_lower",
             })
         # On any other axle STRUT_* is not a locating member (a damper does not
         # locate the wheel): it stays out of `links`, kept under damper.x_ac_strut.
@@ -687,9 +689,6 @@ def build_corner(corner_id: str, susp_axle: dict,
         "axis":          "strut" if strut_mr else "vertical",
         "inboard_mount":  spring_inboard,
         "outboard_mount": spring_outboard,
-        # legacy names (pre spec-9.3 mount keys), kept for older readers
-        "inboard_point":  spring_inboard,
-        "outboard_point": spring_outboard,
         "_note": ("AC spring rate is already wheel-rate; mounts are the strut's "
                   "STRUT_CAR / STRUT_TYRE, motion ratio from the strut inclination"
                   if strut_mr else
@@ -715,8 +714,6 @@ def build_corner(corner_id: str, susp_axle: dict,
         "axis":           "strut" if strut_mr else "vertical",
         "inboard_mount":  spring_inboard,
         "outboard_mount": spring_outboard,
-        "inboard_point":  spring_inboard,
-        "outboard_point": spring_outboard,
         "_est":           True,
         "_note": ("AC damping is specified at wheel; curves synthesised from AC scalar "
                   "bump/rebound and converted to the strut axis (v*MR, F/MR)"
@@ -775,6 +772,8 @@ def build_corner(corner_id: str, susp_axle: dict,
     if geometry_note:
         topology["_note"] = geometry_note
 
+    _tw = ((tire_sets or {}).get(tire_set_ref, {}).get("rim", {}) or {}).get("width_nominal")
+    _est_rim_w = round(float(_tw) * 0.8, 3) if _tw else 0.18
     corner = {
         "position":        wheel_center,   # corner location in vehicle frame
         "topology":        topology,
@@ -782,8 +781,10 @@ def build_corner(corner_id: str, susp_axle: dict,
             "rim_diameter": round(
                 (tire_sets or {}).get(tire_set_ref, {}).get("rim", {}).get("diameter", 0.432),
                 4),
-            "rim_width":    None,   # AC does not store rim width; tyre section width
-                                    # is in tires.sets.<ref>.rim.width_nominal
+            # AC has no rim width; the schema requires one, so estimate 0.8 x the tyre
+            # section width (typical for road and race tyres) and flag it.
+            "rim_width":     _est_rim_w,
+            "_est_rim_width": True,
             "set_ref":      tire_set_ref,
         },
         "spring": spring,
@@ -800,7 +801,9 @@ def build_corner(corner_id: str, susp_axle: dict,
         "brake": {"disc": disc_obj,
                   "max_torque_nm": round(max_torque, 1)},
         "tire": {"set_ref": tire_set_ref},
-        "static_setup": {"ride_height": round(ride_h, 4)},
+        # BASEY is the wheel-centre offset from the physics origin, not a ride height:
+        # only a positive value is one.
+        "static_setup": {"ride_height": round(ride_h, 4)} if ride_h > 0 else {},
     }
     if caster is not None:
         corner["alignment"]["caster"] = round(caster, 5)

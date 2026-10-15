@@ -126,8 +126,8 @@ def main():
         "spring MR = 1.0":           corner_fl["spring"]["motion_ratio"] == 1.0,
         "damper axis vertical":      corner_fl["damper"].get("axis") == "vertical",
         "damper MR = 1.0":           corner_fl["damper"]["motion_ratio"] == 1.0,
-        "spring inboard above out":  corner_fl["spring"]["inboard_point"][2]
-                                     <  corner_fl["spring"]["outboard_point"][2],
+        "spring inboard above out":  corner_fl["spring"]["inboard_mount"][2]
+                                     <  corner_fl["spring"]["outboard_mount"][2],
         "corner.position set":       corner_fl.get("position") is not None,
         # ── v0.97: WBTYRE wheel-space transform ───────────────────────────────
         # Upright ball joints are wheel-space offsets, inboard-positive in AC.

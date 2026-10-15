@@ -106,7 +106,7 @@ The SVJ `assets.meshes` block lists every LOD that was found:
 
 **Visual bindings (SVJ v0.99.2)**
 
-The converter targets SVJ **0.99.3** and, when a KN5 is present, binds the parts
+The converter targets SVJ **0.99.4** and, when a KN5 is present, binds the parts
 it can find to glTF nodes named `SVJ::<category>::<id>`. The exported GLB's
 nodes are **renamed to match** (the original AC name is kept in the node's
 `extras.ac_name`), so every binding resolves:

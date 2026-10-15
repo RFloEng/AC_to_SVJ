@@ -27,6 +27,20 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Targets SVJ v0.99.4 (strut ends, mount names) and two schema fixes
+
+- **Strut:** the strut link now ends at `hardpoints.strut_lower` (the lower clamp
+  on the upright, `STRUT_TYRE`); `strut_top` is the body-side end (`STRUT_CAR`).
+  Before, both ends were the same hardpoint family and the link had no usable length.
+- **Spring / damper mounts:** only `inboard_mount` / `outboard_mount` are written;
+  `inboard_point` / `outboard_point` are now documented misspellings and are gone.
+- **`wheel.rim_width`** (required by the schema, absent from AC): estimated as
+  0.8 x the tyre section width and flagged `_est_rim_width`.
+- **`static_setup.ride_height`**: AC's `BASEY` is a wheel-centre offset, not a ride
+  height, and is negative, which the schema rejects. Omitted unless positive.
+- Cars with simple geometry (for example a double-wishbone / solid-axle one) now
+  pass the SVJ validator with no errors.
+
 ### Suspension topology that a kinematic solver can use
 
 Found by reading all 1,398 converted files with an independent suspension solver.

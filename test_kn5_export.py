@@ -494,7 +494,7 @@ def test_converter_emits_v0992_bindings():
         glb = out / "meshes" / "synthcar.glb"
         assert glb.is_file(), log
         names = {n.name for n in pygltflib.GLTF2().load(str(glb)).nodes}
-    assert svj["_metadata"]["version"] == "0.99.3"
+    assert svj["_metadata"]["version"] == "0.99.4"
     assert svj["vehicle_info"]["drive_type"] in ("FWD", "RWD", "AWD", "4WD")
     sus = svj["suspension"]
     assert svj["chassis"]["visual"]["node"] == "SVJ::body::chassis"

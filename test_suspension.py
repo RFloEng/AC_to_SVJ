@@ -53,8 +53,9 @@ def test_macpherson_has_a_strut_link_and_no_upper_arm():
     names = _names(c)
     assert "upper_control_arm" not in names and "upper_wishbone" not in names
     assert names["strut"]["type"] == "strut"
-    assert names["strut"]["outboard_ref"] == "hardpoints.strut_top"
-    assert "strut_top" in c["topology"]["upright"]["hardpoints"]
+    assert names["strut"]["outboard_ref"] == "hardpoints.strut_lower"
+    hp = c["topology"]["upright"]["hardpoints"]
+    assert "strut_lower" in hp and hp["strut_top"] == names["strut"]["inboard_points"][0]
     assert {"lower_control_arm", "steering_tie_rod"} <= set(names)
 
 
@@ -82,8 +83,7 @@ def test_placeholder_keeps_the_vertical_axis_with_spec_mount_names():
     for part in ("spring", "damper"):
         p = c[part]
         assert p["axis"] == "vertical" and p["motion_ratio"] == 1.0
-        assert p["inboard_mount"] == p["inboard_point"]
-        assert p["outboard_mount"] == p["outboard_point"]
+        assert "inboard_point" not in p and "outboard_point" not in p   # misspellings (0.99.4)
 
 
 def test_no_hardpoints_means_no_links_not_a_virtual_one():
