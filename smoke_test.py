@@ -27,6 +27,11 @@ def main():
     if not test_archives.run():
         print("\n✗ zip archive checks failed")
         sys.exit(1)
+    print("\n──── FOLDER AUDIT CHECKS ────")
+    import test_audit
+    if not test_audit.run():
+        print("\n✗ folder audit checks failed")
+        sys.exit(1)
     print("\n──── SUSPENSION CHECKS ────")
     import test_suspension
     if not test_suspension.run():

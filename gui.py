@@ -35,6 +35,7 @@ from converter import (
 )
 from ac_parsers import parse_ini
 from car_archives import ArchiveCar, extract_car, scan_archive_folder
+from car_audit import audit_folder, write_reports
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench, build_svj_pacejka_blocks,
 )
@@ -525,6 +526,15 @@ class App(tk.Tk):
         ttk.Label(paths, text="(blank = auto-named sibling of cars folder)",
                   foreground="gray").grid(row=1, column=3, padx=(4, 6), sticky="w")
 
+        self._b_audit_kn5_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(paths, text="also check KN5 encryption (slow)",
+                        variable=self._b_audit_kn5_var).grid(
+            row=2, column=1, sticky="e", padx=4, pady=(0, 4))
+        ttk.Button(paths, text="Audit…", command=self._audit, width=9).grid(
+            row=2, column=2, padx=2, pady=(0, 4))
+        ttk.Label(paths, text="(lists cars that need unpacking / repair)",
+                  foreground="gray").grid(row=2, column=3, padx=(4, 6), sticky="w")
+
         self._b_status = ttk.Label(f, text="← Scan a cars folder to get started",
                                    foreground="gray")
         self._b_status.pack(anchor="w", padx=12, pady=(2, 0))
@@ -681,6 +691,42 @@ class App(tk.Tk):
         self._log.append(
             f"Scanned {root.name}: {len(convertible)} convertible, "
             f"{len(encrypted)} encrypted", "info")
+
+    def _audit(self) -> None:
+        root = Path(self._b_cars_var.get().strip())
+        if not root.is_dir():
+            messagebox.showerror("Not found", f"Directory not found:\n{root}")
+            return
+        out = self._b_out_var.get().strip()
+        out_dir = Path(out) if out else root.parent
+        check_kn5 = self._b_audit_kn5_var.get()
+        self._log.append(f"▶ Auditing {root}" + (" (including KN5 encryption)" if check_kn5 else ""),
+                         "info")
+
+        def worker() -> None:
+            put = lambda *a: self._q.put(a)
+            try:
+                last = [0.0]
+
+                def progress(i: int, n: int, name: str) -> None:
+                    put("b_prog", i / max(n, 1), f"audit {i}/{n}")
+
+                rows = audit_folder(root, check_kn5, progress)
+                paths = write_reports(rows, out_dir)
+                c = paths["counts"]
+                put("b_log", f"✓ Audit: {c['cars']} car(s), {c['ready']} ready to convert, "
+                             f"{c['need_unpack']} need unpacking"
+                             + (f", {c['kn5_encrypted']} with an encrypted KN5 and no clean copy"
+                                if check_kn5 else "")
+                             + (f", {c['unreadable']} unreadable archive(s)" if c["unreadable"] else ""))
+                for key in ("csv", "need_unpack", "kn5_encrypted", "unreadable"):
+                    if key in paths:
+                        put("b_log", f"✓ {paths[key].name}  →  {paths[key].parent}")
+                put("b_prog", 1.0, "audit done")
+            except Exception:                                  # noqa: BLE001
+                put("b_log", "✗ Audit failed:\n" + traceback.format_exc())
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _apply_filter(self) -> None:
         self._car_tree.apply_filter(self._b_filt_var.get())

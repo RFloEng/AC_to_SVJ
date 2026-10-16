@@ -27,6 +27,17 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Audit a big cars folder: which cars need unpacking or repair
+
+"Audit…" (batch tab) classifies every car folder, and every car inside the `.zip` /
+`.rar` / `.7z` files next to them: `data` is `unpacked`, `needs_unpack` (only an encrypted
+`data.acd`) or `no_data`; with "also check KN5 encryption" (reads the model files, slow)
+`kn5` is `clean`, `encrypted_copy_found`, `encrypted_no_copy` or `no_kn5`. It writes
+`cars_audit_<stamp>.csv` with every car and plain lists, one name per line, of the cars
+that need attention (`cars_need_unpack_*.txt`, `cars_kn5_encrypted_*.txt`,
+`cars_unreadable_archives_*.txt`) to the output folder (the cars folder's parent when
+none is set). Detection only; nothing is decrypted. New `car_audit.py`, `test_audit.py`.
+
 ### Second log: failed cars only
 
 A batch with failures now also writes `batch_failed_<stamp>.log` (a summary line per
