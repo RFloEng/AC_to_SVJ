@@ -591,6 +591,9 @@ class App(tk.Tk):
             variable=self._b_flat_var,
             state="normal" if _KN5 else "disabled",
         ).pack(side="left", padx=4)
+        # second row so nothing is pushed out of a narrow window
+        opts = ttk.Frame(f)
+        opts.pack(fill="x", padx=8, pady=(0, 2))
         self._b_dmg_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             opts, text="Include crash/damage textures",
@@ -612,20 +615,23 @@ class App(tk.Tk):
             ttk.Label(opts, text="(kn5_reader unavailable)",
                       foreground="gray").pack(side="left")
 
+        # action buttons on their own row: always visible, whatever the width
+        btns = ttk.Frame(f)
+        btns.pack(fill="x", padx=8, pady=(2, 2))
         self._b_open_btn = ttk.Button(
-            opts, text="Open output folder",
+            btns, text="Open output folder",
             command=lambda: _open_in_explorer(self._batch_out or "."),
             state="disabled")
         self._b_open_btn.pack(side="right", padx=4)
 
         self._b_stop_btn = ttk.Button(
-            opts, text="■  Stop",
+            btns, text="■  Stop",
             command=self._stop_batch,
             state="disabled")
         self._b_stop_btn.pack(side="right", padx=4)
 
         self._b_run_btn = ttk.Button(
-            opts, text="▶  Convert selected",
+            btns, text="▶  Convert selected",
             command=self._run_batch)
         self._b_run_btn.pack(side="right", padx=4)
 
