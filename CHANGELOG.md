@@ -27,6 +27,39 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### CSP extended-physics switches kept
+
+Every `[_EXTENSION*]` section of the data files (`TORQUE_MODE_EX`, `FIX_PROGRESSIVE_RATE`,
+`USE_DWB2`, tyre rays and rolling-resistance options, `USE_ADVANCED_SYSTEM` for the brakes,
+`CLUTCH_LUT`, flex) and the turbo `EXT_*` keys are now stored as written under
+`x_assettocorsa.csp_physics`, so none of the 423 cars that use them loses an option.
+
+### CSP COSMIC suspension geometry
+
+`TYPE=COSMIC` axles (11 installed cars, 23 axles) were left without links. They are a
+small multibody model (bodies, distance / ball / hinge joints, sliders, coilovers) and
+are now reduced to the SVJ's chassis-to-upright links by the new `cosmic.py`:
+
+- **Setup adjusters** (a slider plus a distance joint on the same two bodies and
+  points, used for camber / caster / toe) and **bushings** (a slider with a spring or
+  damper) merge the two bodies into one rigid body.
+- **Rods** (a distance joint or the steer joint from the chassis to the hub) become rod
+  links; two rods ending at the same hub point become one A-arm. A body held by two ball
+  joints and joined to the hub by a third is an A-arm; a body held by one ball joint
+  and sliding on the hub is a strut. The result is `double_wishbone`, `macpherson` or
+  `multi_link`.
+- **Springs and dampers:** COSMIC rates are per component, not wheel rates. The
+  coilover's mounts give the damper axis, its motion ratio comes from the geometry (strut
+  inclination, or the lever of the lower arm about its pivot axis), and the wheel rate is
+  `rate x ratio^2`, plus the one-metre vertical "virtual" springs these cars use for
+  pure wheel rate. The damper tables of `dampers.ini` are damper-level and now carry the
+  real ratio and mounts.
+- Anything not recognised (for example the BRM Type 25 de Dion with a Watts linkage) is
+  listed in `topology._note` and left out, not guessed. The motion ratio assumes the
+  wheel travel equals the lower ball joint's vertical travel, so it is approximate.
+- Also fixed: a negative engine `MINIMUM` (a mod typo, `-9000`) is no longer taken as the
+  idle speed.
+
 ### CSP motion-ratio tables, and anti-roll bars that were never read
 
 - **`MOTION_RATIO`** (CSP DWB2, 4 cars): the deflection | ratio table (a file or an

@@ -296,6 +296,27 @@ def _merge_slow_fast(slow: Optional[list], fast: Optional[list]) -> list:
     return pts
 
 
+def _csp_physics_flags(parsed: dict) -> dict:
+    """The CSP extended-physics switches of a car, as written: every ``[_EXTENSION*]``
+    section of the data files, and the ``EXT_*`` keys of an engine's turbo sections.
+    Kept under ``x_assettocorsa.csp_physics`` so no option is lost."""
+    out: dict = {}
+    for fname in ("car.ini", "suspensions.ini", "tyres.ini", "brakes.ini", "drivetrain.ini",
+                  "engine.ini", "electronics.ini", "aero.ini"):
+        sections: dict = {}
+        for sec, keys in (parsed.get(fname) or {}).items():
+            name = sec.strip().upper()
+            if name.startswith("_EXTENSION"):
+                sections[name] = {k: v for k, v in keys.items()}
+            else:
+                ext = {k: v for k, v in keys.items() if k.upper().startswith("EXT_")}
+                if ext:
+                    sections[name] = ext
+        if sections:
+            out[fname] = sections
+    return out
+
+
 def _interp(curve: list, x: float) -> float:
     """Linear interpolation in a sorted ``[[x, y], ...]`` table (clamped at the ends)."""
     if x <= curve[0][0]:
@@ -304,6 +325,31 @@ def _interp(curve: list, x: float) -> float:
         if x <= x1:
             return y0 if x1 == x0 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
     return curve[-1][1]
+
+
+def _attach_cosmic(sa_f: dict, sa_r: dict, parsed: dict, log: list) -> None:
+    """CSP COSMIC axles: reduce the joint model to links, and the coilovers to a wheel
+    rate (their RATE is a component rate, wheel rate = rate x motion ratio squared)."""
+    from cosmic import reduce_cosmic
+    ini = parsed.get("suspensions.ini") or {}
+    for axle, sa in (("FRONT", sa_f), ("REAR", sa_r)):
+        try:
+            res = reduce_cosmic(ini, axle)
+        except Exception as ex:                                  # noqa: BLE001
+            log.append(f"⚠ COSMIC {axle.lower()} not converted: {ex}")
+            continue
+        if res is None:
+            continue
+        sa["cosmic"] = res
+        sprung = [c for c in res["coilovers"] if c["rate"] > 0]
+        if sprung and all(c["wheel_rate"] for c in sprung):
+            sa["spring_rate"] = round(sum(c["wheel_rate"] for c in sprung)
+                                      + (res["extra_wheel_rate"] or 0.0), 1)
+        elif res["extra_wheel_rate"] and not sprung:
+            sa["spring_rate"] = res["extra_wheel_rate"]
+        log.append(f"✓ COSMIC suspension ({axle.lower()}): {res['system_type']}, "
+                   f"{len(res['links'])} link(s), {len(res['coilovers'])} coilover(s)"
+                   + (f"; {len(res['notes'])} part(s) not converted" if res["notes"] else ""))
 
 
 def _attach_arb(sa_f: dict, sa_r: dict, parsed: dict, log: list) -> None:
@@ -443,6 +489,9 @@ def build_corner(corner_id: str, susp_axle: dict,
     wheel_y  = round(y_sign * track / 2.0, 4)
 
     sys_type = susp_type(susp_axle.get("type", "0"))
+    cos = susp_axle.get("cosmic")
+    if cos:
+        sys_type = cos["system_type"]
     spring_k = susp_axle.get("spring_rate") or (25000.0 if is_front else 22000.0)
     bump_raw = susp_axle.get("bump_rate")    or (2500.0  if is_front else 2200.0)
     reb_raw  = susp_axle.get("rebound_rate") or (3000.0  if is_front else 2800.0)
@@ -774,6 +823,27 @@ def build_corner(corner_id: str, susp_axle: dict,
                              "not model a rear toe link; placeholder location.",
             })
 
+    # ── COSMIC: links reduced from the joint model ───────────────────────────
+    cos_coil = None
+    if cos:
+        _v = lambda p: ac_wheelspace_to_vehicle(p, wheel_center, y_sign)
+        for L in cos["links"]:
+            hp_svj[L["hardpoint"]] = _v(L["end"])
+            links.append({"name": L["name"], "type": L["type"],
+                          "inboard_points": [_v(p) for p in L["inboard"]],
+                          "outboard_ref": f"hardpoints.{L['hardpoint']}"})
+            if L["type"] == "strut":
+                hp_svj["strut_top"] = _v(L["inboard"][0])
+                hp_svj["strut_outboard"] = hp_svj["damper_outboard"] = _v(L["end"])
+        # the coilover that carries the damper: the one the damper table names,
+        # else the one with the highest rate
+        _want = (susp_axle.get("damper_tables") or {}).get("coilover")
+        _cs = cos["coilovers"]
+        cos_coil = next((c for c in _cs if c["index"] == _want), None) \
+            or (max(_cs, key=lambda c: c["rate"]) if _cs else None)
+        if cos_coil and not cos_coil["motion_ratio"]:
+            cos_coil = None
+
     # ── Spring / damper: vertical at the wheel ───────────────────────────────
     # AC uses a wheel-rate spring model without modelled pickup points, so the
     # SVJ representation is a purely vertical axis through the wheel centre:
@@ -788,7 +858,11 @@ def build_corner(corner_id: str, susp_axle: dict,
     # MacPherson: the strut IS the damper, so its real mounts (STRUT_CAR -> STRUT_TYRE)
     # give the axis and the motion ratio (|strut_z| / strut length).
     strut_mr = None
-    if sys_type == "macpherson" and strut_car and strut_tyre:
+    if cos_coil:
+        spring_inboard = ac_wheelspace_to_vehicle(cos_coil["inboard"], wheel_center, y_sign)
+        spring_outboard = ac_wheelspace_to_vehicle(cos_coil["outboard"], wheel_center, y_sign)
+        strut_mr = cos_coil["motion_ratio"]
+    elif sys_type == "macpherson" and strut_car and strut_tyre:
         _dx = [strut_car[i] - strut_tyre[i] for i in range(3)]
         _len = math.sqrt(sum(c * c for c in _dx))
         if _len > 0.05:
@@ -889,6 +963,9 @@ def build_corner(corner_id: str, susp_axle: dict,
             if target is not None:
                 L["outboard_point"] = list(target)
 
+    if cos and cos["notes"]:
+        geometry_note = ((geometry_note + "; ") if geometry_note else "") + \
+            "COSMIC, not converted: " + "; ".join(cos["notes"])
     topology = {
         "system_type": sys_type,
         "upright": {
@@ -1115,6 +1192,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     sa_r = parse_suspension_axle(sr)
     _attach_csp_tables(sa_f, sa_r, parsed, data_dir, log)
     _attach_arb(sa_f, sa_r, parsed, log)
+    _attach_cosmic(sa_f, sa_r, parsed, log)
 
     wm_f = sa_f.get("unsprung_mass")
     wm_r = sa_r.get("unsprung_mass")
@@ -1711,6 +1789,10 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     ac_versions = {k: v for k, v in ac_versions.items() if v is not None}
     if ac_versions:
         x_ac["versions"] = ac_versions
+
+    _csp = _csp_physics_flags(parsed)
+    if _csp:
+        x_ac["csp_physics"] = _csp
 
     if _gfx_off is not None:
         x_ac["graphics"] = {"offset": _gfx_off, "pitch_rotation_deg": _gfx_pitch}

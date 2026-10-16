@@ -13,7 +13,9 @@ import tempfile
 
 from ac_parsers import (_resolve_lut, parse_bumpstop_tables, parse_damper_tables, parse_ini,
                         parse_suspension_axle)
-from converter import _attach_arb, _attach_csp_tables, _interp, build_corner
+from converter import (_attach_arb, _attach_cosmic, _attach_csp_tables, _csp_physics_flags,
+                       _interp, build_corner)
+from cosmic import reduce_cosmic
 
 WB = """WBCAR_TOP_FRONT=0.30,0.11,0.08
 WBCAR_TOP_REAR=0.30,0.11,-0.06
@@ -227,6 +229,160 @@ def test_anti_roll_bar_comes_from_the_arb_section():
     c0 = build_corner("FL", parse_suspension_axle(parse_ini("[S]\nTYPE=DWB\nTRACK=1.5\n" + WB)["S"]),
                       2.6, 1.5, 1.5, 0.5, 0.15, 800, 0.6, "x", 0.3, 0.4, {})
     assert c0["arb"]["_est"] is True
+
+
+COSMIC_DWB = """[FRONT]
+TYPE=COSMIC
+BASEY=-0.14
+TRACK=1.6
+DJ0=UCA_FRONT
+DJ0_BODY_A=CHASSIS
+DJ0_BODY_B=HUB_L
+DJ0_POS_A=0.35, 0.12, 0.14
+DJ0_POS_B=0.15, 0.12, -0.02
+DJ1=UCA_REAR
+DJ1_POS_A=0.35, 0.09, -0.08
+DJ1_POS_B=0.15, 0.12, -0.02
+J0=LCA_FRONT
+J0_BODY_A=CAMBER_BODY
+J0_BODY_B=LCA_BODY
+J0_POS=0.43, -0.15, 0.26
+J1=LCA_REAR
+J1_BODY_A=CAMBER_BODY
+J1_BODY_B=LCA_BODY
+J1_POS=0.43, -0.15, -0.06
+J2=LCA_BJ
+J2_BODY_A=LCA_BODY
+J2_POS=0.09, -0.14, 0.0
+STEER_JOINT_0=STEER
+STEER_JOINT_0_POS_A=0.37, 0.04, 0.10
+STEER_JOINT_0_POS_B=0.09, 0.07, 0.13
+BODY_0_NAME=CAMBER_BODY
+BODY_1_NAME=LCA_BODY
+SLIDER_0=CAMBER_SLIDER
+SLIDER_0_BODY_A=CHASSIS
+SLIDER_0_BODY_B=CAMBER_BODY
+SLIDER_0_POS_A=0.53, -0.15, 0.10
+SLIDER_0_POS_B=0.43, -0.15, 0.10
+DJ2=CAMBER_ADJUSTER
+DJ2_BODY_A=CHASSIS
+DJ2_BODY_B=CAMBER_BODY
+DJ2_POS_A=0.53, -0.15, 0.10
+DJ2_POS_B=0.43, -0.15, 0.10
+[FRONT_COILOVER_0]
+BODY_A=CHASSIS
+BODY_B=LCA_BODY
+POS_A=0.33, 0.17, 0.0
+POS_B=0.17, -0.15, 0.0
+RATE=40000
+[FRONT_SPRING_0]
+BODY_A=CHASSIS
+BODY_B=HUB_L
+POS_A=0, 1, 0
+POS_B=0, 0, 0
+RATE=8000
+"""
+
+COSMIC_STRUT = """[FRONT]
+TYPE=COSMIC
+BASEY=-0.19
+TRACK=1.5
+BODY_0_NAME=LCA_IN
+BODY_1_NAME=LCA_OUT
+BODY_2_NAME=STRUT_BODY
+J0=LCA_FRONT
+J0_BODY_A=CHASSIS
+J0_BODY_B=LCA_IN
+J0_POS=0.43, -0.13, 0.30
+J1=LCA_REAR
+J1_BODY_A=CHASSIS
+J1_BODY_B=LCA_IN
+J1_POS=0.43, -0.13, -0.02
+J2=LCA_BJ
+J2_BODY_A=LCA_OUT
+J2_POS=0.11, -0.13, 0.03
+J3=STRUT_TOP
+J3_BODY_A=CHASSIS
+J3_BODY_B=STRUT_BODY
+J3_POS=0.31, 0.43, -0.02
+DJ0=ADJ
+DJ0_BODY_A=LCA_IN
+DJ0_BODY_B=LCA_OUT
+DJ0_POS_A=0.11, -0.13, -0.07
+DJ0_POS_B=0.11, -0.13, 0.03
+SLIDER_0=ADJ_SLIDER
+SLIDER_0_BODY_A=LCA_IN
+SLIDER_0_BODY_B=LCA_OUT
+SLIDER_0_POS_A=0.11, -0.13, -0.07
+SLIDER_0_POS_B=0.11, -0.13, 0.03
+SLIDER_1=STRUT_SLIDER
+SLIDER_1_BODY_A=STRUT_BODY
+SLIDER_1_POS_A=0.31, 0.43, -0.02
+SLIDER_1_POS_B=0.17, -0.01, -0.07
+STEER_JOINT_0=TOE
+STEER_JOINT_0_POS_A=0.45, -0.11, -0.09
+STEER_JOINT_0_POS_B=0.14, -0.09, -0.11
+[FRONT_COILOVER_0]
+BODY_A=STRUT_BODY
+POS_A=0.31, 0.43, -0.02
+POS_B=0.17, -0.01, -0.07
+RATE=29000
+"""
+
+
+def test_cosmic_double_wishbone_is_reduced_to_arms_and_a_tie_rod():
+    r = reduce_cosmic(parse_ini(COSMIC_DWB), "FRONT")
+    assert r["system_type"] == "double_wishbone" and not r["notes"]
+    by = {l["name"]: l for l in r["links"]}
+    assert set(by) == {"upper_wishbone", "lower_wishbone", "steering_tie_rod"}
+    assert len(by["upper_wishbone"]["inboard"]) == 2 and by["upper_wishbone"]["end"] == [0.15, 0.12, -0.02]
+    assert by["lower_wishbone"]["end"] == [0.09, -0.14, 0.0]        # through the adjuster-merged body
+    assert len(by["lower_wishbone"]["inboard"]) == 2
+    (c,) = r["coilovers"]
+    assert 0.3 < c["motion_ratio"] < 1.0 and abs(c["wheel_rate"] - 40000 * c["motion_ratio"] ** 2) < 5
+    assert r["extra_wheel_rate"] == 8000.0
+
+
+def test_cosmic_strut_is_a_macpherson_with_the_real_damper():
+    r = reduce_cosmic(parse_ini(COSMIC_STRUT), "FRONT")
+    assert r["system_type"] == "macpherson", r
+    by = {l["name"]: l for l in r["links"]}
+    assert by["strut"]["type"] == "strut" and by["strut"]["end"] == [0.17, -0.01, -0.07]
+    assert by["strut"]["inboard"] == [[0.31, 0.43, -0.02]]
+    (c,) = r["coilovers"]
+    assert c["rate"] == 29000.0 and 0.9 < c["motion_ratio"] <= 1.0     # near-vertical strut
+
+
+def test_cosmic_corner_gets_links_mounts_and_a_wheel_rate():
+    ini = parse_ini(COSMIC_DWB)
+    sa = parse_suspension_axle(ini["FRONT"])
+    _attach_cosmic(sa, {}, {"suspensions.ini": ini}, [])
+    c = build_corner("FL", sa, 2.6, 1.5, 1.5, 0.5, 0.15, 800, 0.6, "x", 0.3, 0.4, {})
+    t = c["topology"]
+    assert t["system_type"] == "double_wishbone" and len(t["links"]) == 3
+    assert "upper_ball_joint" in t["upright"]["hardpoints"] and "_note" not in t
+    mr = c["spring"]["motion_ratio"]
+    assert c["spring"]["axis"] == "strut" and c["spring"]["inboard_mount"] != c["spring"]["outboard_mount"]
+    assert abs(c["spring"]["rate"] - (40000 * mr * mr + 8000)) < 5          # component -> wheel rate
+
+
+def test_unrecognised_cosmic_axle_says_so_instead_of_guessing():
+    ini = parse_ini("[REAR]\nTYPE=COSMIC\nBODY_0_NAME=DEDION\nDJ0=TOP\nDJ0_BODY_A=DEDION\n"
+                    "DJ0_BODY_B=CHASSIS\nDJ0_POS_A=0.7, 0.07, -0.04\nDJ0_POS_B=0.7, 0.07, 0.5\n")
+    r = reduce_cosmic(ini, "REAR")
+    assert r["system_type"] == "custom" and r["links"] == [] and r["notes"]
+
+
+def test_csp_physics_flags_are_kept_as_written():
+    parsed = {
+        "suspensions.ini": parse_ini("[_EXTENSION]\nTORQUE_MODE_EX=2\nFIX_PROGRESSIVE_RATE=1\n[FRONT]\nTYPE=DWB\n"),
+        "engine.ini": parse_ini("[TURBO_0]\nMAX_BOOST=1\nEXT_SPIN_DELAY=0.1\nEXT_GAS_CURVE=(|0=0|1=1|)\n"),
+        "tyres.ini": parse_ini("[FRONT]\nWIDTH=0.2\n"),
+    }
+    f = _csp_physics_flags(parsed)
+    assert f["suspensions.ini"] == {"_EXTENSION": {"TORQUE_MODE_EX": "2", "FIX_PROGRESSIVE_RATE": "1"}}
+    assert f["engine.ini"] == {"TURBO_0": {"EXT_SPIN_DELAY": "0.1", "EXT_GAS_CURVE": "(|0=0|1=1|)"}}
+    assert "tyres.ini" not in f and _csp_physics_flags({}) == {}
 
 
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

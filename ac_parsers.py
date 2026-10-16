@@ -172,7 +172,7 @@ def parse_engine(ini: dict, data_dir: Optional[Path]) -> dict:
 
     out: dict = {
         "version":          hdr.get("VERSION"),
-        "idle_rpm":         _f(eD.get("MINIMUM"), 800.0),
+        "idle_rpm":         (lambda v: v if v > 0 else 800.0)(_f(eD.get("MINIMUM"), 800.0)),  # a negative MINIMUM is a mod typo
         "max_rpm":          _f(eD.get("LIMITER"), 7000.0),
         "inertia":          _f(eD.get("INERTIA"), 0.09),
         "limiter_hz":       _m(eD.get("LIMITER_HZ")),
