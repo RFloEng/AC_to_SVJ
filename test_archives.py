@@ -163,6 +163,40 @@ def test_rar_without_7zip_gives_a_clear_message():
         car_archives.find_7zip = real
 
 
+def test_already_converted_detection():
+    try:
+        from gui import _already_converted
+    except Exception:                                  # no tkinter / display: nothing to check
+        return
+    with tempfile.TemporaryDirectory() as t:
+        out = Path(t) / "car"
+        assert not _already_converted(out, False)             # no folder
+        out.mkdir()
+        assert not _already_converted(out, False)             # folder, no SVJ
+        (out / "x.svj.json").write_text("{}", encoding="utf-8")
+        assert _already_converted(out, False)
+        assert not _already_converted(out, True)              # GLBs wanted, none there
+        (out / "meshes").mkdir()
+        (out / "meshes" / "x.glb").write_bytes(b"g")
+        assert _already_converted(out, True)
+
+
+def test_failed_cars_get_their_own_log():
+    try:
+        from gui import _write_failed_log
+    except Exception:
+        return
+    with tempfile.TemporaryDirectory() as t:
+        out = Path(t)
+        assert _write_failed_log(out, "S", out, {}, "0 errored") is None
+        assert not list(out.glob("batch_failed_*"))
+        p = _write_failed_log(out, "S", out, {"car_a": ("ValueError: bad", "Traceback... boom"),
+                                                "x.zip::car_b": ("KeyError: 'x'", "tb2")}, "2 errored")
+        text = p.read_text(encoding="utf-8")
+        assert "car_a: ValueError: bad" in text and "boom" in text and "x.zip::car_b" in text
+        assert (out / "batch_failed_S.txt").read_text(encoding="utf-8").split() == ["car_a", "x.zip::car_b"]
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

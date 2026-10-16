@@ -27,6 +27,19 @@ All notable changes are documented here.
   but AC does not store a rim width, so the converter still omits it (4 schema
   errors on any car).
 
+### Second log: failed cars only
+
+A batch with failures now also writes `batch_failed_<stamp>.log` (a summary line per
+failed car, then the full traceback of each) and `batch_failed_<stamp>.txt` (one car
+name per line) beside the master log. Nothing is written when no car failed.
+
+### Option: skip cars already in the output folder
+
+"Skip cars already in the output folder" (off by default) leaves out a car whose output
+folder already holds its `.svj.json` (and a GLB when GLBs are requested), so an
+interrupted batch can be resumed. The scan also shows how many cars the output folder
+already has. It is off by default because a re-run is how fixes reach existing files.
+
 ### CSP extended-physics switches kept
 
 Every `[_EXTENSION*]` section of the data files (`TORQUE_MODE_EX`, `FIX_PROGRESSIVE_RATE`,

@@ -60,6 +60,19 @@ def _ts_long() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _already_converted(car_out: Path, need_glb: bool) -> bool:
+    """True when a car's output folder already holds its SVJ (and, when GLBs are
+    wanted, at least one GLB beside it or in meshes/)."""
+    try:
+        if not car_out.is_dir() or not any(car_out.glob("*.svj.json")):
+            return False
+        if need_glb:
+            return any(car_out.glob("*.glb")) or any((car_out / "meshes").glob("*.glb"))
+        return True
+    except OSError:
+        return False
+
+
 def _open_in_explorer(path: str) -> None:
     p = Path(path)
     if not p.exists():
@@ -384,6 +397,31 @@ def _write_master_log(out_root: Path, stamp: str,
     return p
 
 
+def _write_failed_log(out_root: Path, stamp: str, root_folder: Path,
+                      failed: dict[str, tuple[str, str]], summary_line: str) -> Optional[Path]:
+    """Second log with the failed cars only (name, reason, traceback), plus a plain
+    ``batch_failed_<stamp>.txt`` with one car name per line to select them again.
+    Returns the log path, or None when nothing failed."""
+    if not failed:
+        return None
+    hdr = "═" * 70
+    lines: list[str] = [
+        hdr, "AC → SVJ  BATCH — FAILED CARS ONLY",
+        f"Converter  : v{CONV_VER}   SVJ spec : {SVJ_VERSION}",
+        f"Cars folder: {root_folder}", f"Output     : {out_root}",
+        f"Failed     : {len(failed)}   ({summary_line})", hdr, "",
+        "Summary:",
+    ]
+    lines += [f"  {name}: {reason}" for name, (reason, _tb) in failed.items()]
+    for name, (reason, tb) in failed.items():
+        lines += ["", "─" * 70, f"  CAR: {name}", f"  {reason}", "─" * 70, tb.rstrip()]
+    p = out_root / f"batch_failed_{stamp}.log"
+    p.write_text("\n".join(lines), encoding="utf-8")
+    (out_root / f"batch_failed_{stamp}.txt").write_text(
+        "\n".join(failed) + "\n", encoding="utf-8")
+    return p
+
+
 # ── Main Application ──────────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -555,6 +593,11 @@ class App(tk.Tk):
             variable=self._b_lod_var,
             state="normal" if _KN5 else "disabled",
         ).pack(side="left", padx=4)
+        self._b_skip_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opts, text="Skip cars already in the output folder",
+            variable=self._b_skip_var,
+        ).pack(side="left", padx=4)
         if not _KN5:
             ttk.Label(opts, text="(kn5_reader unavailable)",
                       foreground="gray").pack(side="left")
@@ -616,11 +659,18 @@ class App(tk.Tk):
         encrypted   += [c.label for c in zipped if not c.has_data and c.has_acd]
         self._car_tree.load(convertible)
         self._b_filt_var.set("")
+        out_dir = self._b_out_var.get().strip()
+        done = 0
+        if out_dir and Path(out_dir).is_dir():
+            done = sum(1 for n in convertible
+                       if _already_converted(Path(out_dir) / n.split("::", 1)[-1], False))
         parts: list[str] = []
         if convertible:
             n_zip = sum(1 for c in zipped if c.has_data)
             parts.append(f"✓ {len(convertible)} convertible car(s)"
                          + (f" ({n_zip} in archives)" if n_zip else ""))
+        if done:
+            parts.append(f"{done} already in the output folder")
         if encrypted:
             parts.append(
                 f"⚠ {len(encrypted)} encrypted — Content Manager → Unpack Data first")
@@ -676,6 +726,7 @@ class App(tk.Tk):
                 self._b_flat_var.get(),
                 self._b_dmg_var.get(),
                 self._b_lod_var.get(),
+                self._b_skip_var.get(),
             ),
             daemon=True,
         ).start()
@@ -687,7 +738,8 @@ class App(tk.Tk):
                       include_skins: bool, selected: list[str],
                       flat_meshes: bool = False,
                       include_damage: bool = False,
-                      highest_lod_only: bool = False) -> None:
+                      highest_lod_only: bool = False,
+                      skip_existing: bool = False) -> None:
         # flat_meshes: put the GLBs beside the JSON instead of in meshes/
         mesh_sub = "" if flat_meshes else "meshes"
         q   = self._q
@@ -743,9 +795,18 @@ class App(tk.Tk):
             ]
             all_car_logs: dict[str, list[str]] = {}
             ok = errors = skipped = 0
+            failed: dict[str, tuple[str, str]] = {}
             stopped = False
 
             for i, src in enumerate(car_dirs):
+                if skip_existing and _already_converted(out_root / out_names[i],
+                                                        convert_glb and _KN5):
+                    msg = f"⊘ Skipped — already in the output folder: {out_names[i]}"
+                    put("b_prog", (i + 1) / len(car_dirs), f"{i+1}/{len(car_dirs)}")
+                    put("b_log", msg)
+                    all_car_logs[out_names[i]] = [msg]
+                    skipped += 1
+                    continue
                 _zip_tmp: Optional[str] = None
                 if isinstance(src, ArchiveCar):
                     # extracted just before conversion, removed right after
@@ -897,6 +958,8 @@ class App(tk.Tk):
                     csv_rows.append(
                         f"{car_path.name},,,,,,,,,,,,,,ERROR")
                     errors += 1
+                    _label = src.label if isinstance(src, ArchiveCar) else car_path.name
+                    failed[_label] = (f"{type(ex).__name__}: {ex}", error_detail)
 
                 finally:
                     # Always write the per-car log
@@ -930,6 +993,10 @@ class App(tk.Tk):
             put("b_log", f"✓ {summary_line}")
             put("b_log", f"✓ Output folder : {out_root}")
             put("b_log", f"✓ Master log    : {master_log.name}")
+            failed_log = _write_failed_log(out_root, stamp, root, failed, summary_line)
+            if failed_log is not None:
+                put("b_log", f"⚠ Failed cars   : {failed_log.name}  ({len(failed)} car(s); "
+                             f"names in {failed_log.with_suffix('.txt').name})")
             put("b_log", f"✓ Batch summary : batch_summary.csv")
 
             lbl = "Stopped" if stopped else "Done"
