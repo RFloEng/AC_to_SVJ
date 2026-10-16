@@ -28,6 +28,14 @@ def test_audit_classifies_data_and_kn5():
         T._write(root / "fixed_car" / "unencrypted" / "m_decrypted.kn5", T._car_nodes())
         (root / "fixed_car" / "data").mkdir()
         (root / "fixed_car" / "data" / "car.ini").write_text("[HEADER]\n", encoding="utf-8")
+        for n, log in (("log_failed", "FILE: a.kn5\n[error] Could not resolve a working per-car salt\n"),
+                       ("log_fixed", "FILE: a.kn5\n[error] Could not resolve a working per-car salt\n"),
+                       ("log_plain", "FILE: a.kn5\n[warn] No CSP v1 envelope was found\n")):
+            (root / n / "unencrypted").mkdir(parents=True)
+            (root / n / "data").mkdir()
+            (root / n / "unencrypted" / "decrypt_log.txt").write_text(
+                "header\n" + log, encoding="utf-8")
+        (root / "log_fixed" / "unencrypted" / "a_decrypted.kn5").write_bytes(b"k")
         with zipfile.ZipFile(root / "dl.zip", "w") as z:
             z.writestr("zcar/data.acd", b"x")
         rows = {r["name"]: r for r in audit_folder(root, check_kn5=True)}
@@ -37,6 +45,10 @@ def test_audit_classifies_data_and_kn5():
         assert rows["enc_car"]["kn5"] == "encrypted_no_copy"
         assert rows["fixed_car"]["kn5"] == "encrypted_copy_found"
         assert rows["dl.zip::zcar"]["data"] == "needs_unpack" and rows["dl.zip::zcar"]["source"] == "archive"
+        assert rows["log_failed"]["decrypt_log"] == "failed"
+        assert rows["log_fixed"]["decrypt_log"] == "recovered"
+        assert rows["log_plain"]["decrypt_log"] == "plain"
+        assert rows["open_car"]["decrypt_log"] == "no_log"
         # without the KN5 check nothing reads the models
         assert {r["kn5"] for r in audit_folder(root)} == {"not_checked"}
 
@@ -54,7 +66,8 @@ def test_reports_list_the_cars_to_repair_later():
         assert p["kn5_encrypted"].read_text(encoding="utf-8").split() == ["c"]
         assert p["unreadable"].read_text(encoding="utf-8").split() == ["x.rar"]
         assert p["csv"].read_text(encoding="utf-8").count("\n") >= 5
-        assert p["counts"] == {"cars": 3, "ready": 1, "need_unpack": 1, "kn5_encrypted": 1, "unreadable": 1}
+        assert p["counts"] == {"cars": 3, "ready": 1, "need_unpack": 1, "kn5_encrypted": 1,
+                                "decrypt_failed": 0, "unreadable": 1}
         # nothing to list: no empty files
         q = write_reports(rows[:1], Path(t) / "o", "S")
         assert set(q) == {"csv", "counts"}

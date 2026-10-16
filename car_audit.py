@@ -5,6 +5,8 @@ For every car folder, and every car inside a .zip / .rar / .7z next to them:
 
 * **data**: ``unpacked`` (a ``data/`` folder with ini files), ``needs_unpack`` (only an
   encrypted ``data.acd``) or ``no_data``;
+* **decrypt_log**: what a KN5 decrypt tool's ``unencrypted/decrypt_log.txt`` says
+  (``failed`` / ``recovered`` / ``plain`` / ``no_log``), fast;
 * **kn5** (optional, reads the model files, slow on a big folder): ``clean``,
   ``encrypted_copy_found`` (an unencrypted copy was found, see docs/ENCRYPTED_CARS.md),
   ``encrypted_no_copy`` or ``no_kn5``.
@@ -49,6 +51,36 @@ def _kn5_state(car: Path) -> str:
     return "encrypted_copy_found" if skipped else "clean"
 
 
+_SALT_ERROR = "Could not resolve a working per-car salt"
+
+
+def _decrypt_log_state(car: Path) -> str:
+    """Read ``unencrypted/decrypt_log.txt`` (left by a KN5 decrypt tool).
+
+    ``failed``: some KN5 was reported protected and has no ``*_decrypted.kn5``;
+    ``recovered``: a protected KN5 was rebuilt; ``plain``: nothing protected was
+    reported; ``no_log``: no such log.  Small text files only, so it is fast.
+    """
+    d = car / "unencrypted"
+    log = d / "decrypt_log.txt"
+    try:
+        if not log.is_file():
+            return "no_log"
+        text = log.read_text(encoding="utf-8", errors="replace")
+        have = {f.name.lower() for f in d.glob("*_decrypted.kn5")}
+    except OSError:
+        return "no_log"
+    failed = recovered = False
+    for block in text.split("\nFILE: ")[1:]:
+        name = block.split("\n", 1)[0].strip()
+        stem = name[:-4] if name.lower().endswith(".kn5") else name
+        if f"{stem}_decrypted.kn5".lower() in have:
+            recovered = True
+        elif _SALT_ERROR in block:
+            failed = True
+    return "failed" if failed else ("recovered" if recovered else "plain")
+
+
 def _looks_like_car(d: Path) -> bool:
     try:
         return ((d / "data").is_dir() or (d / "data.acd").is_file()
@@ -71,16 +103,17 @@ def audit_folder(root: Path, check_kn5: bool = False,
         if progress:
             progress(i + 1, total, d.name)
         rows.append({"name": d.name, "source": "folder", "data": _data_state(d),
-                     "kn5": _kn5_state(d) if check_kn5 else "not_checked", "note": ""})
+                     "kn5": _kn5_state(d) if check_kn5 else "not_checked",
+                     "decrypt_log": _decrypt_log_state(d), "note": ""})
     for j, a in enumerate(archived):
         if progress:
             progress(len(cars) + j + 1, total, a.label)
         data = "unpacked" if a.has_data else ("needs_unpack" if a.has_acd else "no_data")
         rows.append({"name": a.label, "source": "archive", "data": data,
-                     "kn5": "not_checked", "note": ""})
+                     "kn5": "not_checked", "decrypt_log": "", "note": ""})
     for msg in problems:
         rows.append({"name": msg.split(":")[0], "source": "archive", "data": "unreadable",
-                     "kn5": "not_checked", "note": msg})
+                     "kn5": "not_checked", "decrypt_log": "", "note": msg})
     return rows
 
 
@@ -92,13 +125,16 @@ def write_reports(rows: list[dict], out_dir: Path, stamp: Optional[str] = None) 
     paths: dict = {}
     p = out_dir / f"cars_audit_{stamp}.csv"
     with open(p, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["name", "source", "data", "kn5", "note"])
+        w = csv.DictWriter(f, fieldnames=["name", "source", "data", "kn5", "decrypt_log", "note"],
+                           restval="")
         w.writeheader()
         w.writerows(rows)
     paths["csv"] = p
     for key, label, pick in (
             ("need_unpack", "cars_need_unpack", lambda r: r["data"] == "needs_unpack"),
             ("kn5_encrypted", "cars_kn5_encrypted", lambda r: r["kn5"] == "encrypted_no_copy"),
+            ("decrypt_failed", "cars_kn5_decrypt_failed",
+             lambda r: r.get("decrypt_log") == "failed"),
             ("unreadable", "cars_unreadable_archives", lambda r: r["data"] == "unreadable")):
         names = [r["name"] for r in rows if pick(r)]
         if names:
@@ -111,6 +147,7 @@ def write_reports(rows: list[dict], out_dir: Path, stamp: Optional[str] = None) 
                      and r["kn5"] in ("not_checked", "clean", "encrypted_copy_found")),
         "need_unpack": sum(1 for r in rows if r["data"] == "needs_unpack"),
         "kn5_encrypted": sum(1 for r in rows if r["kn5"] == "encrypted_no_copy"),
+        "decrypt_failed": sum(1 for r in rows if r.get("decrypt_log") == "failed"),
         "unreadable": sum(1 for r in rows if r["data"] == "unreadable"),
     }
     return paths

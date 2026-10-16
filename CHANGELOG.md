@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Audit reads decrypt logs
+
+- The cars-folder audit now reads `unencrypted/decrypt_log.txt` (written by a KN5
+  decrypt tool): new `decrypt_log` column (`failed` / `recovered` / `plain` /
+  `no_log`) and a `cars_kn5_decrypt_failed_*.txt` list of cars whose protected KN5
+  was not recovered. Text files only, so it is fast (no KN5 reading).
+
 ### SVJ v0.99.2 alignment
 
 - **Target version** `0.97` → `0.99.2`.

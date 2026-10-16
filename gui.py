@@ -718,8 +718,10 @@ class App(tk.Tk):
                              f"{c['need_unpack']} need unpacking"
                              + (f", {c['kn5_encrypted']} with an encrypted KN5 and no clean copy"
                                 if check_kn5 else "")
+                             + (f", {c['decrypt_failed']} with a KN5 the decrypt tool could not recover"
+                                if c["decrypt_failed"] else "")
                              + (f", {c['unreadable']} unreadable archive(s)" if c["unreadable"] else ""))
-                for key in ("csv", "need_unpack", "kn5_encrypted", "unreadable"):
+                for key in ("csv", "need_unpack", "kn5_encrypted", "decrypt_failed", "unreadable"):
                     if key in paths:
                         put("b_log", f"✓ {paths[key].name}  →  {paths[key].parent}")
                 put("b_prog", 1.0, "audit done")
