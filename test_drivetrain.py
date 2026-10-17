@@ -117,6 +117,13 @@ def _dt(text: str) -> dict:
     return parse_drivetrain(parse_ini(text))
 
 
+def test_number_with_a_double_decimal_point_typo():
+    from ac_parsers import _num
+    assert _num("2.58.0") == 2.58 and _num("0.59.0") == 0.59
+    assert _num("2.530      (2.52)") == 2.53           # annotation still fine
+    assert _num("1,2,3") is None and _num("1.2.3.4") is None
+
+
 def test_awd_section_parsed_and_normalised():
     dt = _dt(AWD_INI)
     awd = dt["awd"]

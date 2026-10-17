@@ -995,6 +995,24 @@ _DAMAGE_TOKENS = frozenset({"damage", "damaged", "crash", "crashed", "dmg",
                             "dent", "dents", "wreck", "wrecked"})
 
 
+_CRASH_NAME = re.compile(r"dama|damm|dmg|crash|wreck|(?:^|[^a-z])dents?(?:[^a-z]|$)")
+_NOT_CRASH = re.compile(r"(?:no|non|un)[_ -]?(?:dama|damm|dmg)")
+
+
+def has_crash_normal(mat) -> bool:
+    """True when a ``*_damage*`` shader material's ``txNormal`` is the dent map.
+
+    Some mods point ``txNormal`` of the body paint at a crash normal map
+    (``DAMAGE_NM.dds``): flat except for the dents, which the game fades in with
+    the damage mask.  A static GLB would show the dents on the intact car.
+    """
+    n = (mat.tx_normal or "").lower()
+    # substring match: modders write normaldamage, DAMAMGE_NM, damage_chassis_NM ...;
+    # nodamage_NM / undamaged_NM are the intact car's normal map
+    return ("damage" in (mat.shader or "").lower() and bool(n)
+            and bool(_CRASH_NAME.search(n)) and not _NOT_CRASH.search(n))
+
+
 def damage_texture_names(model: "Kn5Model") -> set[str]:
     """
     Names of textures that exist only for the crashed / damaged state.
@@ -1007,8 +1025,10 @@ def damage_texture_names(model: "Kn5Model") -> set[str]:
     same file as ``txDiffuse``) is never reported.
     """
     used = {n for m in model.materials
-            for n in (m.tx_diffuse, m.tx_normal, m.tx_detail, m.tx_normal_detail) if n}
+            for n in (m.tx_diffuse, None if has_crash_normal(m) else m.tx_normal,
+                      m.tx_detail, m.tx_normal_detail) if n}
     slot = {n for m in model.materials for n in (m.tx_damage, m.tx_damage_mask) if n}
+    slot |= {m.tx_normal for m in model.materials if has_crash_normal(m)}
     named = {t.name for t in model.textures
              if any(tok in _DAMAGE_TOKENS for tok in _NAME_SPLIT.split(t.name.lower()))}
     return (slot | named) - used
@@ -1324,7 +1344,8 @@ def kn5_to_glb(
         if has_tex:
             pbr.baseColorTexture = pygltflib.TextureInfo(index=d_idx)
         gmat = pygltflib.Material(name=name, pbrMetallicRoughness=pbr)
-        if embed_textures and kn5_mat.tx_normal and kn5_mat.tx_normal in tex_idx:
+        if (embed_textures and kn5_mat.tx_normal and kn5_mat.tx_normal in tex_idx
+                and (include_damage_textures or not has_crash_normal(kn5_mat))):
             gmat.normalTexture = pygltflib.NormalMaterialTexture(
                 index=tex_idx[kn5_mat.tx_normal]
             )

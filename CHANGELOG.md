@@ -4,6 +4,25 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Numbers with a stray second decimal point
+
+- `WHEELBASE=2.58.0`, `CG_LOCATION=0.59.0`, `RADIUS=0.281.5` ... (typos in some mods;
+  AC itself reads the leading number) were rejected, so the converter fell back to a
+  2.6 m wheelbase / 50 % weight split and the mesh was displaced from the physics
+  frame (gr2_simca_rallye2: wheels 0.22 to 0.25 m off). They now read as 2.58, 0.59,
+  0.281. About 20 cars in a large install carry such values (suspensions.ini,
+  tyres.ini); regenerate them.
+
+### Crash normal maps no longer baked into the intact car
+
+- Many mods (about 45 % of the damage-shader materials in a large install) put the
+  dent normal map (`DAMAGE_NM.dds`, `normaldamage.dds`, `DAMAMGE_NM.dds`...) in the
+  `txNormal` slot of the `*_damage*` body-paint shader; the game fades it in with the
+  damage mask, but the exported GLB showed the dents on the intact car. Such a normal
+  map is now skipped (and left out of the GLB) unless "Include crash/damage textures"
+  is ticked. `nodamage_NM`-style names are the intact normal map and are kept.
+  Cars converted before this need their GLBs regenerated.
+
 ### Audit reads decrypt logs
 
 - The cars-folder audit now reads `unencrypted/decrypt_log.txt` (written by a KN5

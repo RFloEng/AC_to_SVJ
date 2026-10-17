@@ -684,6 +684,33 @@ def test_damage_textures_left_out_by_default():
     assert "damage textures left out" in K.format_export_report(rep)
 
 
+def test_crash_normal_map_in_the_normal_slot_is_not_used():
+    # some mods put the dent normal map in txNormal of a *_damage* shader: the game fades
+    # it in with the damage mask, a static GLB would show the dents on the intact car
+    mats = [("PAINT", "ksPerPixelMultiMap_damage_dirt", {},
+             {"txDiffuse": "skin.png", "txNormal": "DAMAGE_NM.png"}),
+            ("PLATE", "ksPerPixelNM", {},
+             {"txDiffuse": "skin.png", "txNormal": "plate_NM.png"})]
+    for i, name in enumerate(("normaldamage.png", "DAMAMGE_NM.png", "nodamage_NM.png")):
+        mats.append((f"M{i}", "ksPerPixelMultiMap_damage_dirt", {},
+                     {"txDiffuse": "skin.png", "txNormal": name}))
+    tex = [("skin.png", noisy_png()), ("DAMAGE_NM.png", noisy_png()),
+           ("plate_NM.png", noisy_png()), ("normaldamage.png", noisy_png()),
+           ("DAMAMGE_NM.png", noisy_png()), ("nodamage_NM.png", noisy_png())]
+    root = N("ROOT", children=[N("A", "mesh")])
+    with tempfile.TemporaryDirectory() as t:
+        g, _ = _export(root, Path(t), materials=mats, textures=tex)
+        g_all, _ = _export(root, Path(t), materials=mats, textures=tex,
+                           include_damage_textures=True)
+    by = lambda gl, n: next(m for m in gl.materials if m.name == n)
+    assert by(g, "PAINT").normalTexture is None
+    assert by(g, "PLATE").normalTexture is not None              # a real normal map stays
+    assert "DAMAGE_NM.png" not in {im.name for im in g.images}
+    assert by(g, "M0").normalTexture is None and by(g, "M1").normalTexture is None
+    assert by(g, "M2").normalTexture is not None                 # nodamage_NM is the intact one
+    assert by(g_all, "PAINT").normalTexture is not None          # asked for: kept
+
+
 # --- output file names --------------------------------------------------------
 
 def test_car_stem_is_filesystem_safe():

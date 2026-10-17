@@ -63,13 +63,17 @@ def parse_lut(text: str) -> list[list[float]]:
 _LEAD_NUM = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(?=\s|\(|$)")
 
 
+_DOUBLE_DOT = re.compile(r"^\s*([-+]?\d+\.\d+)\.\d+\s*$")
+
+
 def _num(v) -> Optional[float]:
     """
     float(v), tolerating a trailing annotation: AC authors write things like
     ``WHEELBASE=2.530      (2.52)``.  A bare float() rejects that and the caller
     falls back to its default (a wrong 2.6 m wheelbase).  Only a number followed
     by whitespace, a parenthesis or the end counts, so a vector such as ``1,2,3``
-    is still rejected.  None when v holds no usable number.
+    is still rejected.  A typo with a second decimal point (``2.58.0``, ``0.59.0``)
+    reads as its first two parts (2.58, 0.59).  None when v holds no usable number.
     """
     try:
         return float(v)
@@ -77,6 +81,9 @@ def _num(v) -> Optional[float]:
         pass
     if isinstance(v, str):
         m = _LEAD_NUM.match(v)
+        if m:
+            return float(m.group(1))
+        m = _DOUBLE_DOT.match(v)
         if m:
             return float(m.group(1))
     return None
