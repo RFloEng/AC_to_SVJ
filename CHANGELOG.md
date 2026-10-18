@@ -4,6 +4,18 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Speed
+
+Output is unchanged (GLBs byte-identical, SVJ identical apart from the timestamp).
+
+- **Tire plots are only rendered when wanted.** They were drawn (about 2 s per car)
+  even with "Include tire comparison PNGs" unticked; `build_svj(include_plots=False)` /
+  `run_bench(plots=False)` skip them: 2 s to 0.2 s per car for the SVJ part.
+- **Uncompressed DDS textures decode about 14x faster** (numpy instead of Pillow's
+  per-pixel Python loop; verified byte-identical on 217 textures and synthetic masks).
+- **DDS to PNG results are cached** by content, so the LODs and skins of a car that
+  share a texture convert it once.
+
 ### Numbers with a stray second decimal point
 
 - `WHEELBASE=2.58.0`, `CG_LOCATION=0.59.0`, `RADIUS=0.281.5` ... (typos in some mods;

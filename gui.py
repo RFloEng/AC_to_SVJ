@@ -927,6 +927,7 @@ class App(tk.Tk):
                         meshes_subdir=mesh_sub,
                         include_damage_textures=include_damage,
                         highest_lod_only=highest_lod_only,
+                        include_plots=include_plots,
                     )
                     svj  = _clean(svj)
                     stem = _car_stem(svj, car_path.name)

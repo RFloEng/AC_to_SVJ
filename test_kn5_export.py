@@ -711,6 +711,59 @@ def test_crash_normal_map_in_the_normal_slot_is_not_used():
     assert by(g_all, "PAINT").normalTexture is not None          # asked for: kept
 
 
+# --- speed-ups must not change the output ------------------------------------
+
+def _dds_header(w, h, bits, masks):
+    import struct
+    hdr = struct.pack("<4sIIIIIII44xII4s5I", b"DDS ", 124, 0x100f, h, w, 0, 0, 0, 32,
+                      0x41 if masks[3] else 0x40, b"", bits, *masks)
+    return hdr[:128].ljust(128, b"\x00")
+
+
+def test_fast_dds_rgb_decoder_matches_pillow():
+    from PIL import DdsImagePlugin as D, Image
+    fast, orig = D.DdsRgbDecoder.decode, K._orig_dds_rgb_decode
+    if fast is orig:
+        return                                       # patch not applied on this Pillow
+
+    def dec(raw, f):
+        D.DdsRgbDecoder.decode = f
+        try:
+            im = Image.open(io.BytesIO(raw))
+            im.load()
+            return im
+        finally:
+            D.DdsRgbDecoder.decode = fast
+    rng = np.random.RandomState(3)
+    for bits, masks in ((24, (0xff0000, 0xff00, 0xff, 0)),
+                        (32, (0xff0000, 0xff00, 0xff, 0xff000000)),
+                        (16, (0xf800, 0x7e0, 0x1f, 0)), (16, (0xf00, 0xf0, 0xf, 0xf000)),
+                        (8, (0xff, 0, 0, 0)), (32, (0x3ff, 0xffc00, 0x3ff00000, 0xc0000000))):
+        raw = _dds_header(23, 11, bits, masks) + rng.bytes(23 * 11 * bits // 8)
+        a, b = dec(raw, orig), dec(raw, fast)
+        assert a.mode == b.mode and a.tobytes() == b.tobytes(), (bits, masks)
+
+
+def test_dds_png_cache_reuses_the_conversion():
+    from PIL import Image
+    raw = _dds_header(8, 8, 24, (0xff0000, 0xff00, 0xff, 0)) + bytes(range(192))
+    K._PNG_CACHE.clear()
+    first = K._dds_to_png(raw)
+    assert K._dds_to_png(raw) is first                         # second call: cache hit
+    assert Image.open(io.BytesIO(first[0])).size == (8, 8)
+    other = K._dds_to_png(raw[:-1] + b"\x01")
+    assert other is not first and len(K._PNG_CACHE) == 2
+
+
+def test_tire_plots_can_be_skipped_without_changing_the_fit():
+    from tire_lab import ACTyreParams, run_bench
+    p = ACTyreParams()
+    full, lean = run_bench(p), run_bench(p, plots=False)
+    assert full.lateral_png[:4] == bytes([137]) + b"PNG" and lean.lateral_png == b""
+    assert full.fit_lateral == lean.fit_lateral
+    assert full.fit_longitudinal == lean.fit_longitudinal
+
+
 # --- output file names --------------------------------------------------------
 
 def test_car_stem_is_filesystem_safe():

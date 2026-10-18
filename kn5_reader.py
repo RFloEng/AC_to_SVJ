@@ -1060,6 +1060,85 @@ def format_export_report(r: dict) -> str:
     ])
 
 
+# -- DDS decoding speed -------------------------------------------------------
+# Pillow decodes an uncompressed bit-mask DDS (24/32-bit RGB, common in mods) with a
+# pure-Python loop, about a second per 1024x1024 texture.  The numpy version below
+# produces byte-identical pixels (same masks, same float arithmetic, same truncation).
+
+def _fast_dds_rgb_decode(self, buffer):
+    bitcount, masks = self.args
+    bytecount = bitcount // 8
+    if bitcount % 8 or bytecount not in (1, 2, 3, 4):
+        return _orig_dds_rgb_decode(self, buffer)
+    n = self.state.xsize * self.state.ysize
+    raw = self.fd.read(n * bytecount)
+    if len(raw) != n * bytecount:                      # truncated file: leave it to Pillow
+        self.fd.seek(-len(raw), 1)
+        return _orig_dds_rgb_decode(self, buffer)
+    b = np.frombuffer(raw, dtype=np.uint8).reshape(n, bytecount).astype(np.uint32)
+    value = np.zeros(n, dtype=np.uint32)
+    for i in range(bytecount):
+        value |= b[:, i] << np.uint32(8 * i)
+    out = np.empty((n, len(masks)), dtype=np.uint8)
+    for i, mask in enumerate(masks):
+        offset = 0
+        if mask != 0:
+            while mask >> (offset + 1) << (offset + 1) == mask:
+                offset += 1
+        total = mask >> offset
+        if total:
+            ch = (value & np.uint32(mask)) >> np.uint32(offset)
+            out[:, i] = ((ch.astype(np.float64) / total) * 255).astype(np.uint8)
+        else:
+            out[:, i] = 0
+    self.set_as_raw(out.tobytes())
+    return -1, 0
+
+
+try:
+    from PIL import DdsImagePlugin as _dds_plugin
+    _orig_dds_rgb_decode = _dds_plugin.DdsRgbDecoder.decode
+    _dds_plugin.DdsRgbDecoder.decode = _fast_dds_rgb_decode
+except Exception:                                      # noqa: BLE001  (older/newer Pillow)
+    pass
+
+
+# DDS -> PNG results by content hash: LOD B/C/D and the skins of one car reuse the same
+# textures, so each is decoded and PNG-encoded once.  Bounded so a long batch stays small.
+_PNG_CACHE: dict = {}
+_PNG_CACHE_BYTES = 0
+_PNG_CACHE_LIMIT = 256 * 1024 * 1024
+
+
+def _dds_to_png(raw: bytes):
+    """``(png_bytes, bimodal_alpha or None)`` for DDS bytes; raises on a bad file."""
+    global _PNG_CACHE_BYTES
+    import hashlib
+    key = hashlib.blake2b(raw, digest_size=16).digest()
+    hit = _PNG_CACHE.get(key)
+    if hit is not None:
+        return hit
+    from PIL import Image as PILImage
+    # AC textures can be very large (e.g. 8192x12288 = 100 M px).  PIL's
+    # decompression-bomb guard is for untrusted web images; KN5 textures are trusted.
+    PILImage.MAX_IMAGE_PIXELS = None
+    pil_img = PILImage.open(io.BytesIO(raw))
+    bimodal = None
+    if "A" in pil_img.mode:
+        a = np.asarray(pil_img)[:, :, 3].ravel()
+        extreme = float((a <= 10).sum() + (a >= 245).sum())
+        bimodal = extreme / len(a) > 0.85
+    out_buf = io.BytesIO()
+    pil_img.save(out_buf, format="PNG")
+    res = (out_buf.getvalue(), bimodal)
+    if len(res[0]) < _PNG_CACHE_LIMIT // 4:
+        while _PNG_CACHE and _PNG_CACHE_BYTES + len(res[0]) > _PNG_CACHE_LIMIT:
+            _PNG_CACHE_BYTES -= len(_PNG_CACHE.pop(next(iter(_PNG_CACHE)))[0])
+        _PNG_CACHE[key] = res
+        _PNG_CACHE_BYTES += len(res[0])
+    return res
+
+
 def blinn_to_roughness(exponent: float, intensity: float = 1.0) -> float:
     """
     AC's Blinn-Phong specular -> glTF roughness.
@@ -1219,20 +1298,9 @@ def kn5_to_glb(
         mime = "image/png"
         if raw[:4] == b"DDS ":
             try:
-                from PIL import Image as PILImage
-                # AC textures can be very large (e.g. 8192×12288 = 100 M px).
-                # PIL's decompression-bomb guard is intended for untrusted web
-                # images; local KN5 textures are trusted, so disable the limit.
-                PILImage.MAX_IMAGE_PIXELS = None
-                buf = io.BytesIO(raw)
-                pil_img = PILImage.open(buf)
-                if "A" in pil_img.mode:
-                    a = np.asarray(pil_img)[:, :, 3].ravel()
-                    extreme = float((a <= 10).sum() + (a >= 245).sum())
-                    tex_bimodal[name] = extreme / len(a) > 0.85
-                out_buf = io.BytesIO()
-                pil_img.save(out_buf, format="PNG")
-                img_data = out_buf.getvalue()
+                img_data, bimodal = _dds_to_png(raw)
+                if bimodal is not None:
+                    tex_bimodal[name] = bimodal
             except Exception:
                 return -1
         elif raw[:3] == b"\xff\xd8\xff":

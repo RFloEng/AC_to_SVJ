@@ -1065,7 +1065,7 @@ def build_corner(corner_id: str, susp_axle: dict,
 
 def fit_tyre_axle_section(
         tyres_ini_dict: dict, section: str, axle: str, log: list,
-        data_dir: Optional[Path] = None,
+        data_dir: Optional[Path] = None, plots: bool = True,
 ) -> tuple[Optional[dict], Optional[dict], Optional[BenchResult]]:
     """
     Returns (mf52_block, mf62_block, BenchResult).
@@ -1079,7 +1079,7 @@ def fit_tyre_axle_section(
     if p.source == "defaults":
         log.append(f"  ⚠ {axle} [{section}]: no usable params — Pacejka blocks omitted")
         return None, None, None
-    result = run_bench(p)
+    result = run_bench(p, plots)
     log.append(
         f"  ✓ {axle} [{section}]: MF5.2/MF6.2 fit from {p.source}  "
         f"lat R²={result.fit_lateral['r2']:.4f}  "
@@ -1102,9 +1102,13 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               apply_graphics_pitch: bool = False,
               include_damage_textures: bool = False,
               highest_lod_only: bool = False,
+              include_plots: bool = True,
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
+
+    ``include_plots=False`` skips rendering the tire comparison PNGs (the slowest part
+    when no GLB is made); the SVJ is identical, the bench results carry empty PNGs.
 
     Parameters
     ----------
@@ -1338,8 +1342,10 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         name_r = tire_set_name("rear",  suffix, tw_r, asp_r, rim_r)
 
         # Pacejka fit — returns (mf52, mf62, BenchResult)
-        pf52, pf62, br_f = fit_tyre_axle_section(t, f_sec, f"front{suffix}", log, data_dir)
-        pr52, pr62, br_r = fit_tyre_axle_section(t, r_sec, f"rear{suffix}",  log, data_dir)
+        pf52, pf62, br_f = fit_tyre_axle_section(t, f_sec, f"front{suffix}", log, data_dir,
+                                                     include_plots)
+        pr52, pr62, br_r = fit_tyre_axle_section(t, r_sec, f"rear{suffix}",  log, data_dir,
+                                                     include_plots)
         if pair_idx == 0:
             pacejka_front    = pf62  # MF62 is now the primary reference
             pacejka_rear     = pr62

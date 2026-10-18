@@ -727,11 +727,21 @@ class BenchResult:
     mf62_lateral_png:  Optional[bytes] = None   # AC vs MF6.2 lateral (all Fz/γ)
 
 
-def run_bench(p: ACTyreParams) -> BenchResult:
-    """Run the full AC → Pacejka pipeline. All outputs in-memory."""
+def run_bench(p: ACTyreParams, plots: bool = True) -> BenchResult:
+    """Run the full AC → Pacejka pipeline. All outputs in-memory.
+
+    ``plots=False`` skips the (slow) comparison PNGs: the fits, and so every SVJ block,
+    are identical; the PNG fields come back empty.
+    """
     data  = sweep(p)
     fit_y = _fit_lat(data, p.FZ0)
     fit_x = _fit_long(data, p.FZ0)
+    if not plots:
+        return BenchResult(
+            params=p, fit_lateral=fit_y, fit_longitudinal=fit_x,
+            lateral_png=b"", longitudinal_png=b"", mu_vs_fz_png=b"",
+            n_sweep_points=len(data["lateral"]) + len(data["longitudinal"]),
+        )
     return BenchResult(
         params=p,
         fit_lateral=fit_y,
