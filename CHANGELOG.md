@@ -4,6 +4,22 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Schema fixes
+
+Found by validating about 100 installed cars against the standard's validator; all of
+them now validate.
+
+- `assets.meshes[]` no longer carries a `lod` key (the schema forbids extra keys); the LOD
+  stays in the entry's `description`. Mesh ids are cut to `[a-z0-9_]` (a name such as
+  `uno_turbo_mk2_1.0.1` was rejected).
+- A one-point aero curve (a constant in AC) is written as the same value at `x` and
+  `x + 1`; the schema wants two points. An empty curve writes no map.
+- A tyre with a sidewall taller than its width (odd mod data) gets no `size_code` and no
+  `aspect_ratio`, and a rim that is not 10 to 30 inches no `rim_diameter_code`; the
+  section heights stay in `dimensions`.
+- Movable-part ids use the standard's canonical names (`hatch` becomes `tailgate`,
+  `bonnet` becomes `hood`).
+
 ### Unified suspension (SVJ 0.100, spec 25)
 
 - The corner-based `suspension` section is deprecated in the standard. `build_svj` now

@@ -91,6 +91,7 @@ from ac_parsers import (
     _parse_vec3, _f, _i, _m, _b, _first, _resolve_lut,
 )
 from svj_migrate import migrate as migrate_suspension
+from svj_migrate.naming import canonical_part_id
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench,
     build_svj_pacejka_block, build_svj_mf62_block,
@@ -1306,24 +1307,35 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         rim_in  = round(rim_rv * 2 / 0.0254) - 1  # Kunos +1 inch convention
         rim_d   = round(rim_in * 0.0254, 4)           # nominal diameter (m)
         overall = round(rim_d + 2 * tw * asp, 4)
-        return {
-            "description":    f"AC-derived tire {round(tw*1000)}/{round(asp*100)}R{rim_in} "
-                              f"({label}{compound_suffix})",
-            "size_code":      f"{round(tw*1000)}/{round(asp*100)}R{rim_in}",
+        size_code = f"{round(tw*1000)}/{round(asp*100)}R{rim_in}"
+        dims = {
+            "section_width":     round(tw, 4),
+            "aspect_ratio":      round(asp, 3),
+            "rim_diameter_code": rim_in,
+            "overall_diameter":  overall,
+            "section_height":    round(tw * asp, 4),
+        }
+        out = {
+            "description":    f"AC-derived tire {size_code} ({label}{compound_suffix})",
+            "size_code":      size_code,
             "source":         "estimated",
-            "dimensions": {
-                "section_width":     round(tw, 4),
-                "aspect_ratio":      round(asp, 3),
-                "rim_diameter_code": rim_in,
-                "overall_diameter":  overall,
-                "section_height":    round(tw * asp, 4),
-            },
+            "dimensions":     dims,
             "rim": {"diameter": round(rim_in * 0.0254, 4),
                     "width_nominal": round(tw, 4)},
             "pressure": 210000.0,
             "_est": True,
             "_note": "Tire dimensions from tyres.ini. See pacejka (MF62) and pacejka_mf52 for force models.",
         }
+        # The schema takes a size code like 205/55R16 and an aspect ratio up to 1; a tyre
+        # whose sidewall is taller than it is wide (the data of some mods) gets neither,
+        # the heights stay in `dimensions`.
+        if not re.fullmatch(r"\d{3}/\d{2}R\d{2}", size_code):
+            del out["size_code"]
+        if asp > 1.0:
+            del dims["aspect_ratio"]
+        if not 10 <= rim_in <= 30:                  # not a rim size: bad or odd data
+            del dims["rim_diameter_code"]
+        return out
 
     log.append("─── Tire Lab (tyres.ini → Pacejka MF 5.2) ──────────────")
     ts_front_default = "tire_front_default"
@@ -1411,16 +1423,26 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
     if ae.get("drs"):
         log.append("✓ DRS parsed")
 
-    def _lut_to_aero_map(lut, coeff_name: str) -> dict:
-        """AC LUT (list of [aoa_deg, coeff]) → SVJ 0.95 aero_map (1D)."""
+    def _lut_to_aero_map(lut, coeff_name: str) -> Optional[dict]:
+        """AC LUT (list of [aoa_deg, coeff]) → SVJ 0.95 aero_map (1D); None if empty.
+
+        The schema wants two points at least: a one-point LUT (a constant in AC) is
+        written as the same value at x and x + 1, which is the same curve."""
+        vals = [{"x": float(p[0]), "value": float(p[1])} for p in (lut or [])
+                if isinstance(p, (list, tuple)) and len(p) >= 2]
+        if not vals:
+            return None
+        note = "x values are degrees (AC convention)."
+        if len(vals) == 1:
+            vals.append({"x": vals[0]["x"] + 1.0, "value": vals[0]["value"]})
+            note += " One-point curve in AC (constant): the point is repeated at x + 1."
         return {
             "type": "1d",
             "x_axis": "pitch_angle",
-            "values": [{"x": float(p[0]), "value": float(p[1])} for p in (lut or [])
-                       if isinstance(p, (list, tuple)) and len(p) >= 2],
+            "values": vals,
             "interpolation": "linear",
             "extrapolation": "clamp",
-            "_note": "x values are degrees (AC convention).",
+            "_note": note,
         }
 
     # Build per-component list. Body component absorbs global BODY coefficients
@@ -1469,12 +1491,12 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 pass
         if coeffs:
             wc["coefficients"] = coeffs
-        if wing.get("aoa_cl_curve"):
-            wc.setdefault("maps", {})["Cl_vs_angle"] = _lut_to_aero_map(
-                wing["aoa_cl_curve"], "Cl")
-        if wing.get("aoa_cd_curve"):
-            wc.setdefault("maps", {})["Cd_vs_angle"] = _lut_to_aero_map(
-                wing["aoa_cd_curve"], "Cd")
+        _amap = _lut_to_aero_map(wing.get("aoa_cl_curve"), "Cl")
+        if _amap:
+            wc.setdefault("maps", {})["Cl_vs_angle"] = _amap
+        _amap = _lut_to_aero_map(wing.get("aoa_cd_curve"), "Cd")
+        if _amap:
+            wc.setdefault("maps", {})["Cd_vs_angle"] = _amap
         aero_components.append(wc)
         if drs_wing_ref is None and ae.get("drs") is not None:
             drs_idx = ae["drs"].get("wing_index")
@@ -1845,7 +1867,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 # beside it when meshes_subdir is "" (URIs are relative to the JSON).
                 _mp        = f"{meshes_subdir}/" if meshes_subdir else ""
                 glb_uri    = f"{_mp}{kn5_path.stem}.glb"
-                mesh_id    = kn5_path.stem.lower().replace("-", "_").replace(" ", "_")
+                mesh_id    = _mesh_slug(kn5_path.stem)
 
                 # Build assets.meshes list — LOD A first, then B/C/D entries
                 mesh_entries = [
@@ -1856,13 +1878,12 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                     }
                 ]
                 for lod_label, lod_path in kn5_lods[1:]:
-                    lod_id  = lod_path.stem.lower().replace("-", "_").replace(" ", "_")
+                    lod_id  = _mesh_slug(lod_path.stem)
                     lod_uri = f"{_mp}{lod_path.stem}.glb"
                     mesh_entries.append({
                         "id":          lod_id,
                         "uri":         lod_uri,
                         "description": f"Converted from {lod_path.name} (LOD {lod_label})",
-                        "lod":         lod_label,
                     })
 
                 svj["assets"] = {"meshes": mesh_entries}
@@ -2095,7 +2116,12 @@ _SIDE_TOKENS = {"lf": "fl", "fl": "fl", "rf": "fr", "fr": "fr", "lr": "rl", "lb"
                 "right": "r"}
 
 
-def _part_id(node: str, taken: set) -> str:
+def _mesh_slug(stem: str) -> str:
+    """Mesh id for assets.meshes (the schema allows ``[a-z0-9_]``)."""
+    return re.sub(r"[^a-z0-9_]", "_", stem.lower()) or "mesh"
+
+
+def _part_id(node: str, taken: set, canonical: bool = True) -> str:
     """Body id for an AC node: lowercase, ``[a-z0-9_]``, side token moved to the end
     (``DOOR_LF`` -> ``door_fl``), unique within ``taken``."""
     toks = [t for t in re.split(r"[^a-z0-9]+", node.lower()) if t]
@@ -2106,6 +2132,8 @@ def _part_id(node: str, taken: set) -> str:
             toks.pop(i)
             break
     base = "_".join(toks + ([side] if side else [])) or "part"
+    if canonical:
+        base = canonical_part_id(base) or base      # hatch -> tailgate, bonnet -> hood
     if base[0].isdigit():
         base = "part_" + base
     pid, n = base, 2
@@ -2201,7 +2229,8 @@ def movable_parts_to_svj(svj: dict, parts: list, mesh_id: str,
         return 0, 0, {}
     pl = svj.setdefault("poses", [{"id": "closed"}])
     for anim, vals in poses.items():
-        pl.append({"id": _part_id(anim, {p["id"] for p in pl}), "values": vals})
+        pl.append({"id": _part_id(anim, {p["id"] for p in pl}, canonical=False),
+                   "values": vals})
     return nb, nj, rename
 
 

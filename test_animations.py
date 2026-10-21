@@ -221,6 +221,8 @@ def test_part_ids_put_the_side_last_and_stay_unique():
     assert C._part_id("WIPER_R", taken) == "wiper_r"
     assert C._part_id("3d_hood", taken) == "part_3d_hood"
     assert C._part_id("__", taken) == "part"
+    assert C._part_id("HATCH", taken) == "tailgate" and C._part_id("Bonnet", taken) == "hood"
+    assert C._mesh_slug("DM_Uno-Turbo mk2.0.1") == "dm_uno_turbo_mk2_0_1"
 
 
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
