@@ -385,6 +385,29 @@ def test_csp_physics_flags_are_kept_as_written():
     assert "tyres.ini" not in f and _csp_physics_flags({}) == {}
 
 
+def test_repeated_bump_stop_points_stay_a_rising_curve():
+    sec = parse_ini("[S]\nTYPE=DWB\nBASEY=-0.14\nTRACK=1.5\nSPRING_RATE=20000\nDAMP_BUMP=1500\nDAMP_REBOUND=3000\n" + WB)["S"]
+    sa = parse_suspension_axle(sec)
+    sa["bumpstop_table"] = {"stack": 1.0, "curve": [(0.0, 0.0), (0.01, 10.0), (0.02, 40.0),
+                                                     (0.02, 40.0), (0.02, 40.0)]}
+    sa["packer_range"] = 0.03
+    c = build_corner("RL", sa, 2.6, 1.5, 1.5, 0.5, 0.15, 800, 0.6, "x", 0.3, 0.4, {})
+    assert c["bump_stop"]["rate_curve"] == [[0.0, 0.0], [0.01, 10.0], [0.02, 40.0]]
+
+
+def test_zero_front_track_is_written_as_a_small_positive_value():
+    from converter import build_svj, read_car_directory
+    src = Path(__file__).parent / "test_car"
+    if not src.is_dir():
+        return
+    ini, cm, ctrl, dd = read_car_directory(src)
+    ini = dict(ini)
+    ini["suspensions.ini"] = ini["suspensions.ini"].replace("TRACK=", "TRACK=0 ;", 1)
+    svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl, unified_suspension=False)
+    assert 0 < svj["chassis"]["track_front"] <= 0.01
+    assert any("one front wheel" in l for l in log)
+
+
 def test_unified_suspension_output():
     """build_svj writes bodies, joints and wheel_stations (spec 25) and no corner section;
     unified_suspension=False keeps the deprecated section."""

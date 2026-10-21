@@ -18,8 +18,9 @@ All notable changes are documented here.
 
 ### Schema fixes
 
-Found by validating about 100 installed cars against the standard's validator; all of
-them now validate.
+Found by validating installed cars against the standard's validator. All 1,956 cars in
+the install were converted and checked: 1,941 validate, 15 cannot be read (encrypted
+or no data), and the 2 invalid ones are fixed below.
 
 - `assets.meshes[]` no longer carries a `lod` key (the schema forbids extra keys); the LOD
   stays in the entry's `description`. Mesh ids are cut to `[a-z0-9_]` (a name such as
@@ -29,6 +30,10 @@ them now validate.
 - A tyre with a sidewall taller than its width (odd mod data) gets no `size_code` and no
   `aspect_ratio`, and a rim that is not 10 to 30 inches no `rim_diameter_code`; the
   section heights stay in `dimensions`.
+- A bump-stop table that repeats its last point (`rss_formula_hybrid_x_2026`) no longer
+  gives a curve with equal x values; repeated points are dropped.
+- A car with `TRACK=0` (`benz_motorwagen`, one front wheel) writes `track_front` 0.01 m
+  with a warning in the log; the schema needs a positive value.
 - Movable-part ids use the standard's canonical names (`hatch` becomes `tailgate`,
   `bonnet` becomes `hood`).
 

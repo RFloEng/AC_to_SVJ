@@ -1050,7 +1050,12 @@ def build_corner(corner_id: str, susp_axle: dict,
         # CSP: with these tables PACKER_RANGE is the bump-stop gap (corner springs)
         _pr = susp_axle.get("packer_range")
         _gap = _pr if (_pr and 0 < _pr < 0.5) else (susp_axle.get("bumpstop") or {}).get("up")
-        _curve = [[round(d, 5), round(f * _bt["stack"], 2)] for d, f in _bt["curve"]]
+        _curve = []
+        for d, f in _bt["curve"]:
+            pt = [round(d, 5), round(f * _bt["stack"], 2)]
+            if _curve and pt[0] <= _curve[-1][0]:       # a curve must rise in x: AC tables
+                continue                                # may repeat their last point
+            _curve.append(pt)
         if _gap is not None and 0 < _gap < 0.5:
             # deflection past the gap -> force (the table starts at 0 | 0)
             corner["bump_stop"] = {"gap": round(_gap, 4), "type": "rubber",
@@ -1567,6 +1572,9 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
 
     track_f = _f(sf.get("TRACK") or sf.get("TRACK_WIDTH") or sf.get("FRONT_TRACK"), 1.5)
     track_r = _f(sr.get("TRACK") or sr.get("TRACK_WIDTH") or sr.get("REAR_TRACK"),  1.5)
+    if not track_f > 0:               # TRACK=0: a car with one front wheel; the schema needs > 0
+        track_f = 0.01
+        log.append("⚠ Front track is 0 (one front wheel): written as 0.01 m, the schema needs a positive value")
 
     # ── Electronics (controllers) ────────────────────────────────────────────
     electronics: dict = {}
