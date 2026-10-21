@@ -1,9 +1,23 @@
 # Third-Party Notices
 
-This project is an **original implementation**. No third-party source code is
-bundled or copied into this repository. This file credits the external
+This project is an **original implementation**, with one exception: `svj_migrate/`
+(below). This file credits the external
 algorithms, standards, and libraries the code relies on, and the projects whose
 *ideas* were reimplemented here (with their licence notices, below).
+
+## Code bundled under Apache-2.0
+
+### RFloEng/SVJ-standard-vehicle-json
+
+<https://github.com/RFloEng/SVJ-standard-vehicle-json> (`tools/`, commit 045bb40,
+Apache License 2.0, the same project whose standard this converter writes)
+
+`svj_migrate/` is a copy of the standard's suspension migration
+(`migrate_suspension.py`) with the modules it needs (`multibody_check.py`,
+`suspension_view.py`, and the part-name tables of `constraints_check.py` as
+`naming.py`). Only the import lines changed; each file names its source. It turns the
+corner-based `suspension` section into the unified model (bodies, joints, elements,
+`wheel_stations`) of spec 25. To update it, copy the files again from `tools/`.
 
 ## Ideas reimplemented from MIT-licensed projects
 

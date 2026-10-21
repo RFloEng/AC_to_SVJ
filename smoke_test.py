@@ -32,6 +32,11 @@ def main():
     if not test_audit.run():
         print("\n✗ folder audit checks failed")
         sys.exit(1)
+    print("\n──── ANIMATION CHECKS ────")
+    import test_animations
+    if not test_animations.run():
+        print("\n✗ animation checks failed")
+        sys.exit(1)
     print("\n──── SUSPENSION CHECKS ────")
     import test_suspension
     if not test_suspension.run():
@@ -47,7 +52,8 @@ def main():
     print(f"cm metadata      : {'yes' if cm_meta else 'no'}")
 
     svj, log, bench = build_svj(ini_files, cm_meta,
-                                data_dir=data_dir, ctrl_files=ctrl_files)
+                                data_dir=data_dir, ctrl_files=ctrl_files,
+                                unified_suspension=False)
     svj = _clean(svj)
 
     print("\n──── LOG ────")
@@ -219,7 +225,8 @@ def main():
     if xsara_dir.is_dir():
         print("\n──── v0.98 REAL-CAR CHECKS (Citroën Xsara Kit Car) ────")
         ini2, cm2, ctrl2, dd2 = read_car_directory(xsara_dir)
-        svj2, log2, _ = build_svj(ini2, cm2, data_dir=dd2, ctrl_files=ctrl2)
+        svj2, log2, _ = build_svj(ini2, cm2, data_dir=dd2, ctrl_files=ctrl2,
+                                unified_suspension=False)
         svj2 = _clean(svj2)
         x_ac2 = svj2.get("x_assettocorsa", {})
         rc = {

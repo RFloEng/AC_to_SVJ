@@ -79,6 +79,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 from ac_parsers import (
     parse_ini, parse_lut,
     parse_engine, parse_drivetrain, parse_suspension_axle,
@@ -88,6 +90,7 @@ from ac_parsers import (
     parse_controller_ini, parse_setup_ranges,
     _parse_vec3, _f, _i, _m, _b, _first, _resolve_lut,
 )
+from svj_migrate import migrate as migrate_suspension
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench,
     build_svj_pacejka_block, build_svj_mf62_block,
@@ -98,14 +101,14 @@ try:
     from kn5_reader import (scan_kn5_nodes, map_ac_nodes_to_svj,
                             map_ac_nodes_to_svj_parts,
                             find_car_kn5, find_car_kn5_lods, resolve_car_kn5,
-                            kn5_to_glb, kn5_all_lods_to_glbs)
+                            kn5_to_glb, kn5_all_lods_to_glbs, describe_moving_parts)
     _KN5_AVAILABLE = True
 except ImportError:
     _KN5_AVAILABLE = False
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-SVJ_VERSION = "0.99.4"
+SVJ_VERSION = "0.100"
 SVJ_SPEC    = "SVJ"
 CONV_VER    = "0.9.1"
 REPO_URL    = "https://github.com/RFloEng/SVJ-standard-vehicle-json"
@@ -1103,12 +1106,18 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               include_damage_textures: bool = False,
               highest_lod_only: bool = False,
               include_plots: bool = True,
+              include_animations: bool = True,
+              unified_suspension: bool = True,
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
 
     ``include_plots=False`` skips rendering the tire comparison PNGs (the slowest part
     when no GLB is made); the SVJ is identical, the bench results carry empty PNGs.
+
+    ``unified_suspension`` (default) writes the suspension as bodies, joints and elements
+    plus ``wheel_stations`` (SVJ 0.100, spec 25); False keeps the deprecated corner-based
+    ``suspension`` section.
 
     Parameters
     ----------
@@ -1916,6 +1925,29 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                                f"x_assettocorsa.graphics, not applied to the mesh (the SVJ "
                                f"frame is level; AC's pitch compensates its physics rake)")
 
+                # Doors, wipers, shifter: the joints of animations/*.ksanim become movable
+                # parts (SVJ 24): a body, a joint, a pose.  The GLB carries the animation.
+                if include_animations:
+                    try:
+                        _moving = describe_moving_parts(kn5_path, car_path,
+                                                        placement=_placement)
+                        if _moving:
+                            svj.setdefault("x_assettocorsa", {})["moving_parts"] = {
+                                "frame": "kn5_model",
+                                "note": ("pivot_model/axis_model: KN5 model axes "
+                                         "(left-handed, Y up), before GRAPHICS_OFFSET; "
+                                         "rest pose = frame 0; fps assumed"),
+                                "parts": _moving,
+                            }
+                            _nb, _nj, _ren = movable_parts_to_svj(svj, _moving, mesh_id,
+                                                                  bound=set(node_rename))
+                            node_rename.update(_ren)
+                            log.append(f"✓ Moving parts: {len(_moving)} animated node(s); "
+                                       f"{_nb} movable part(s), {_nj} joint(s) → "
+                                       f"constraints / poses")
+                    except Exception as _mv_err:                # noqa: BLE001
+                        log.append(f"⚠ Moving parts skipped: {_mv_err}")
+
                 # ── GLB export (only when caller supplies an output dir) ───
                 if glb_output_dir is not None:
                     try:
@@ -1927,7 +1959,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                             node_names=node_rename, kn5_override=kn5_override,
                             placement=_placement, reports=_reports,
                             include_damage_textures=include_damage_textures,
-                            highest_lod_only=highest_lod_only)
+                            highest_lod_only=highest_lod_only,
+                            include_animations=include_animations)
                         for lbl, out_p in exported.items():
                             log.append(f"✓ GLB LOD {lbl} written → {_mp}{out_p.name}")
                         _ra = _reports.get("A") or {}
@@ -1951,6 +1984,15 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
 
             except Exception as _kn5_err:
                 log.append(f"⚠ KN5 scan skipped ({kn5_path.name}): {_kn5_err}")
+
+    if unified_suspension:
+        try:
+            svj, _notes = migrate_suspension(svj)
+            log.append(f"✓ Suspension written as bodies, joints and elements "
+                       f"({len(svj.get('wheel_stations', []))} wheel stations, "
+                       f"{len(svj.get('constraints', []))} constraints; spec 25)")
+        except Exception as _mig_err:                           # noqa: BLE001
+            log.append(f"⚠ Unified suspension skipped, corner section kept: {_mig_err}")
 
     log.append(f"✓ SVJ v{SVJ_VERSION} output built (converter v{CONV_VER})")
     return svj, log, bench_results
@@ -2044,6 +2086,123 @@ _FS_INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _FS_RESERVED = frozenset({"con", "prn", "aux", "nul",
                           *(f"com{i}" for i in range(1, 10)),
                           *(f"lpt{i}" for i in range(1, 10))})
+
+
+# ─── Movable parts (SVJ 24) ─────────────────────────────────────────────────
+
+_SIDE_TOKENS = {"lf": "fl", "fl": "fl", "rf": "fr", "fr": "fr", "lr": "rl", "lb": "rl",
+                "rl": "rl", "rr": "rr", "rb": "rr", "l": "l", "left": "l", "r": "r",
+                "right": "r"}
+
+
+def _part_id(node: str, taken: set) -> str:
+    """Body id for an AC node: lowercase, ``[a-z0-9_]``, side token moved to the end
+    (``DOOR_LF`` -> ``door_fl``), unique within ``taken``."""
+    toks = [t for t in re.split(r"[^a-z0-9]+", node.lower()) if t]
+    side = ""
+    for i, t in enumerate(toks):
+        if t in _SIDE_TOKENS and i > 0:
+            side = _SIDE_TOKENS[t]
+            toks.pop(i)
+            break
+    base = "_".join(toks + ([side] if side else [])) or "part"
+    if base[0].isdigit():
+        base = "part_" + base
+    pid, n = base, 2
+    while pid in taken:
+        pid, n = f"{base}_{n}", n + 1
+    taken.add(pid)
+    return pid
+
+
+def _z_to_quat(axis) -> list:
+    """Unit quaternion (x, y, z, w) turning +Z onto ``axis``."""
+    ax = np.asarray(axis, dtype="f8")
+    ax = ax / np.linalg.norm(ax)
+    c = np.cross([0.0, 0.0, 1.0], ax)
+    w = 1.0 + float(ax[2])
+    if w < 1e-9:                                     # axis = -Z
+        return [1.0, 0.0, 0.0, 0.0]
+    q = np.array([c[0], c[1], c[2], w])
+    q /= np.linalg.norm(q)
+    return [round(float(v), 7) for v in q]
+
+
+# Suspension, wheel and steering animations are the suspension travelling, not parts
+# that open or move on their own: the suspension model covers them.
+_NOT_MOVABLE = re.compile(r"^(anim_)?(susp|hub|wheel|steer|upright|disc|caliper|brake)",
+                          re.I)
+
+
+def movable_parts_to_svj(svj: dict, parts: list, mesh_id: str,
+                         bound: Optional[set] = None) -> tuple:
+    """Write doors, flaps, wipers ... as SVJ 24 movable parts.
+
+    One ``mass_bodies`` entry per hinge or slide (``x_derived``, mass 0: AC carries no
+    masses), a marker on the chassis and on the body at the pivot, a ``joint`` constraint
+    (``revolute`` / ``translational``, +Z = the axis, range from the rest pose to the
+    animation's end) and one pose per animation.  Parts with no SVJ-frame pivot or of
+    ``general`` type, suspension / wheel nodes and nodes in ``bound`` (already carrying
+    another visual binding) are left to ``x_assettocorsa.moving_parts``.  Returns
+    ``(bodies, joints, {AC node name: glTF node name})``.
+    """
+    chassis = svj.setdefault("chassis", {})
+    bodies = chassis.setdefault("mass_bodies", [])
+    markers = chassis.setdefault("markers", {})
+    cons = svj.setdefault("constraints", [])
+    taken = {b["id"] for b in bodies} | {c["id"] for c in cons}
+    rename: dict = {}
+    poses: dict = {}
+    done = set()
+    nb = nj = 0
+    for m in parts:
+        piv, ax = m.get("pivot_svj"), m.get("axis_svj")
+        if (m["joint"] not in ("revolute", "prismatic") or not piv or not ax
+                or m["node"] in done or m["node"] in (bound or ())
+                or _NOT_MOVABLE.match(m["node"])):
+            continue
+        rev = m["joint"] == "revolute"
+        extent = m.get("angle_rad") if rev else m.get("travel_m")
+        if not extent:
+            continue
+        done.add(m["node"])
+        pid = _part_id(m["node"], taken)
+        jid = ("hinge_" if rev else "slide_") + pid
+        taken.add(jid)
+        quat = _z_to_quat(ax)
+        frame = {"position": list(piv), "orientation": quat}
+        markers[f"{pid}_hinge"] = dict(frame)
+        glb_node = f"SVJ::body::{pid}"
+        bodies.append({
+            "id": pid, "name": m["node"], "category": "attachment",
+            "description": (f"Animated node {m['node']} of the AC model "
+                            f"({m['animation']}.ksanim); AC gives no mass or inertia."),
+            "mass": 0, "position": list(piv), "parent": "chassis", "x_derived": True,
+            "markers": {"hinge": dict(frame)},
+            "visual": {"mesh_ref": mesh_id, "node": glb_node},
+        })
+        cons.append({
+            "id": jid, "type": "joint",
+            "joint_type": "revolute" if rev else "translational",
+            "body_a": "chassis", "marker_a": f"{pid}_hinge",
+            "body_b": pid, "marker_b": "hinge",
+            "range": {"min": 0.0, "max": round(float(extent), 5)},
+        })
+        poses.setdefault(m["animation"], {})[jid] = round(float(extent), 5)
+        rename[m["node"]] = glb_node
+        nb += 1
+        nj += 1
+    if not nb:
+        for k in ("mass_bodies", "markers"):
+            if not chassis.get(k):
+                chassis.pop(k, None)
+        if not cons:
+            svj.pop("constraints", None)
+        return 0, 0, {}
+    pl = svj.setdefault("poses", [{"id": "closed"}])
+    for anim, vals in poses.items():
+        pl.append({"id": _part_id(anim, {p["id"] for p in pl}), "values": vals})
+    return nb, nj, rename
 
 
 def _visual_placement(svj: dict, gfx_off: Optional[list],

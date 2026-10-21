@@ -1139,6 +1139,40 @@ def _dds_to_png(raw: bytes):
     return res
 
 
+# -- animations (ksanim) -> glTF ------------------------------------------------
+
+def _rot_to_quat(R: np.ndarray) -> np.ndarray:
+    """Quaternion (x, y, z, w) of a 3x3 rotation matrix (column-vector convention)."""
+    t = R[0, 0] + R[1, 1] + R[2, 2]
+    if t > 0:
+        s = math.sqrt(t + 1.0) * 2.0
+        q = [(R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s, s / 4]
+    else:
+        i = int(np.argmax(np.diag(R)))
+        j, k = (i + 1) % 3, (i + 2) % 3
+        s = math.sqrt(1.0 + R[i, i] - R[j, j] - R[k, k]) * 2.0
+        q = [0.0, 0.0, 0.0, (R[k, j] - R[j, k]) / s]
+        q[i] = s / 4
+        q[j] = (R[j, i] + R[i, j]) / s
+        q[k] = (R[k, i] + R[i, k]) / s
+    q = np.array(q, dtype="f8")
+    return q / np.linalg.norm(q)
+
+
+def _decompose_gltf_matrix(m: list[float]):
+    """(translation, quaternion xyzw, scale) of a column-major glTF matrix, or None when
+    it holds a mirror or shear (which TRS cannot express)."""
+    M = np.array(m, dtype="f8").reshape(4, 4, order="F")
+    t = M[:3, 3].copy()
+    sc = np.linalg.norm(M[:3, :3], axis=0)
+    if np.any(sc < 1e-9):
+        return None
+    R = M[:3, :3] / sc
+    if np.linalg.det(R) < 0 or np.abs(R.T @ R - np.eye(3)).max() > 1e-3:
+        return None
+    return t, _rot_to_quat(R), sc
+
+
 def blinn_to_roughness(exponent: float, intensity: float = 1.0) -> float:
     """
     AC's Blinn-Phong specular -> glTF roughness.
@@ -1166,6 +1200,8 @@ def kn5_to_glb(
     placement: Optional[dict] = None,
     report: Optional[dict] = None,
     verbose: bool = False,
+    animations: Optional[dict] = None,
+    anim_fps: float = 30.0,
 ) -> bytes:
     """
     Convert a KN5 file to a self-contained GLB (binary glTF).
@@ -1193,6 +1229,10 @@ def kn5_to_glb(
                      txDamageMask and damage-named maps that nothing visible
                      uses).  Default False: they only matter to AC's runtime
                      damage blending, so they are left out of the GLB.
+    animations     : ``{animation: {node name: ksanim.Track}}`` exported as glTF
+                     animations (doors, flaps, wipers ...) on the matching nodes; a
+                     node that is animated gets TRS instead of a matrix (same rest
+                     pose).  ``anim_fps`` sets the playback rate (the files carry none).
     ground_align   : Shift the mesh vertically so the lowest tyre vertex sits on
                      y = 0, the SVJ physics ground (default True).  AC models
                      carry an arbitrary vertical offset, which showed as wheels
@@ -1522,6 +1562,7 @@ def kn5_to_glb(
         }
 
     # -- Build scene nodes (DFS, mirrors KN5 tree) -----------------------------
+    gnode_by_ac: dict[str, int] = {}      # KN5 node name -> glTF node index
     scene = pygltflib.Scene(name=model.name, nodes=[])
     gltf.scenes.append(scene)
     gltf.scene = 0
@@ -1671,6 +1712,7 @@ def kn5_to_glb(
 
         gltf.nodes.append(gnode)
         this_idx = len(gltf.nodes) - 1
+        gnode_by_ac.setdefault(kn5_node.name, this_idx)
 
         if parent_gltf_idx is None:
             scene.nodes.append(this_idx)
@@ -1735,6 +1777,64 @@ def kn5_to_glb(
         else:
             _process_node(model.root, rot_idx, np.diag([-1.0, -1.0, 1.0, 1.0]))
 
+    # -- Animations (doors, flaps, wipers ...) ---------------------------------
+    anim_exported: dict[str, list[str]] = {}
+    for anim_name, tracks in (animations or {}).items():
+        targets = {n: t for n, t in tracks.items() if n in gnode_by_ac}
+        chans: list = []
+        samplers: list = []
+        done: list[str] = []
+        time_acc: dict[int, int] = {}
+        for node_name, tr in targets.items():
+            gi = gnode_by_ac[node_name]
+            gn = gltf.nodes[gi]
+            if gn.matrix is None or gn.mesh is not None:
+                continue
+            dec = _decompose_gltf_matrix(gn.matrix)
+            if dec is None:
+                continue
+            n = tr.frames
+            if n not in time_acc:
+                times = (np.arange(n, dtype="f8") / anim_fps).astype("<f4")
+                bv = _add_buffer_view(times.tobytes())
+                time_acc[n] = _add_accessor(bv, pygltflib.FLOAT, "SCALAR", n,
+                                            [float(times[0])], [float(times[-1])])
+            # AC -> glTF axes: (x, y, z) -> (x, -y, -z), a half turn about X, so a
+            # quaternion (x, y, z, w) becomes (x, -y, -z, w)
+            quat = tr.quat * np.array([1.0, -1.0, -1.0, 1.0])
+            quat = quat / np.linalg.norm(quat, axis=1, keepdims=True)
+            for i in range(1, n):                       # keep slerp on the short way round
+                if float(quat[i] @ quat[i - 1]) < 0:
+                    quat[i] = -quat[i]
+            pos = tr.pos * np.array([1.0, -1.0, -1.0])
+            chan_data = []
+            if np.ptp(quat, axis=0).max() > 1e-6:
+                chan_data.append(("rotation", quat, "VEC4"))
+            if np.ptp(pos, axis=0).max() > 1e-6:
+                chan_data.append(("translation", pos, "VEC3"))
+            if np.ptp(tr.scale, axis=0).max() > 1e-6:
+                chan_data.append(("scale", tr.scale, "VEC3"))
+            if not chan_data:
+                continue
+            # an animated node cannot carry a matrix: switch it to TRS (same rest pose)
+            gn.matrix = None
+            gn.translation = [float(v) for v in dec[0]]
+            gn.rotation = [float(v) for v in dec[1]]
+            gn.scale = [float(v) for v in dec[2]]
+            for path_, arr, typ in chan_data:
+                bv = _add_buffer_view(np.asarray(arr, dtype="<f4").tobytes())
+                out_acc = _add_accessor(bv, pygltflib.FLOAT, typ, n)
+                samplers.append(pygltflib.AnimationSampler(
+                    input=time_acc[n], output=out_acc, interpolation="LINEAR"))
+                chans.append(pygltflib.AnimationChannel(
+                    sampler=len(samplers) - 1,
+                    target=pygltflib.AnimationChannelTarget(node=gi, path=path_)))
+            done.append(node_name)
+        if chans:
+            gltf.animations.append(pygltflib.Animation(
+                name=anim_name, samplers=samplers, channels=chans))
+            anim_exported[anim_name] = done
+
     if ext_used:
         gltf.extensionsUsed = sorted(ext_used)
 
@@ -1764,6 +1864,7 @@ def kn5_to_glb(
             "wheels_moved": list(placement_info["wheels_moved"]),
             "wheels_skipped": list(placement_info["wheels_skipped"]),
             "wheel_deltas": dict(placement_info.get("wheel_deltas", {})),
+            "animations": {k: list(v) for k, v in anim_exported.items()},
             "damage_textures_skipped": len(damage_skipped),
             "damage_textures_skipped_bytes": damage_skipped_bytes,
             "bbox_min": [round(float(v), 4) for v in bmin],
@@ -1775,6 +1876,96 @@ def kn5_to_glb(
         if verbose:
             print(format_export_report(rpt))
     return glb_bytes
+
+
+def describe_moving_parts(kn5_path: Path, car_path: Path,
+                          placement: Optional[dict] = None) -> list[dict]:
+    """Doors, flaps, wipers ...: the joints of a car's ``animations/*.ksanim``.
+
+    One dict per animated node that exists in the KN5: the node, its parent, the
+    animation, the joint (``revolute`` / ``prismatic`` / ``general``) and, in the KN5
+    model axes (left-handed, Y up), the pivot and axis both in the parent node's frame
+    and composed to the model root (``pivot_model`` / ``axis_model``).  A revolute
+    joint carries ``angle_rad`` (the range runs from the rest pose, frame 0, to that
+    angle about ``axis``); a prismatic one ``travel_m``.  Empty when there is none.
+
+    With ``placement`` (the dict ``kn5_to_glb`` takes) each part also carries
+    ``pivot_svj`` / ``axis_svj`` in the SVJ frame (X forward from the front axle, Y to
+    the right, Z down, SAE J670), placed exactly as the exported mesh is.  A revolute
+    part's ``axis_svj`` is the right-handed axis for the POSITIVE angle (the sense of
+    the animation).  Without a usable placement those keys are absent.
+    """
+    from ksanim import ANIM_FPS, joint_from_track, load_car_animations
+    anims = load_car_animations(car_path)
+    if not anims:
+        return []
+    model = parse_kn5(kn5_path)
+    if model.root is None:
+        return []
+    info: dict[str, tuple] = {}              # node name -> (node, parent, world of parent)
+
+    def walk(n, parent, parent_world):
+        info.setdefault(n.name, (n, parent, parent_world))
+        w = parent_world
+        if n.node_type == 1 and n.matrix:
+            w = parent_world @ np.array(n.matrix, dtype="f8").reshape(4, 4).T
+        for c in n.children:
+            walk(c, n, w)
+    walk(model.root, None, np.eye(4))
+
+    # model axes of the KN5 (X to the LEFT, Y up, Z forward: WHEEL_LF has +X) -> SVJ (X
+    # forward, Y right, Z down).  A proper rotation, so rotation senses carry over.  The
+    # mesh is rotated about the lateral axis by the pitch, then shifted by T.
+    T = None
+    th = 0.0
+    if placement is not None:
+        T = placement.get("translation")
+        if T is None:
+            T = _translation_from_wheels(model.root, placement.get("wheel_centers") or {})
+        else:
+            th = math.radians(float(placement.get("pitch_deg", 0.0)))
+    cth, sth = math.cos(th), math.sin(th)
+
+    def _dir_svj(d):
+        x, y, z = (float(v) for v in d)
+        y, z = y * cth - z * sth, z * cth + y * sth
+        return np.array([z, -x, -y])
+
+    out: list[dict] = []
+    for anim, tracks in anims.items():
+        for name, tr in tracks.items():
+            hit = info.get(name)
+            if hit is None:
+                continue
+            node, parent, pw = hit
+            j = joint_from_track(tr)
+            if j is None:
+                continue
+            part = {"node": name, "parent": parent.name if parent is not None else None,
+                    "animation": anim, "fps": ANIM_FPS, "joint": j["type"],
+                    "frames": j["frames"], "pivot": j["pivot"]}
+            for k in ("angle_rad", "travel_m", "axis", "axis_local"):
+                if k in j:
+                    part[k] = j[k]
+            c = pw @ np.array([*j["pivot"], 1.0])
+            part["pivot_model"] = [round(float(v), 5) for v in c[:3]]
+            if "axis" in j:
+                a = pw[:3, :3] @ np.array(j["axis"])
+                nrm = float(np.linalg.norm(a))
+                if nrm > 1e-9:
+                    part["axis_model"] = [round(float(v), 5) for v in a / nrm]
+            if T is not None:
+                d = _dir_svj(c[:3]) + np.array([T[2], 0.0, -T[1]])
+                part["pivot_svj"] = [round(float(v), 5) for v in d]
+                if "axis_model" in part:
+                    a = _dir_svj(part["axis_model"])
+                    part["axis_svj"] = [round(float(v), 5) for v in a]
+                elif part["joint"] == "prismatic" and "axis" in part:
+                    a = pw[:3, :3] @ np.array(part["axis"])
+                    a = _dir_svj(a / np.linalg.norm(a))
+                    part["axis_svj"] = [round(float(v), 5) for v in a]
+            out.append(part)
+    return out
 
 
 # --- Convenience: find the main KN5 / all LODs in an AC car folder -----------
@@ -2013,6 +2204,7 @@ def kn5_all_lods_to_glbs(
     placement: Optional[dict] = None,
     reports: Optional[dict] = None,
     highest_lod_only: bool = False,
+    include_animations: bool = True,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -2039,6 +2231,8 @@ def kn5_all_lods_to_glbs(
     placement     : Exact physics placement, see kn5_to_glb().
     reports       : Optional dict filled with ``{lod_label: export report}``.
     highest_lod_only : Export only LOD A (the highest quality), skipping B-D.
+    include_animations : Export the car's ``animations/*.ksanim`` (doors, wipers, shifter)
+                    as glTF animations (default on).
 
     Returns
     -------
@@ -2053,6 +2247,13 @@ def kn5_all_lods_to_glbs(
     if highest_lod_only:
         lods = lods[:1]
     skins = _find_skins(car_path) if include_skins else []
+    anims = None
+    if include_animations:
+        try:
+            from ksanim import load_car_animations
+            anims = load_car_animations(car_path) or None
+        except Exception:                                      # noqa: BLE001
+            anims = None
     results: dict[str, Path] = {}
     for label, kn5_path in lods:
         out_path = output_dir / f"{kn5_path.stem}.glb"
@@ -2064,6 +2265,7 @@ def kn5_all_lods_to_glbs(
                    node_names=node_names,
                    include_damage_textures=include_damage_textures,
                    ground_align=ground_align, placement=placement,
+                   animations=anims,
                    report=(reports.setdefault(label, {})
                            if reports is not None else None))
         results[label] = out_path

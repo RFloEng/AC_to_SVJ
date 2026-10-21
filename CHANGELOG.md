@@ -4,6 +4,50 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Unified suspension (SVJ 0.100, spec 25)
+
+- The corner-based `suspension` section is deprecated in the standard. `build_svj` now
+  writes the suspension as bodies (`upright_fl`, `upper_wishbone_fl`, `rack`, `wheel_fl`,
+  ...), `joint` constraints with stated types, `spring` / `damper` elements and
+  `wheel_stations[]` (tyre set, brake, alignment, visual binding), plus
+  `anti_roll_bars[]`. `build_svj(unified_suspension=False)` keeps the old section.
+  The file declares 0.100; validation drops the deprecation warning.
+- Done with the standard's own migration, bundled as `svj_migrate/` (Apache-2.0, see
+  `THIRD_PARTY_NOTICES.md`) and run as the last step, so the rest of the converter is
+  unchanged. Everything it creates is `x_derived`; what AC does not give (carrier and arm
+  masses, steering-wheel ratio) is reported, not invented. Wheel-referenced rates are kept
+  as quoted where there are no mounts.
+- 40 random installed cars: no error comes from the suspension. Remaining validation
+  errors are the known ones (`assets.meshes[].lod`, one-point aero maps, tyre size code).
+  Axle-body cars with no link data warn that `axle_rear` is not connected.
+
+### Doors, wipers and other moving parts
+
+- New `ksanim.py` reads `animations/*.ksanim` (per node and frame: quaternion, position,
+  scale, in the node's local frame; frame 0 is the rest pose, 30 fps assumed).
+- **GLB:** the animations are exported as glTF animations (`car_door_l`, `car_wiper`,
+  ...) on the matching nodes, so doors open and wipers sweep in any glTF viewer. An
+  animated node switches from a matrix to TRS (same rest pose). Driver-rig bones and
+  nodes that never move are left out. `kn5_all_lods_to_glbs(include_animations=False)` /
+  `build_svj(include_animations=False)` turn it off; a car without animations exports
+  exactly as before.
+- **SVJ:** `x_assettocorsa.moving_parts` lists each animated node with its joint:
+  `revolute` (hinge: `pivot`, `axis`, `axis_local`, `angle_rad`), `prismatic`
+  (`travel_m`) or `general`, in the parent node's frame and composed to the KN5 model
+  frame (`pivot_model`, `axis_model`; before GRAPHICS_OFFSET). For example the
+  doors of one car turn 70 degrees about the node's local X axis through its origin.
+- **SVJ movable parts (spec 24, now declared as SVJ 0.100):** each hinge or slide becomes a
+  `chassis.mass_bodies[]` entry (`x_derived`, mass 0 because AC gives no mass; `visual`
+  bound to the GLB node `SVJ::body::<id>`), a marker on the chassis and on the body at
+  the pivot (marker +Z = the axis, in the SVJ frame, placed exactly as the mesh is), a
+  `revolute` / `translational` joint `hinge_<part>` / `slide_<part>` ranging from the rest
+  pose to the end of the animation, and one pose per animation (`closed` plus
+  `car_door_l`, ...). Ids follow the naming convention (`DOOR_LF` is `door_fl`). The SVJ
+  validator and the binding check pass; its only new warning is the missing mass.
+  Suspension, hub, wheel and steering animations are not movable parts and stay in
+  `x_assettocorsa.moving_parts`. The KN5 model has X to the left (`WHEEL_LF` is +X), the
+  SVJ frame has Y to the right.
+
 ### Speed
 
 Output is unchanged (GLBs byte-identical, SVJ identical apart from the timestamp).

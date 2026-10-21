@@ -494,17 +494,19 @@ def test_converter_emits_v0992_bindings():
         glb = out / "meshes" / "synthcar.glb"
         assert glb.is_file(), log
         names = {n.name for n in pygltflib.GLTF2().load(str(glb)).nodes}
-    assert svj["_metadata"]["version"] == "0.99.4"
+    assert svj["_metadata"]["version"] == "0.100"
     assert svj["vehicle_info"]["drive_type"] in ("FWD", "RWD", "AWD", "4WD")
-    sus = svj["suspension"]
+    assert "suspension" not in svj                       # unified model (spec 25)
+    st = {w["id"]: w for w in svj["wheel_stations"]}
+    wheels = {b["id"]: b for b in svj["chassis"]["mass_bodies"]}
     assert svj["chassis"]["visual"]["node"] == "SVJ::body::chassis"
-    assert sus["FL"]["visual"]["node"] == "SVJ::suspension::upright_fl"
-    assert sus["FL"]["wheel"]["visual"]["node"] == "SVJ::wheel::wheel_fl"
-    assert sus["RR"]["wheel"]["visual"]["node"] == "SVJ::wheel::wheel_rr"
-    assert "visual" not in sus["FR"] and "visual" not in sus["FR"]["wheel"]
-    bound = [sus["FL"]["visual"]["node"], sus["FL"]["wheel"]["visual"]["node"],
-             sus["RR"]["wheel"]["visual"]["node"], svj["chassis"]["visual"]["node"]]
-    disc = (sus["FL"].get("brake") or {}).get("disc") or {}
+    assert st["FL"]["visual"]["node"] == "SVJ::suspension::upright_fl"
+    assert wheels["wheel_fl"]["visual"]["node"] == "SVJ::wheel::wheel_fl"
+    assert wheels["wheel_rr"]["visual"]["node"] == "SVJ::wheel::wheel_rr"
+    assert "visual" not in st["FR"] and "visual" not in wheels["wheel_fr"]
+    bound = [st["FL"]["visual"]["node"], wheels["wheel_fl"]["visual"]["node"],
+             wheels["wheel_rr"]["visual"]["node"], svj["chassis"]["visual"]["node"]]
+    disc = (st["FL"].get("brake") or {}).get("disc") or {}
     if "visual" in disc:
         bound.append(disc["visual"]["node"])
     for node in bound:

@@ -385,6 +385,34 @@ def test_csp_physics_flags_are_kept_as_written():
     assert "tyres.ini" not in f and _csp_physics_flags({}) == {}
 
 
+def test_unified_suspension_output():
+    """build_svj writes bodies, joints and wheel_stations (spec 25) and no corner section;
+    unified_suspension=False keeps the deprecated section."""
+    from converter import build_svj, read_car_directory, _clean
+    src = Path(__file__).parent / "test_car"
+    if not src.is_dir():
+        return
+    ini, cm, ctrl, dd = read_car_directory(src)
+    old, _, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl, unified_suspension=False)
+    new, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl)
+    assert "suspension" in old and old["_metadata"]["version"] == "0.100"
+    assert "suspension" not in new, "corner section still present"
+    ws = {w["id"]: w for w in new["wheel_stations"]}
+    assert set(ws) == {"FL", "FR", "RL", "RR"}
+    bodies = {b["id"]: b for b in new["chassis"]["mass_bodies"]}
+    for st in ws.values():
+        assert st["wheel_body"] in bodies and st["upright_body"] in bodies
+        assert st["tire"]["set_ref"] and st["brake"]
+    ids = {c["id"] for c in new["constraints"]}
+    assert all(w["steering_joint"] in ids for w in ws.values() if "steering_joint" in w)
+    kinds = {c["type"] for c in new["constraints"]}
+    assert "joint" in kinds and ("spring" in kinds or "damper" in kinds)
+    assert any("Suspension written as bodies" in l for l in log)
+    # same tyre/brake data as the corner section carried
+    co, cn = _clean(old), _clean(new)
+    assert all(cn[k] == co[k] for k in ("tires", "powertrain", "brakes", "aerodynamics"))
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
