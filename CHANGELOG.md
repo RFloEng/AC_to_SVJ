@@ -4,6 +4,18 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Several cars at once
+
+- The batch tab has a **Cars at once** box (default: half the CPUs, at most 3). Above 1,
+  cars are converted in worker processes; a car's log lines appear when it finishes, the
+  progress bar counts finished cars, and Stop cancels the cars not yet started. With 1 it
+  works as before, one car at a time with live log lines.
+- The per-car work moved from `gui.py` to `batch_convert.convert_one` (no tkinter). Output
+  is identical either way: SVJ and GLBs compared on 6 real cars (the SVJ apart from its
+  timestamp). 6 cars with GLBs took 18.6 s one at a time and 11.7 s with 3 workers; a
+  longer batch gains more, since each worker starts once. Each worker holds one car's
+  textures in memory, so lower the number on a machine short of RAM.
+
 ### Schema fixes
 
 Found by validating about 100 installed cars against the standard's validator; all of

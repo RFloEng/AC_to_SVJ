@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import queue
 import shutil
 import subprocess
@@ -36,6 +37,7 @@ from converter import (
 from ac_parsers import parse_ini
 from car_archives import ArchiveCar, extract_car, scan_archive_folder
 from car_audit import audit_folder, write_reports
+from batch_convert import _already_converted, _write_car_log, convert_one
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench, build_svj_pacejka_blocks,
 )
@@ -59,19 +61,6 @@ def _ts() -> str:
 
 def _ts_long() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _already_converted(car_out: Path, need_glb: bool) -> bool:
-    """True when a car's output folder already holds its SVJ (and, when GLBs are
-    wanted, at least one GLB beside it or in meshes/)."""
-    try:
-        if not car_out.is_dir() or not any(car_out.glob("*.svj.json")):
-            return False
-        if need_glb:
-            return any(car_out.glob("*.glb")) or any((car_out / "meshes").glob("*.glb"))
-        return True
-    except OSError:
-        return False
 
 
 def _open_in_explorer(path: str) -> None:
@@ -291,75 +280,6 @@ class LogPane(tk.Frame):
 
 
 # ── File output helpers ───────────────────────────────────────────────────────
-
-def _write_car_log(car_out: Path, stem: str, car_path: Path,
-                   car_log: list[str], bench: dict,
-                   include_plots: bool, convert_glb: bool,
-                   error: Optional[str] = None) -> None:
-    """Write a detailed per-car conversion_log.txt."""
-    hdr = "═" * 70
-    lines: list[str] = [
-        hdr,
-        "AC → SVJ  Conversion Log",
-        f"Converter : v{CONV_VER}   SVJ spec : {SVJ_VERSION}",
-        f"Timestamp : {_ts_long()}",
-        f"Car path  : {car_path}",
-        hdr,
-        "",
-    ]
-
-    if error:
-        lines += [
-            "STATUS: FAILED",
-            "",
-            "ERROR DETAIL:",
-            error,
-        ]
-    else:
-        lines += ["CONVERSION LOG:", ""]
-        lines += car_log
-        lines += [""]
-
-        # Pacejka fit quality table
-        if bench:
-            lines += ["", "─" * 70, "PACEJKA FIT QUALITY", "─" * 70]
-            lines.append(
-                f"  {'Axle':<14}  {'Source':<12}  "
-                f"{'Lat R²':>8}  {'Lat RMSE N':>10}  "
-                f"{'Long R²':>8}  {'Long RMSE N':>11}  {'Fz0 N':>7}"
-            )
-            lines.append("  " + "─" * 68)
-            for axle_key, br in bench.items():
-                p = br.params
-                lines.append(
-                    f"  {axle_key:<14}  {p.source:<12}  "
-                    f"{br.fit_lateral['r2']:>8.4f}  "
-                    f"{br.fit_lateral['rmse_N']:>10.2f}  "
-                    f"{br.fit_longitudinal['r2']:>8.4f}  "
-                    f"{br.fit_longitudinal['rmse_N']:>11.2f}  "
-                    f"{p.FZ0:>7.0f}"
-                )
-
-        # Output file manifest
-        lines += ["", "─" * 70, "OUTPUT FILES", "─" * 70]
-        lines.append(f"  {stem}.svj.json")
-        lines.append(f"  conversion_log.txt  ← this file")
-        if include_plots and bench:
-            for axle_key in bench:
-                tag = axle_key.replace(" ", "_")
-                for suffix in ("lateral", "longitudinal", "mu_vs_fz"):
-                    lines.append(f"  {stem}.tires_{tag}_{suffix}.png")
-        if convert_glb:
-            for sub in ("meshes", ""):
-                glb_dir = car_out / sub if sub else car_out
-                if glb_dir.is_dir():
-                    for g in sorted(glb_dir.glob("*.glb")):
-                        lines.append(f"  {sub + '/' if sub else ''}{g.name}")
-
-    lines += ["", hdr, ""]
-    (car_out / "conversion_log.txt").write_text(
-        "\n".join(lines), encoding="utf-8")
-
 
 def _write_master_log(out_root: Path, stamp: str,
                       root_folder: Path,
@@ -611,6 +531,10 @@ class App(tk.Tk):
             opts, text="Skip cars already in the output folder",
             variable=self._b_skip_var,
         ).pack(side="left", padx=4)
+        ttk.Label(opts, text="Cars at once:").pack(side="left", padx=(12, 2))
+        self._b_workers_var = tk.IntVar(value=max(1, min(3, (os.cpu_count() or 2) // 2)))
+        ttk.Spinbox(opts, from_=1, to=max(2, os.cpu_count() or 2), width=3,
+                    textvariable=self._b_workers_var).pack(side="left")
         if not _KN5:
             ttk.Label(opts, text="(kn5_reader unavailable)",
                       foreground="gray").pack(side="left")
@@ -743,6 +667,12 @@ class App(tk.Tk):
         self._b_run_btn.config(state="disabled" if running else "normal")
         self._b_stop_btn.config(state="normal" if running else "disabled")
 
+    def _workers(self) -> int:
+        try:
+            return max(1, int(self._b_workers_var.get()))
+        except (tk.TclError, ValueError):
+            return 1
+
     def _stop_batch(self) -> None:
         self._stop_event.set()
         self._b_stop_btn.config(state="disabled")
@@ -781,6 +711,7 @@ class App(tk.Tk):
                 self._b_dmg_var.get(),
                 self._b_lod_var.get(),
                 self._b_skip_var.get(),
+                self._workers(),
             ),
             daemon=True,
         ).start()
@@ -793,7 +724,8 @@ class App(tk.Tk):
                       flat_meshes: bool = False,
                       include_damage: bool = False,
                       highest_lod_only: bool = False,
-                      skip_existing: bool = False) -> None:
+                      skip_existing: bool = False,
+                      workers: int = 1) -> None:
         # flat_meshes: put the GLBs beside the JSON instead of in meshes/
         mesh_sub = "" if flat_meshes else "meshes"
         q   = self._q
@@ -852,185 +784,86 @@ class App(tk.Tk):
             failed: dict[str, tuple[str, str]] = {}
             stopped = False
 
+            total = len(car_dirs)
+            jobs: list[tuple[int, dict]] = []
             for i, src in enumerate(car_dirs):
                 if skip_existing and _already_converted(out_root / out_names[i],
                                                         convert_glb and _KN5):
                     msg = f"⊘ Skipped — already in the output folder: {out_names[i]}"
-                    put("b_prog", (i + 1) / len(car_dirs), f"{i+1}/{len(car_dirs)}")
+                    put("b_prog", (i + 1) / total, f"{i+1}/{total}")
                     put("b_log", msg)
                     all_car_logs[out_names[i]] = [msg]
                     skipped += 1
                     continue
-                _zip_tmp: Optional[str] = None
-                if isinstance(src, ArchiveCar):
-                    # extracted just before conversion, removed right after
-                    _zip_tmp = tempfile.mkdtemp(prefix="ac_svj_zip_")
-                    car_path = Path(_zip_tmp) / src.name
-                else:
-                    car_path = src
+                jobs.append((i, {
+                    "src": src, "car_out": out_root / out_names[i],
+                    "include_plots": include_plots,
+                    "convert_glb": bool(convert_glb and _KN5),
+                    "include_skins": include_skins, "mesh_sub": mesh_sub,
+                    "include_damage": include_damage,
+                    "highest_lod_only": highest_lod_only,
+                }))
 
-                # ── Check stop ────────────────────────────────────────────────
-                if self._stop_event.is_set():
-                    stopped = True
-                    put("b_log", "⏹ Batch stopped by user.")
-                    break
+            results: dict[int, dict] = {}
+            workers = max(1, min(int(workers), len(jobs) or 1))
+            if workers <= 1:
+                # one car at a time, in this thread, log lines streamed as they come
+                for i, job in jobs:
+                    if self._stop_event.is_set():
+                        stopped = True
+                        put("b_log", "⏹ Batch stopped by user.")
+                        break
+                    name = (job["src"].name if isinstance(job["src"], ArchiveCar)
+                            else Path(job["src"]).name)
+                    put("b_prog", (i + 1) / total, f"{i+1}/{total}")
+                    put("b_car", name, i + 1, total)
+                    results[i] = convert_one(job, emit=lambda ln: put("b_log", ln))
+            else:
+                # several cars at once in worker processes; a car's lines are shown when
+                # it is finished
+                from concurrent.futures import CancelledError, ProcessPoolExecutor, as_completed
+                put("b_log", f"ℹ Converting {len(jobs)} car(s) with {workers} worker processes")
+                finished = skipped
+                with ProcessPoolExecutor(max_workers=workers) as pool:
+                    futs = {pool.submit(convert_one, job): (i, job) for i, job in jobs}
+                    for fut in as_completed(futs):
+                        if self._stop_event.is_set() and not stopped:
+                            stopped = True
+                            put("b_log", "⏹ Batch stopped by user — waiting for the cars "
+                                         "in progress.")
+                            for f in futs:
+                                f.cancel()
+                        i, job = futs[fut]
+                        try:
+                            r = fut.result()
+                        except CancelledError:
+                            continue
+                        except Exception as ex_:                  # noqa: BLE001
+                            nm = Path(job["src"].name if isinstance(job["src"], ArchiveCar)
+                                      else job["src"]).name
+                            r = {"status": "error", "name": nm, "label": nm, "stem": "",
+                                 "ui": [f"✗ Error: {ex_}"], "car_log": [f"ERROR: {ex_}"],
+                                 "csv": [f"{nm},,,,,,,,,,,,,,ERROR"],
+                                 "error": (f"{type(ex_).__name__}: {ex_}",
+                                           traceback.format_exc())}
+                        results[i] = r
+                        finished += 1
+                        put("b_prog", finished / total, f"{finished}/{total}")
+                        put("b_car", r["name"], finished, total)
+                        for ln in r["ui"]:
+                            put("b_log", ln)
 
-                fraction = (i + 1) / len(car_dirs)
-                put("b_prog", fraction, f"{i+1}/{len(car_dirs)}")
-                put("b_car", car_path.name, i + 1, len(car_dirs))
-
-                car_out = out_root / out_names[i]
-                car_out.mkdir(parents=True, exist_ok=True)
-
-                _glb_tmp: Optional[str] = None
-                glb_dir:  Optional[Path] = None
-                if convert_glb and _KN5:
-                    _glb_tmp = tempfile.mkdtemp(prefix="ac_svj_glb_")
-                    glb_dir  = Path(_glb_tmp)
-
-                car_log_lines: list[str] = []
-                success = False
-                error_detail = ""
-
-                try:
-                    if isinstance(src, ArchiveCar):
-                        put("b_log", f"ℹ Extracting {src.zip_path.name} → {src.name}")
-                        extract_car(src, Path(_zip_tmp), include_skins)
-                    ini_files, cm_meta, ctrl_files, data_dir = \
-                        read_car_directory(car_path)
-
-                    if not ini_files:
-                        note = (cm_meta or {}).get("_data_source", "")
-                        msg  = f"⊘ Skipped — {note}"
-                        put("b_log", msg)
-                        car_log_lines = [msg]
-                        all_car_logs[car_path.name] = car_log_lines
-                        _write_car_log(car_out, car_path.name, car_path,
-                                       car_log_lines, {}, include_plots,
-                                       convert_glb)
-                        skipped += 1
-                        continue
-
-                    # Log ini files found
-                    put("b_log",
-                        f"ℹ Files found: {', '.join(sorted(ini_files.keys()))}")
-                    if ctrl_files:
-                        put("b_log",
-                            f"ℹ Controllers: {', '.join(sorted(ctrl_files.keys()))}")
-
-                    svj, car_log, bench = build_svj(
-                        ini_files, cm_meta,
-                        data_dir=data_dir,
-                        ctrl_files=ctrl_files,
-                        glb_output_dir=glb_dir,
-                        include_skins=include_skins,
-                        meshes_subdir=mesh_sub,
-                        include_damage_textures=include_damage,
-                        highest_lod_only=highest_lod_only,
-                        include_plots=include_plots,
-                    )
-                    svj  = _clean(svj)
-                    stem = _car_stem(svj, car_path.name)
-
-                    # Stream each build_svj log line to the UI
-                    for line in car_log:
-                        put("b_log", line)
-                        car_log_lines.append(line)
-
-                    # ── Write SVJ JSON ────────────────────────────────────────
-                    (car_out / f"{stem}.svj.json").write_text(
-                        json.dumps(svj, indent=2), encoding="utf-8")
-
-                    # ── Copy GLBs ─────────────────────────────────────────────
-                    glb_src = ((glb_dir / mesh_sub if mesh_sub else glb_dir)
-                               if glb_dir else None)
-                    if glb_src is not None and glb_src.is_dir():
-                        mesh_out = car_out / mesh_sub if mesh_sub else car_out
-                        mesh_out.mkdir(exist_ok=True)
-                        for g in glb_src.glob("*.glb"):
-                            shutil.copy2(str(g), str(mesh_out / g.name))
-
-                    # ── Tire plots + CSV ──────────────────────────────────────
-                    if include_plots and bench:
-                        for axle_key, br in bench.items():
-                            tag = axle_key.replace(" ", "_")
-                            (car_out / f"{stem}.tires_{tag}_lateral.png"
-                             ).write_bytes(br.lateral_png)
-                            (car_out / f"{stem}.tires_{tag}_longitudinal.png"
-                             ).write_bytes(br.longitudinal_png)
-                            (car_out / f"{stem}.tires_{tag}_mu_vs_fz.png"
-                             ).write_bytes(br.mu_vs_fz_png)
-                            if br.mf62_camber_png:
-                                (car_out / f"{stem}.tires_{tag}_mf62_camber.png"
-                                 ).write_bytes(br.mf62_camber_png)
-                            if br.mf62_lateral_png:
-                                (car_out / f"{stem}.tires_{tag}_mf62_lateral.png"
-                                 ).write_bytes(br.mf62_lateral_png)
-
-                            vi      = svj.get("vehicle_info", {})
-                            make    = vi.get("make") or ""
-                            year    = vi.get("year") or ""
-                            drive   = vi.get("drive_type") or ""
-                            parts_  = axle_key.split("_", 1)
-                            axle_s  = parts_[0]
-                            cmpnd   = parts_[1] if len(parts_) > 1 else "0"
-                            p       = br.params
-                            fz0_f   = p.FZ0
-                            csv_rows.append(
-                                f"{car_path.name},{stem},{make},{year},{drive},"
-                                f"{cmpnd},{axle_s},"
-                                f"{br.fit_lateral['r2']:.4f},"
-                                f"{br.fit_lateral['rmse_N']:.2f},"
-                                f"{br.fit_longitudinal['r2']:.4f},"
-                                f"{br.fit_longitudinal['rmse_N']:.2f},"
-                                f"{fz0_f:.0f},"
-                                f"{fz0_f:.0f},{p.DY0:.4f},{p.DX0:.4f},"
-                                f"OK"
-                            )
-                            put("b_log",
-                                f"✓ Tire fit [{axle_key}]: "
-                                f"lat R²={br.fit_lateral['r2']:.4f}  "
-                                f"long R²={br.fit_longitudinal['r2']:.4f}")
-
-                    glb_note = ""
-                    if convert_glb:
-                        glb_ok = (glb_src is not None and glb_src.is_dir()
-                                  and any(glb_src.glob("*.glb")))
-                        glb_note = "  ✓ GLB exported" if glb_ok else "  ⚠ no GLB"
-                    put("b_log",
-                        f"✓ Done: {car_path.name} — "
-                        f"{len(bench)} tire fit(s){glb_note}")
-                    all_car_logs[car_path.name] = car_log_lines
-                    success = True
+            for i in sorted(results):                  # tallies in car order
+                r = results[i]
+                all_car_logs[r["name"]] = r["car_log"]
+                csv_rows.extend(r["csv"])
+                if r["status"] == "ok":
                     ok += 1
-
-                except Exception as ex:
-                    error_detail = traceback.format_exc()
-                    put("b_log", f"✗ Error: {ex}")
-                    put("b_log", error_detail)
-                    car_log_lines.append(f"ERROR: {ex}\n{error_detail}")
-                    all_car_logs[car_path.name] = car_log_lines
-                    csv_rows.append(
-                        f"{car_path.name},,,,,,,,,,,,,,ERROR")
+                elif r["status"] == "skipped":
+                    skipped += 1
+                else:
                     errors += 1
-                    _label = src.label if isinstance(src, ArchiveCar) else car_path.name
-                    failed[_label] = (f"{type(ex).__name__}: {ex}", error_detail)
-
-                finally:
-                    # Always write the per-car log
-                    _write_car_log(
-                        car_out,
-                        _car_stem(svj, car_path.name) if success else car_path.name,
-                        car_path,
-                        car_log_lines,
-                        bench if success else {},
-                        include_plots, convert_glb,
-                        error=error_detail if not success else None,
-                    )
-                    if _glb_tmp:
-                        shutil.rmtree(_glb_tmp, ignore_errors=True)
-                    if _zip_tmp:
-                        shutil.rmtree(_zip_tmp, ignore_errors=True)
+                    failed[r["label"]] = r["error"] or ("error", "")
 
             # ── Write batch summary CSV ───────────────────────────────────────
             csv_path = out_root / "batch_summary.csv"

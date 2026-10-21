@@ -37,6 +37,11 @@ def main():
     if not test_animations.run():
         print("\n✗ animation checks failed")
         sys.exit(1)
+    print("\n──── BATCH CHECKS ────")
+    import test_batch
+    if not test_batch.run():
+        print("\n✗ batch checks failed")
+        sys.exit(1)
     print("\n──── SUSPENSION CHECKS ────")
     import test_suspension
     if not test_suspension.run():
