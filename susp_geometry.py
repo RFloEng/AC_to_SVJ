@@ -18,6 +18,7 @@ from typing import Optional, Sequence
 
 _EPS = 1e-9
 _MAX_RC = 1.5          # a roll centre farther than this (m) from the ground is a degenerate fit
+_MAX_ANTI = 200.0      # beyond this (%) the instant centre is too close to the wheel to mean anything
 
 
 def _intersect(p1, d1, p2, d2) -> Optional[tuple]:
@@ -138,6 +139,8 @@ def anti_geometry(ic: Optional[Sequence[float]], wheel_x: float, wheelbase: floa
     if abs(run) < 1e-3:
         return None
     pct = (up / run) * (wheelbase / cg_height) * 100.0
+    if abs(pct) > _MAX_ANTI:
+        return None
     if is_front:
         return {"anti_dive_percent": pct * front_brake}
     return {"anti_squat_percent": pct}

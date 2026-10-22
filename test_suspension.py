@@ -485,6 +485,8 @@ def test_anti_dive_and_anti_squat():
     # IC 1 m ahead of the rear wheel and 0.3 m up
     a = anti_geometry([-1.6, -0.30], -2.6, 2.6, 0.5, False, 0.6)
     assert abs(a["anti_squat_percent"] - 0.3 * 5.2 * 100) < 1e-9
+    # IC almost above the wheel: ill-conditioned, left out
+    assert anti_geometry([-2.55, -0.30], -2.6, 2.6, 0.5, False, 0.6) is None
     # IC ahead of a front wheel: pro-dive (negative)
     assert anti_geometry([1.0, -0.30], 0.0, 2.6, 0.5, True, 0.6)["anti_dive_percent"] < 0
 
