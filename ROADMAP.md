@@ -29,16 +29,16 @@ See `TIRE_LAB_ROADMAP.md` §13 for the recommended implementation order and
 
 ---
 
-## Suspension geometry — near term
+## Suspension geometry
 
-- **Roll-centre and instant-centre calculation** — derive IC from the
-  upper/lower arm lines in front view; emit `roll_centre_height` per corner.
-  Useful for setup tools and as a sanity-check on the hardpoint geometry.
-- **Kingpin geometry** — compute scrub radius, mechanical trail, and caster
-  trail from the ball joint and spindle hardpoints; emit under
-  `topology.upright.geometry`.
-- **Anti-dive / anti-squat percentages** — from wishbone angles relative to
-  the force line; straightforward once ICs are available.
+Done (see CHANGELOG): roll-centre height, kingpin geometry, anti-dive / anti-squat for
+wishbone, multi-link and MacPherson corners.
+
+- **Solid axles and trailing arms** — roll centre from the Panhard / Watts height; side-view
+  geometry from the trailing links.
+- **Inboard brakes, anti-lift** — rear anti-lift and front anti-lift under drive.
+- **Validate against real cars** — compare with published figures for a few Kunos cars and
+  tune the arm-projection simplification if needed.
 
 ---
 

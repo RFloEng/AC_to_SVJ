@@ -91,6 +91,7 @@ from ac_parsers import (
     _parse_vec3, _f, _i, _m, _b, _first, _resolve_lut,
 )
 from svj_migrate import migrate as migrate_suspension
+from susp_geometry import corner_geometry
 from svj_migrate.naming import canonical_part_id
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench,
@@ -321,6 +322,12 @@ def _csp_physics_flags(parsed: dict) -> dict:
     return out
 
 
+def _rounded(d: dict, nd: int) -> dict:
+    """A copy of `d` with its floats (and lists of floats) rounded."""
+    return {k: ([round(x, nd) for x in v] if isinstance(v, list)
+                else round(v, nd) if isinstance(v, float) else v) for k, v in d.items()}
+
+
 def _interp(curve: list, x: float) -> float:
     """Linear interpolation in a sorted ``[[x, y], ...]`` table (clamped at the ends)."""
     if x <= curve[0][0]:
@@ -543,7 +550,7 @@ def build_corner(corner_id: str, susp_axle: dict,
     # pivot ends up *above* the lower ball joint) which is the
     # "upper/lower swap" symptom the user reported in the viewer.
     chassis_z_offset = -round(float(rolling_radius), 4)
-    _ = cg_height  # kwarg kept for API compatibility; not used today
+    _ = cg_height  # not used for hardpoint placement; feeds the anti-dive / anti-squat estimate
 
     hp_svj: dict = {"wheel_center": wheel_center}
     # WBTYRE_* / STRUT_TYRE are wheel-space offsets in AC, so they must be
@@ -1032,6 +1039,21 @@ def build_corner(corner_id: str, susp_axle: dict,
         corner["alignment"]["caster"] = round(caster, 5)
     if kpi is not None:
         corner["alignment"]["kpi"] = round(kpi, 5)
+
+    _geo = corner_geometry(topology, wheel_center, y_sign, is_front,
+                           float(wheelbase), float(cg_height), float(brake_bias))
+    if _geo:
+        _align = corner["alignment"]
+        _kp = _geo.pop("kingpin", None)
+        if _kp:
+            _align["caster_trail"] = round(_kp["mechanical_trail"], 5)
+            _align["scrub_radius"] = round(_kp["scrub_radius"], 5)
+        _align["x_geometry"] = _rounded(_geo, 4)
+        if _kp:
+            _align["x_geometry"]["kingpin"] = _rounded(_kp, 5)
+        _align["x_geometry_note"] = (
+            "Derived from the hardpoints at the static position (front/side-view instant "
+            "centres, outboard brakes); an estimate, not a value from AC")
 
     _mrt = susp_axle.get("motion_ratio_table")
     if _mrt:

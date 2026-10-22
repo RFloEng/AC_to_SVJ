@@ -4,6 +4,23 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Derived suspension geometry
+
+- New `susp_geometry.py`, called from `build_corner`, derives from the static hardpoints of
+  double-wishbone, multi-link and MacPherson corners: **roll-centre height** and front-view
+  instant centre, side-view instant centre with **anti-dive** (front, braking, scaled by the
+  front brake share) and **anti-squat** (rear, all drive force on the axle) in percent,
+  and for the front axle the **steering axis**: caster angle, kingpin inclination,
+  mechanical trail and scrub radius. MacPherson uses the strut top and the perpendicular
+  to the strut axis in place of the upper arm.
+- Written to the wheel station's `alignment`: `caster_trail` and `scrub_radius` (schema
+  fields) and an `x_geometry` block with the rest. These are estimates from the hardpoints
+  (outboard brakes, arm = ball joint to the middle of its pivots), flagged in
+  `x_geometry_note`; the `caster` / `kpi` read from suspensions.ini are left as they were.
+  Solid axles, trailing arms and corners without arms get nothing.
+- Checked on synthetic geometry with hand-computed values (`test_suspension.py`); not yet
+  compared against a real car's published numbers.
+
 ### Several cars at once
 
 - The batch tab has a **Cars at once** box (default: half the CPUs, at most 3). Above 1,
