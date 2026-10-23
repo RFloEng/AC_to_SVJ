@@ -188,11 +188,11 @@ def test_movable_parts_become_svj_bodies_joints_and_poses():
 
         svj = {"chassis": {}}
         nb, nj, ren = C.movable_parts_to_svj(svj, parts, "car_mesh")
-        assert (nb, nj) == (1, 1) and ren == {"DOOR": "SVJ::body::door"}
+        assert (nb, nj) == (1, 1) and ren == {"DOOR": "SVJ::body::door_fl"}   # pivot at -Y: left, front
         body = svj["chassis"]["mass_bodies"][0]
-        assert body["id"] == "door" and body["mass"] == 0 and body["x_derived"] is True
-        assert body["visual"] == {"mesh_ref": "car_mesh", "node": "SVJ::body::door"}
-        mk = svj["chassis"]["markers"]["door_hinge"]
+        assert body["id"] == "door_fl" and body["mass"] == 0 and body["x_derived"] is True
+        assert body["visual"] == {"mesh_ref": "car_mesh", "node": "SVJ::body::door_fl"}
+        mk = svj["chassis"]["markers"]["door_fl_hinge"]
         assert mk == body["markers"]["hinge"] and mk["position"] == m["pivot_svj"]
         # the marker's +Z axis is the hinge axis
         x, y, z, w = mk["orientation"]
@@ -200,10 +200,10 @@ def test_movable_parts_become_svj_bodies_joints_and_poses():
         assert np.allclose(zax, m["axis_svj"], atol=1e-5)
         j = svj["constraints"][0]
         assert (j["id"], j["joint_type"], j["body_a"], j["body_b"]) == (
-            "hinge_door", "revolute", "chassis", "door")
+            "hinge_door_fl", "revolute", "chassis", "door_fl")
         assert abs(j["range"]["max"] - math.radians(70.0)) < 1e-4 and j["range"]["min"] == 0.0
         assert svj["poses"][0] == {"id": "closed"}
-        assert svj["poses"][1] == {"id": "car_door", "values": {"hinge_door": j["range"]["max"]}}
+        assert svj["poses"][1] == {"id": "door_fl_open", "values": {"hinge_door_fl": j["range"]["max"]}}
         # suspension travel and already bound nodes are not movable parts
         for nm, kw in (("HUB_LF", {}), ("Anim_Susp0", {}), ("DOOR", {"bound": {"DOOR"}})):
             sv = {"chassis": {}}
@@ -211,6 +211,36 @@ def test_movable_parts_become_svj_bodies_joints_and_poses():
         # nothing usable: the SVJ is left as it was
         bare = {"chassis": {}}
         assert C.movable_parts_to_svj(bare, [], "m") == (0, 0, {}) and bare == {"chassis": {}}
+
+
+def _mp(node, anim, piv, ax=(0.0, 0.0, 1.0), ang=1.1, parent="ROOT"):
+    return {"node": node, "parent": parent, "animation": anim, "joint": "revolute",
+            "angle_rad": ang, "pivot_svj": list(piv), "axis_svj": list(ax)}
+
+
+def test_doors_take_front_rear_and_side_from_the_hinge_and_keep_their_trim_apart():
+    import converter as C
+    parts = [
+        _mp("DOOR_L", "car_door_L", (-0.6, -0.8, -0.5)),
+        _mp("DOOR_L001", "car_door_L", (-0.6, -0.8, -0.5), parent="COCKPIT"),   # trim
+        _mp("DOOR_L002", "car_door_L", (-0.68, -0.75, -0.5), parent="COCKPIT"),  # glass
+        _mp("DOOR_R", "car_door_R", (-0.6, 0.8, -0.5)),
+        _mp("DOOR_RL", "car_door_R2", (-1.5, 0.8, -0.5)),                         # rear door
+        _mp("WIPER_L", "car_wiper", (-0.5, -0.4, -0.8), ax=(0.0, 1.0, 0.0), ang=1.1),
+        _mp("WIPER_BRUSH_L", "car_wiper", (-0.5, -0.4, -0.8), ax=(1.0, 0.0, 0.0), ang=0.07),
+    ]
+    svj = {"chassis": {}}
+    nb, nj, ren = C.movable_parts_to_svj(svj, parts, "m")
+    ids = {b["id"] for b in svj["chassis"]["mass_bodies"]}
+    # the trim and glass keep a body each, named after the door they move with
+    assert ids == {"door_fl", "door_fl_001", "door_fl_002", "door_fr", "door_rr",
+                   "wiper_l", "wiper_brush_l"}
+    assert nb == nj == 7 and ren["DOOR_L001"] == "SVJ::body::door_fl_001"
+    pose = {p["id"]: p for p in svj["poses"]}
+    assert {"closed", "door_fl_open", "door_fr_open", "door_rr_open", "wiper"} <= set(pose)
+    assert set(pose["wiper"]["values"]) == {"hinge_wiper_l", "hinge_wiper_brush_l"}
+    assert set(pose["door_fl_open"]["values"]) == {"hinge_door_fl", "hinge_door_fl_001",
+                                                    "hinge_door_fl_002"}
 
 
 def test_part_ids_put_the_side_last_and_stay_unique():

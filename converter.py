@@ -2151,9 +2151,8 @@ def _mesh_slug(stem: str) -> str:
     return re.sub(r"[^a-z0-9_]", "_", stem.lower()) or "mesh"
 
 
-def _part_id(node: str, taken: set, canonical: bool = True) -> str:
-    """Body id for an AC node: lowercase, ``[a-z0-9_]``, side token moved to the end
-    (``DOOR_LF`` -> ``door_fl``), unique within ``taken``."""
+def _part_tokens(node: str) -> tuple:
+    """(name tokens without the side token, side token or "") of an AC node name."""
     toks = [t for t in re.split(r"[^a-z0-9]+", node.lower()) if t]
     side = ""
     for i, t in enumerate(toks):
@@ -2161,6 +2160,16 @@ def _part_id(node: str, taken: set, canonical: bool = True) -> str:
             side = _SIDE_TOKENS[t]
             toks.pop(i)
             break
+    return toks, side
+
+
+def _part_id(node: str, taken: set, canonical: bool = True,
+             side: Optional[str] = None) -> str:
+    """Body id for an AC node: lowercase, ``[a-z0-9_]``, side token moved to the end
+    (``DOOR_LF`` -> ``door_fl``), unique within ``taken``.  ``side`` replaces the side
+    read from the name."""
+    toks, name_side = _part_tokens(node)
+    side = name_side if side is None else side
     base = "_".join(toks + ([side] if side else [])) or "part"
     if canonical:
         base = canonical_part_id(base) or base      # hatch -> tailgate, bonnet -> hood
@@ -2192,6 +2201,46 @@ _NOT_MOVABLE = re.compile(r"^(anim_)?(susp|hub|wheel|steer|upright|disc|caliper|
                           re.I)
 
 
+# parts that come in front / rear x left / right
+_FOUR_CORNER = {"door", "window", "seat"}
+# parts whose pose is "open" (spec 24.2)
+_OPENS = {"door", "hood", "trunk", "tailgate", "fuel_flap", "charge_flap", "sunroof"}
+
+
+def _same_movement(a: dict, b: dict) -> bool:
+    """True when two animated nodes are one movement: same animation and joint, the same
+    axis direction and angle (or travel), pivots within 15 cm."""
+    if a["animation"] != b["animation"] or a["joint"] != b["joint"]:
+        return False
+    ea, eb = ((a.get("angle_rad"), b.get("angle_rad")) if a["joint"] == "revolute"
+              else (a.get("travel_m"), b.get("travel_m")))
+    if abs(ea - eb) > 0.01 * max(abs(ea), abs(eb)):
+        return False
+    ua, ub = np.asarray(a["axis_svj"], "f8"), np.asarray(b["axis_svj"], "f8")
+    if float(ua @ ub) / (np.linalg.norm(ua) * np.linalg.norm(ub)) < 0.999:
+        return False
+    return float(np.linalg.norm(np.asarray(a["pivot_svj"]) - np.asarray(b["pivot_svj"]))) <= 0.15
+
+
+def _member_id(node: str, main_node: str, main_pid: str, taken: set) -> str:
+    """Id of a node that moves with `main_node` (`DOOR_L001` with `DOOR_L` = `door_fl`):
+    the main id plus what the node name adds to it (`door_fl_001`)."""
+    main = set(_part_tokens(main_node)[0]) | set(_SIDE_TOKENS)
+    extra = []
+    for t in re.split(r"[^a-z0-9]+", node.lower()):
+        m = re.fullmatch(r"(?:" + "|".join(sorted(_SIDE_TOKENS, key=len, reverse=True))
+                         + r")(\d+)", t)
+        t = m.group(1) if m else t                    # `l001`: the number after the side
+        if t and t not in main:
+            extra.append(t)
+    base = "_".join([main_pid] + extra)
+    pid, n = base, 2
+    while pid in taken:
+        pid, n = f"{base}_{n}", n + 1
+    taken.add(pid)
+    return pid
+
+
 def movable_parts_to_svj(svj: dict, parts: list, mesh_id: str,
                          bound: Optional[set] = None) -> tuple:
     """Write doors, flaps, wipers ... as SVJ 24 movable parts.
@@ -2210,46 +2259,84 @@ def movable_parts_to_svj(svj: dict, parts: list, mesh_id: str,
     cons = svj.setdefault("constraints", [])
     taken = {b["id"] for b in bodies} | {c["id"] for c in cons}
     rename: dict = {}
-    poses: dict = {}
-    done = set()
     nb = nj = 0
+
+    # The movable parts: revolute / prismatic joints with a pivot in the SVJ frame.
+    cand, done = [], set()
     for m in parts:
         piv, ax = m.get("pivot_svj"), m.get("axis_svj")
         if (m["joint"] not in ("revolute", "prismatic") or not piv or not ax
                 or m["node"] in done or m["node"] in (bound or ())
                 or _NOT_MOVABLE.match(m["node"])):
             continue
-        rev = m["joint"] == "revolute"
-        extent = m.get("angle_rad") if rev else m.get("travel_m")
-        if not extent:
+        if not (m.get("angle_rad") if m["joint"] == "revolute" else m.get("travel_m")):
             continue
         done.add(m["node"])
-        pid = _part_id(m["node"], taken)
-        jid = ("hinge_" if rev else "slide_") + pid
-        taken.add(jid)
-        quat = _z_to_quat(ax)
-        frame = {"position": list(piv), "orientation": quat}
-        markers[f"{pid}_hinge"] = dict(frame)
-        glb_node = f"SVJ::body::{pid}"
-        bodies.append({
-            "id": pid, "name": m["node"], "category": "attachment",
-            "description": (f"Animated node {m['node']} of the AC model "
-                            f"({m['animation']}.ksanim); AC gives no mass or inertia."),
-            "mass": 0, "position": list(piv), "parent": "chassis", "x_derived": True,
-            "markers": {"hinge": dict(frame)},
-            "visual": {"mesh_ref": mesh_id, "node": glb_node},
-        })
-        cons.append({
-            "id": jid, "type": "joint",
-            "joint_type": "revolute" if rev else "translational",
-            "body_a": "chassis", "marker_a": f"{pid}_hinge",
-            "body_b": pid, "marker_b": "hinge",
-            "range": {"min": 0.0, "max": round(float(extent), 5)},
-        })
-        poses.setdefault(m["animation"], {})[jid] = round(float(extent), 5)
-        rename[m["node"]] = glb_node
-        nb += 1
-        nj += 1
+        cand.append(m)
+
+    # A door is often several KN5 nodes (shell, trim, glass) that one animation turns
+    # together about the same axis.  Each keeps its own body; the one with the shortest
+    # name is the door itself and gives the others their ids (`door_fl_001`).
+    groups: list = []
+    for m in sorted(cand, key=lambda q: (len(q["node"]), q["node"])):
+        for g in groups:
+            if _same_movement(g[0], m):
+                g.append(m)
+                break
+        else:
+            groups.append([m])
+
+    # Doors, windows and seats take front / rear and left / right from where they hinge
+    # (the standard's `door_fl`): left is -Y, front is the more forward hinge of its side.
+    sides: dict = {}
+    by_side: dict = {}
+    for g in groups:
+        toks, _ = _part_tokens(g[0]["node"])
+        base = canonical_part_id("_".join(toks)) or "_".join(toks)
+        if base in _FOUR_CORNER:
+            lr = "l" if g[0]["pivot_svj"][1] < 0 else "r"
+            by_side.setdefault((base, lr), []).append(g)
+    for (base, lr), gs in by_side.items():
+        gs.sort(key=lambda g: -g[0]["pivot_svj"][0])
+        for i, g in enumerate(gs[:2]):
+            sides[id(g)] = ("f", "r")[i] + lr
+
+    poses: dict = {}
+    for g in groups:
+        main_pid = None
+        for m in g:
+            piv, ax = m["pivot_svj"], m["axis_svj"]
+            rev = m["joint"] == "revolute"
+            extent = m.get("angle_rad") if rev else m.get("travel_m")
+            if main_pid is None:
+                pid = main_pid = _part_id(m["node"], taken, side=sides.get(id(g)))
+            else:
+                # trim, glass, handles of the same part: own body, named after the part
+                pid = _member_id(m["node"], g[0]["node"], main_pid, taken)
+            jid = ("hinge_" if rev else "slide_") + pid
+            taken.add(jid)
+            frame = {"position": list(piv), "orientation": _z_to_quat(ax)}
+            markers[f"{pid}_hinge"] = dict(frame)
+            glb_node = f"SVJ::body::{pid}"
+            bodies.append({
+                "id": pid, "name": m["node"], "category": "attachment",
+                "description": (f"Animated node {m['node']} of the AC model "
+                                f"({m['animation']}.ksanim); AC gives no mass or inertia."),
+                "mass": 0, "position": list(piv), "parent": "chassis", "x_derived": True,
+                "markers": {"hinge": dict(frame)},
+                "visual": {"mesh_ref": mesh_id, "node": glb_node},
+            })
+            cons.append({
+                "id": jid, "type": "joint",
+                "joint_type": "revolute" if rev else "translational",
+                "body_a": "chassis", "marker_a": f"{pid}_hinge",
+                "body_b": pid, "marker_b": "hinge",
+                "range": {"min": 0.0, "max": round(float(extent), 5)},
+            })
+            poses.setdefault(m["animation"], []).append((pid, jid, round(float(extent), 5)))
+            rename[m["node"]] = glb_node
+            nb += 1
+            nj += 1
     if not nb:
         for k in ("mass_bodies", "markers"):
             if not chassis.get(k):
@@ -2258,9 +2345,20 @@ def movable_parts_to_svj(svj: dict, parts: list, mesh_id: str,
             svj.pop("constraints", None)
         return 0, 0, {}
     pl = svj.setdefault("poses", [{"id": "closed"}])
-    for anim, vals in poses.items():
-        pl.append({"id": _part_id(anim, {p["id"] for p in pl}, canonical=False),
-                   "values": vals})
+    for anim, items in poses.items():
+        # a door animation also turns its handle / arm: the pose is named after the one
+        # openable part in it
+        opens = [it[0] for it in items
+                 if re.sub(r"_(fl|fr|rl|rr|l|r)$", "", it[0]) in _OPENS]
+        if len(opens) == 1:
+            name = f"{opens[0]}_open"
+        else:
+            name = re.sub(r"^car_", "", anim.lower())
+        name = re.sub(r"[^a-z0-9_]+", "_", name).strip("_") or "pose"
+        pid_, n_ = name, 2
+        while pid_ in {p["id"] for p in pl}:
+            pid_, n_ = f"{name}_{n_}", n_ + 1
+        pl.append({"id": pid_, "values": {jid: ext for _, jid, ext in items}})
     return nb, nj, rename
 
 

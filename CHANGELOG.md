@@ -4,6 +4,20 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Movable parts follow the standard's vocabulary
+
+- **Side and position from the hinge.** A door, window or seat is named `door_fl` / `door_fr`
+  / `door_rl` / `door_rr` by where it hinges (left is -Y; the more forward hinge of a side is
+  the front one), not by the `_L` / `_R` of the AC node (`door_l`). Wipers and other pairs
+  keep `_l` / `_r`.
+- **Trim and glass keep a body each.** Nodes that one animation turns together about the
+  same axis (`DOOR_L001`, `DOOR_L002`, `EXT_DOOR_L`) are separate bodies, named after the
+  door they move with: `door_fl_001`, `door_fl_ext`. The GLB keeps every node as it was.
+- **Poses** are `door_fl_open` (the animation's one openable part) instead of the AC
+  animation name (`car_door_l`); other animations lose the `car_` prefix (`wiper`, `shift`).
+- On 1,943 installed cars: no error, 12 four-door cars get all four doors, 288 get
+  `door_fl` / `door_fr`. The standard's integrity and constraints checks pass.
+
 ### The chassis is a group of the whole body
 
 - `chassis.visual` used to point at the KN5 node `COCKPIT_HR` in about half of a large
