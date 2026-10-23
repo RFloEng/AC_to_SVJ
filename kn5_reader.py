@@ -409,6 +409,11 @@ _AC_CORNER_PARTS: list[tuple[str, str, list[str]]] = [
 ]
 
 
+# Key in a ``node_names`` rename map that asks the exporter for a chassis group node
+# (see map_ac_nodes_to_svj_parts); it is not the name of a KN5 node.
+CHASSIS_GROUP = "*chassis*"
+
+
 def map_ac_nodes_to_svj_parts(node_names: list[str]) -> list[dict]:
     """
     Map AC node names to SVJ visual bindings (SVJ v0.99.2 categories).
@@ -416,7 +421,8 @@ def map_ac_nodes_to_svj_parts(node_names: list[str]) -> list[dict]:
     Returns a list of ``{"ac_name", "category", "part", "station", "id",
     "node"}`` dicts, where ``node`` is the glTF node name
     ``SVJ::<category>::<id>`` the exporter should give that node (see
-    ``kn5_to_glb(node_names=...)``).  Recognised: the chassis, and per corner the
+    ``kn5_to_glb(node_names=...)``).  Recognised: the chassis (a group of everything that is
+    not a corner part, ``ac_name`` = ``CHASSIS_GROUP``), and per corner the
     upright (SUSP_/UPRIGHT_/HUB_), the wheel (WHEEL_) and the brake disc
     (DISC_).  Nothing is invented: a part is only returned when the KN5 has a
     node for it.
@@ -424,13 +430,12 @@ def map_ac_nodes_to_svj_parts(node_names: list[str]) -> list[dict]:
     upper = {n.upper(): n for n in node_names}
     out: list[dict] = []
 
-    for pat in ("BODY", "CHASSIS", "CAR_BODY", "BODY_HR", "COCKPIT_HR",
-                "EXTERIOR", "SHELL", "BODYSHELL"):
-        if pat in upper:
-            out.append({"ac_name": upper[pat], "category": "body", "part": "chassis",
-                        "station": None, "id": "chassis",
-                        "node": "SVJ::body::chassis"})
-            break
+    # The chassis is not a node of the KN5: AC cars have no node that holds the body
+    # shell (COCKPIT_HR is only the interior).  The exporter makes a group node for it
+    # out of everything that is not a wheel, upright or disc.
+    if node_names:
+        out.append({"ac_name": CHASSIS_GROUP, "category": "body", "part": "chassis",
+                    "station": None, "id": "chassis", "node": "SVJ::body::chassis"})
 
     for category, part, prefixes in _AC_CORNER_PARTS:
         for ac_suffix, station in _AC_CORNERS.items():
@@ -1187,6 +1192,24 @@ def blinn_to_roughness(exponent: float, intensity: float = 1.0) -> float:
     return min(max((2.0 / (eff + 2.0)) ** 0.5, 0.04), 1.0)
 
 
+_CORNER_PREFIXES = ("SVJ::wheel::", "SVJ::suspension::", "SVJ::brake::")
+
+
+def _group_chassis(gltf, root_idx: int, name: str) -> None:
+    """Put every child of the model root that is not a wheel, upright or disc under a
+    new identity node `name` (the chassis), so the body shell, interior, doors and
+    lights hang from one body.  The node is an identity transform: nothing moves."""
+    import pygltflib
+    root = gltf.nodes[root_idx]
+    keep, moved = [], []
+    for c in root.children or []:
+        (keep if (gltf.nodes[c].name or "").startswith(_CORNER_PREFIXES) else moved).append(c)
+    if not moved:
+        return
+    gltf.nodes.append(pygltflib.Node(name=name, children=moved))
+    root.children = keep + [len(gltf.nodes) - 1]
+
+
 def kn5_to_glb(
     path: Path,
     output_path: Optional[Path] = None,
@@ -1383,6 +1406,7 @@ def kn5_to_glb(
 
     ext_used: set[str] = set()
     rename = dict(node_names or {})
+    chassis_group = rename.pop(CHASSIS_GROUP, None)    # glTF name of the chassis group
     used_names: set[str] = set()      # filled as nodes are renamed
 
     # -- Livery / paint resolution ---------------------------------------------
@@ -1773,9 +1797,11 @@ def kn5_to_glb(
             cp_, sp_ = math.cos(placement_pitch), math.sin(placement_pitch)
             w0 = w0 @ np.array([[1, 0, 0, 0], [0, cp_, -sp_, 0],
                                 [0, sp_, cp_, 0], [0, 0, 0, 1]], dtype="f8")
-            _process_node(model.root, wrapper_idx, w0)
+            root_idx = _process_node(model.root, wrapper_idx, w0)
         else:
-            _process_node(model.root, rot_idx, np.diag([-1.0, -1.0, 1.0, 1.0]))
+            root_idx = _process_node(model.root, rot_idx, np.diag([-1.0, -1.0, 1.0, 1.0]))
+        if chassis_group and chassis_group not in used_names:
+            _group_chassis(gltf, root_idx, chassis_group)
 
     # -- Animations (doors, flaps, wipers ...) ---------------------------------
     anim_exported: dict[str, list[str]] = {}

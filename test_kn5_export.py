@@ -469,6 +469,24 @@ def test_node_rename():
     assert "DISC_LF" in by                                # not renamed onto a duplicate
 
 
+def test_chassis_group():
+    """The chassis is a group of everything that is not a wheel, upright or disc."""
+    root = N("ROOT", children=[N("WHEEL_LF", "mesh"), N("SUSP_LF", "mesh"),
+                               N("COCKPIT_HR", "mesh"), N("GEO_body", "mesh")])
+    parts = K.map_ac_nodes_to_svj_parts(["COCKPIT_HR", "WHEEL_LF", "SUSP_LF"])
+    ren = {b["ac_name"]: b["node"] for b in parts}
+    assert ren[K.CHASSIS_GROUP] == "SVJ::body::chassis"
+    with tempfile.TemporaryDirectory() as t:
+        g, _ = _export(root, Path(t), node_names=ren)
+    by = {n.name: n for n in g.nodes}
+    kids = {g.nodes[c].name for c in by["SVJ::body::chassis"].children}
+    assert kids == {"COCKPIT_HR", "GEO_body"}             # interior and body shell
+    top = {g.nodes[c].name for c in by["ROOT"].children}
+    assert top == {"SVJ::wheel::wheel_fl", "SVJ::suspension::upright_fl",
+                   "SVJ::body::chassis"}
+    assert not by["SVJ::body::chassis"].matrix and not by["SVJ::body::chassis"].translation
+
+
 def test_converter_emits_v0992_bindings():
     """Synthetic car folder -> real build_svj: bindings exist, are named by the
     SVJ::<category>::<id> convention, and the exported GLB contains those nodes."""

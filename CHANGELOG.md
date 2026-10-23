@@ -4,6 +4,17 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### The chassis is a group of the whole body
+
+- `chassis.visual` used to point at the KN5 node `COCKPIT_HR` in about half of a large
+  install (about 1,030 of 1,964 cars), which is only the interior; the body shell is a set of
+  loose nodes next to it, and 442 cars had no recognised chassis node at all. The GLB now has
+  a node `SVJ::body::chassis` (identity transform) holding every child of the model root
+  that is not a wheel, upright or disc: body shell, interior, doors, lights. `COCKPIT_HR`
+  and the like keep their own names inside it; wheels, uprights and discs stay beside it.
+  Nothing moves on screen and the door / wiper animations are unchanged. Every car with a
+  KN5 now has a chassis binding. GLBs made before this need regenerating.
+
 ### Derived suspension geometry
 
 - New `susp_geometry.py`, called from `build_corner`, derives from the static hardpoints of
