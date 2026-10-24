@@ -1,4 +1,4 @@
-# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/migrate_suspension.py (commit 045bb40, Apache-2.0).
+# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/migrate_suspension.py (commit 5561ab6, Apache-2.0).
 # Only the import lines were changed.
 """
 SVJ Suspension Migration (to v0.100)
@@ -117,6 +117,34 @@ def _convert_curve(curve, scale_x, scale_y):
     return [[round(p[0] * scale_x, 6), round(p[1] * scale_y, 6)] for p in curve]
 
 
+_LINK_USED = {"name", "type", "inboard_points", "outboard_ref", "joint_type", "inboard_joint_type", "body_ref", "mass", "cg_position",
+              "visual", "bushings", "outboard_bushing"}
+
+
+def _keep_link_data(body, ln, pts, notes_here):
+    """Carry everything the old link stated onto its body, so the migration loses nothing: inertia and other body data,
+    the pickups beyond the two an arm has (as markers), and the link type and outboard reference (x_legacy_link)."""
+    for k, v in ln.items():
+        if k in _LINK_USED:
+            continue
+        if k == "inertia" and isinstance(v, (dict, list)) and not body.get("inertia"):
+            body["inertia"] = copy.deepcopy(v)               # a link's scalar inertia is no tensor: it goes to x_legacy_link below
+        elif k == "inertia" and isinstance(v, (dict, list)):
+            body.setdefault("x_legacy_link", {})[k] = copy.deepcopy(v)
+        elif k == "inertia":
+            body.setdefault("x_legacy_link", {})[k] = v
+        elif k in body and body[k] != v:
+            body.setdefault("x_legacy_link", {})[k] = copy.deepcopy(v)
+        else:
+            body.setdefault(k, copy.deepcopy(v))
+    meta = {k: ln[k] for k in ("type", "outboard_ref") if ln.get(k) is not None}
+    if meta:
+        body.setdefault("x_legacy_link", {}).update(meta)
+    for i, pt in enumerate(pts[2:], start=3):
+        body.setdefault("markers", {}).setdefault(f"pickup_{i}", {"position": [round(x, 6) for x in pt]})
+        notes_here.append(f"link '{ln.get('name')}': inboard point {i} kept as marker pickup_{i} (no joint)")
+
+
 def migrate(doc):
     """Return (migrated document, notes). The input is not modified."""
     out = copy.deepcopy(doc)
@@ -213,6 +241,8 @@ def migrate(doc):
                     b["visual"] = copy.deepcopy(up["visual"])
                 add_body(b)
             cb = body_by_id[carrier]
+            if up.get("inertia") and not cb.get("inertia"):
+                cb["inertia"] = copy.deepcopy(up["inertia"])     # the body existed already (body_ref) but without the upright's tensor
             mark_name = lambda k: k
         cb.setdefault("markers", {})
         for k, v in hps.items():
@@ -263,6 +293,7 @@ def migrate(doc):
                 if ln.get("visual"):
                     lb["visual"] = copy.deepcopy(ln["visual"])
                 add_body(lb)
+            _keep_link_data(body_by_id[bid], ln, pts, notes_here)
             io, ii = infer_joint_types(sysT, ln.get("type"))
             ob_t, ib_t = ln.get("joint_type") or io, ln.get("inboard_joint_type") or ii
             direction = _norm(_sub(ob_pt, pts[0]))
@@ -284,8 +315,8 @@ def migrate(doc):
             else:
                 jt = _MAP_TYPE.get(ib_t or "spherical", ib_t or "spherical")
                 extra, axis = {}, None
-                if ib_t == "bushing" and isinstance(ln.get("bushings"), list) and ln["bushings"]:
-                    extra["bushing"] = copy.deepcopy(ln["bushings"][0])
+                if isinstance(ln.get("bushings"), list) and ln["bushings"] and isinstance(ln["bushings"][0], dict):
+                    extra["bushing"] = copy.deepcopy(ln["bushings"][0])       # compliance stays on the joint, whatever its type
                 if jt == "revolute":
                     axis = _norm(_sub(pts[1], pts[0])) if len(pts) >= 2 else ([1.0, 0.0, 0.0] if ln.get("type") == "pivot" else [0.0, 1.0, 0.0])
                     hinge = (pts[0], axis)
@@ -307,15 +338,25 @@ def migrate(doc):
                         notes.append(f"{axle_key}: steering rack added as a body on a lateral slide (travel and steering-wheel coupling not given by the old data)")
                     parent = racks[axle_key]
                     steering_joint = rack_joint.get(axle_key)
-                add_con({"id": f"{_PREFIX[jt]}_{bid}_inboard", "type": "joint", "joint_type": jt, "body_a": parent, "frame_a": frame(pts[0], axis),
-                         "body_b": bid, "frame_b": frame(pts[0], axis), **extra})
+                if jt == "revolute" and len(pts) >= 2 and math.dist(pts[0], pts[1]) > 1e-6 and not is_tie:
+                    # An arm with two pivots is two spherical joints at the real pickup points (the line through them is the
+                    # hinge axis), so that each pickup can carry its own bushing. Bushings are matched to inboard_points by index.
+                    bushes = ln.get("bushings") if isinstance(ln.get("bushings"), list) else []
+                    for k, pt in enumerate(pts[:2]):
+                        ex = {"bushing": copy.deepcopy(bushes[k])} if k < len(bushes) and isinstance(bushes[k], dict) else {}
+                        add_con({"id": f"{_PREFIX['spherical']}_{bid}_inboard_{k + 1}", "type": "joint", "joint_type": "spherical", "body_a": parent,
+                                 "frame_a": frame(pt), "body_b": bid, "frame_b": frame(pt), **ex})
+                else:
+                    add_con({"id": f"{_PREFIX[jt]}_{bid}_inboard", "type": "joint", "joint_type": jt, "body_a": parent, "frame_a": frame(pts[0], axis),
+                             "body_b": bid, "frame_b": frame(pts[0], axis), **extra})
             # outboard end: link <-> carrier
             if ob_t is None:
                 notes_here.append(f"link '{lname}': outboard joint type unknown ({sysT}/{ln.get('type')}); give joint_type")
             else:
                 jt = _MAP_TYPE.get(ob_t, ob_t)
                 axis = direction if jt in ("translational", "cylindrical", "planar") else ([0.0, 1.0, 0.0] if jt in ("revolute", "universal") else None)
-                joint(f"{_PREFIX[jt]}_{bid}_outboard", jt, bid, carrier, ob_pt, axis)
+                ob_ex = {"bushing": copy.deepcopy(ln["outboard_bushing"])} if isinstance(ln.get("outboard_bushing"), dict) else None
+                joint(f"{_PREFIX[jt]}_{bid}_outboard", jt, bid, carrier, ob_pt, axis, ob_ex)
             link_info.append((bid, _mean(pts), ob_pt, hinge))
 
         # ── spring and damper ───────────────────────────────────────────────────────
@@ -371,7 +412,8 @@ def migrate(doc):
             scale = 1.0
             if c.get("reference") != "wheel" and mr:
                 scale = 1.0 / (mr * mr)
-                c["x_converted_from_wheel_rate"] = {"motion_ratio": mr, "estimated": given is None}
+                c["x_converted_from_wheel_rate"] = {"motion_ratio": mr, "estimated": given is None,
+                                                    **{f"wheel_{k}": sp[k] for k in ("rate", "preload") if sp.get(k) is not None}}
             if sp.get("rate") is not None:
                 c["rate"] = round(sp["rate"] * scale, 4)
             if sp.get("rate_curve") is not None:

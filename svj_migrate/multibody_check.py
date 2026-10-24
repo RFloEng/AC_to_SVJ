@@ -1,4 +1,4 @@
-# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/multibody_check.py (commit 045bb40, Apache-2.0).
+# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/multibody_check.py (commit 5561ab6, Apache-2.0).
 # Only the import lines were changed.
 """
 SVJ Multibody Topology Checker (v0.96 fields, suspension geometry rules v0.99.4)
@@ -47,7 +47,7 @@ def infer_joint_types(system_type, link_type):
     if lt in ("rod", "torque_rod"):
         return "spherical", "spherical"
     if lt == "strut" and system_type in _STRUT_FAMILY:
-        return "translational", "fixed"
+        return "translational", "spherical"          # the strut top mount pivots; a fixed top would lock the upright
     if lt == "arm":
         if system_type in _ARM_FAMILY:
             return "spherical", "revolute"

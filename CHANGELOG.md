@@ -4,6 +4,21 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Suspension migration updated to the standard (commit 5561ab6)
+
+- `svj_migrate/` is re-vendored from the standard's `tools/` (it was 045bb40). Two changes
+  to the suspension as written: a **two-pivot arm** (wishbone, trailing, semi-trailing) is no
+  longer collapsed into one revolute joint at its first pickup but written as **two
+  `spherical` joints at the real pickups** (`ball_<arm>_inboard_1` / `_2`, each with its
+  bushing); a MacPherson **strut top mount is `spherical`**, not `fixed` (a fixed top left the
+  upright with no motion under wheel travel). On a MacPherson car the joints go from 10
+  revolute, 12 spherical and 4 fixed to 6 revolute and 24 spherical, none fixed. The file still
+  declares 0.100 and validates with the standard's validator, constraint and integrity checks.
+- The standard's loop-closure solver (`tools/loop_solver.py`) reads the converted files. Its
+  alignment check says the geometry gives 0 camber where `STATIC_CAMBER` declares some: AC
+  applies static camber at the wheel and the hardpoints are at zero camber, so the difference
+  is in the data.
+
 ### Fixes found checking `rw_gra8_ford_escort_gravel`
 
 - **Suspension arms were exported as movable parts.** The `ARM_*` meshes that

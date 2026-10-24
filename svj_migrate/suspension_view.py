@@ -1,4 +1,4 @@
-# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/suspension_view.py (commit 045bb40, Apache-2.0).
+# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/suspension_view.py (commit 5561ab6, Apache-2.0).
 # Only the import lines were changed.
 """
 SVJ Derived Suspension View (v0.99.8)
@@ -172,8 +172,9 @@ def expand_suspension(doc):
             else:
                 jt = _MAP_TYPE.get(ib_t, ib_t)
                 extra = {}
-                if ib_t == "bushing" and isinstance(ln.get("bushings"), list) and ln["bushings"]:
-                    extra["bushing"] = copy.deepcopy(ln["bushings"][0])
+                bushes = ln.get("bushings") if isinstance(ln.get("bushings"), list) else []
+                if bushes and isinstance(bushes[0], dict):
+                    extra["bushing"] = copy.deepcopy(bushes[0])        # compliance stays on the joint, whatever its type
                 axis = None
                 if jt == "revolute":
                     axis = _norm(_sub(pts[1], pts[0])) if len(pts) >= 2 else ([1.0, 0.0, 0.0] if ln.get("type") == "pivot" else [0.0, 1.0, 0.0])
@@ -183,11 +184,20 @@ def expand_suspension(doc):
                     axis = direction
                 elif jt == "universal":
                     axis = [0.0, 1.0, 0.0]
-                if jt == "spherical" and len(pts) > 1:
-                    notes.append(f"{st} {ln['name']}: {len(pts)} inboard points with a spherical joint is over-constrained; using the first")
-                if len(pts) > 2 and jt == "revolute":
-                    notes.append(f"{st} {ln['name']}: {len(pts)} inboard points; hinge axis taken through the first two")
-                add_joint(f"{_PREFIX[jt]}_{bid}_inboard", jt, "chassis", bid, pts[0], axis, extra)
+                body = next((b for b in out_bodies if b["id"] == bid), None)
+                if jt == "revolute" and len(pts) >= 2 and math.dist(pts[0], pts[1]) > 1e-6:
+                    # an arm with two pivots: two spherical joints at the real pickups (their line is the hinge axis), one bushing each
+                    for k, pt in enumerate(pts[:2]):
+                        ex = {"bushing": copy.deepcopy(bushes[k])} if k < len(bushes) and isinstance(bushes[k], dict) else {}
+                        add_joint(f"{_PREFIX['spherical']}_{bid}_inboard_{k + 1}", "spherical", "chassis", bid, pt, None, ex)
+                else:
+                    add_joint(f"{_PREFIX[jt]}_{bid}_inboard", jt, "chassis", bid, pts[0], axis, extra)
+                for i, pt in enumerate(pts[2:] if jt == "revolute" and len(pts) >= 2 else pts[1:], start=3 if jt == "revolute" and len(pts) >= 2 else 2):
+                    if body is not None:
+                        body.setdefault("markers", {})[f"pickup_{i}"] = {"position": [round(x, 6) for x in pt]}
+                        notes.append(f"{st} {ln['name']}: inboard point {i} kept as marker pickup_{i} (no joint)")
+                    else:
+                        notes.append(f"{st} {ln['name']}: inboard point {i} not carried (the link body already exists)")
 
             # outboard: link <-> upright / axle body
             if ob_t is None:

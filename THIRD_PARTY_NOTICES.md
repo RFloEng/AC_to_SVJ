@@ -9,7 +9,7 @@ algorithms, standards, and libraries the code relies on, and the projects whose
 
 ### RFloEng/SVJ-standard-vehicle-json
 
-<https://github.com/RFloEng/SVJ-standard-vehicle-json> (`tools/`, commit 045bb40,
+<https://github.com/RFloEng/SVJ-standard-vehicle-json> (`tools/`, commit 5561ab6,
 Apache License 2.0, the same project whose standard this converter writes)
 
 `svj_migrate/` is a copy of the standard's suspension migration
