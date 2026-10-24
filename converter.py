@@ -1017,6 +1017,9 @@ def build_corner(corner_id: str, susp_axle: dict,
                 4),
             # AC has no rim width; the schema requires one, so estimate 0.8 x the tyre
             # section width (typical for road and race tyres) and flag it.
+            # the tyre radius the standard's solver reads (it falls back to 0.3 m, which put
+            # its ground plane 15 cm off on a car with a 0.45 m wheel)
+            "loaded_radius": round(float(rolling_radius), 4),
             "rim_width":     _est_rim_w,
             "_est_rim_width": True,
             "set_ref":      tire_set_ref,
@@ -1040,21 +1043,14 @@ def build_corner(corner_id: str, susp_axle: dict,
     if kpi is not None:
         corner["alignment"]["kpi"] = round(kpi, 5)
 
-    _geo = corner_geometry(topology, wheel_center, y_sign, is_front,
+    _geo = corner_geometry(topology, wheel_center, is_front,
                            float(wheelbase), float(cg_height), float(brake_bias))
     if _geo:
-        _align = corner["alignment"]
-        _kp = _geo.pop("kingpin", None)
-        if _kp:
-            _align["caster_trail"] = round(_kp["mechanical_trail"], 5)
-            _align["scrub_radius"] = round(_kp["scrub_radius"], 5)
-        _align["x_geometry"] = _rounded(_geo, 4)
-        if _kp:
-            _align["x_geometry"]["kingpin"] = _rounded(_kp, 5)
-        _align["x_geometry_note"] = (
-            "Derived from the hardpoints at the static position (front/side-view instant "
-            "centres, outboard brakes); an estimate, not a value from AC")
-
+        corner["alignment"]["x_geometry"] = _rounded(_geo, 4)
+        corner["alignment"]["x_geometry_note"] = (
+            "Side-view instant centre and anti-dive / anti-squat from the hardpoints at the "
+            "static position (outboard brakes); an estimate, not a value from AC. Caster, "
+            "kingpin, scrub, trail and roll centre: the standard's loop solver derives them")
     _mrt = susp_axle.get("motion_ratio_table")
     if _mrt:
         _mr0 = round(_interp(_mrt, 0.0), 4)          # at the zero point (static)

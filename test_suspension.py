@@ -446,43 +446,7 @@ def test_static_camber_is_read_in_degrees():
 # ── derived geometry (susp_geometry) ─────────────────────────────────────────────────
 import math
 
-from susp_geometry import anti_geometry, kingpin, roll_centre
-
-
-def _front_view_topo(upper, lower):
-    arm = lambda name, out, inb: {"name": name, "type": "arm", "outboard_point": out,
-                                  "inboard_points": inb}
-    return {"system_type": "double_wishbone", "upright": {"hardpoints": {}},
-            "links": [arm("upper_wishbone", *upper), arm("lower_wishbone", *lower)]}
-
-
-def test_roll_centre_parallel_and_converging_arms():
-    # horizontal, parallel arms: the roll centre is on the ground
-    t = _front_view_topo(([0, 0.60, -0.45], [[0, 0.25, -0.45]] * 2),
-                         ([0, 0.65, -0.15], [[0, 0.25, -0.15]] * 2))
-    assert abs(roll_centre(t, 0.75)["height"]) < 1e-9
-    # lower arm horizontal, upper arm sloping: IC at y = -0.45, z = -0.15
-    t = _front_view_topo(([0, 0.60, -0.45], [[0, 0.25, -0.35]] * 2),
-                         ([0, 0.65, -0.15], [[0, 0.25, -0.15]] * 2))
-    rc = roll_centre(t, 0.75)
-    assert abs(rc["height"] - 0.09375) < 1e-9
-    assert all(abs(a - b) < 1e-9 for a, b in zip(rc["instant_centre"], [-0.45, -0.15]))
-    # the left side mirrors the right
-    tl = _front_view_topo(([0, -0.60, -0.45], [[0, -0.25, -0.35]] * 2),
-                          ([0, -0.65, -0.15], [[0, -0.25, -0.15]] * 2))
-    assert abs(roll_centre(tl, -0.75)["height"] - 0.09375) < 1e-9
-
-
-def test_kingpin_angles_trail_and_scrub():
-    for sign in (1, -1):
-        t = {"system_type": "double_wishbone", "upright": {"hardpoints": {
-            "lower_ball_joint": [0.0, sign * 0.70, -0.10],
-            "upper_ball_joint": [-0.03, sign * 0.65, -0.40]}}}
-        k = kingpin(t, [0.0, sign * 0.75, -0.3], sign)
-        assert abs(k["caster_angle"] - math.atan2(0.03, 0.30)) < 1e-9
-        assert abs(k["kingpin_inclination"] - math.atan2(0.05, 0.30)) < 1e-9
-        assert abs(k["mechanical_trail"] - 0.01) < 1e-9
-        assert abs(k["scrub_radius"] - 0.75 + 0.70 + 0.05 / 3) < 1e-9
+from susp_geometry import anti_geometry
 
 
 def test_anti_dive_and_anti_squat():
@@ -498,16 +462,16 @@ def test_anti_dive_and_anti_squat():
     assert anti_geometry([1.0, -0.30], 0.0, 2.6, 0.5, True, 0.6)["anti_dive_percent"] < 0
 
 
-def test_corner_carries_the_derived_geometry():
+def test_corner_carries_the_side_view_geometry():
     c = _corner("DWB", WB, "FL")
     al = c["alignment"]
-    g = al["x_geometry"]
-    assert math.isfinite(g["roll_centre_height"])
-    assert "kingpin" in g and "caster_trail" in al and "scrub_radius" in al
-    rear = _corner("DWB", WB, "RL")["alignment"]["x_geometry"]
-    assert "kingpin" not in rear
+    assert "caster_trail" not in al and "scrub_radius" not in al    # the loop solver's job
+    g = al.get("x_geometry", {})
+    assert "roll_centre_height" not in g and "kingpin" not in g
     # nothing to derive from on a corner without links
     assert "x_geometry" not in _corner("DWB", "", "FL")["alignment"]
+    assert c["wheel"]["loaded_radius"] == 0.3            # what the solver reads
+
 
 
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

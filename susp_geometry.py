@@ -1,15 +1,15 @@
 """
-Static suspension geometry derived from a corner's hardpoints.
+Side-view suspension geometry that the SVJ standard's solver does not give: the side-view
+instant centre and the anti-dive / anti-squat it implies.
 
-Everything works in the SVJ vehicle frame used by `converter.build_corner`
-(X forward, Y right, Z down, origin on the ground at the front axle, so the
-ground is z = 0 and a point above it has a negative z).  The inputs are the
-hardpoints of one corner at the static position; nothing is simulated.
+(Caster, kingpin inclination, scrub radius, caster trail and roll centre are not derived
+here: the standard's own loop-closure solver, tools/loop_solver.py, computes them from the
+mechanism, so a file carries no second, slightly different set.)
 
-Results are estimates: they inherit the accuracy of the hardpoints (AC mods
-give them in an axle-local frame) and use the usual textbook simplifications
-(an arm is projected as the line from its ball joint to the middle of its two
-inboard pivots; brakes are taken as outboard).
+Works in the SVJ vehicle frame of `converter.build_corner` (X forward, Y right, Z down,
+ground at z = 0) from the hardpoints of one corner at the static position.  Estimates: the
+usual textbook simplifications (brakes outboard; a wishbone's side-view line is the axis
+through its two inboard pivots).
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ import math
 from typing import Optional, Sequence
 
 _EPS = 1e-9
-_MAX_RC = 1.5          # a roll centre farther than this (m) from the ground is a degenerate fit
 _MAX_ANTI = 200.0      # beyond this (%) the instant centre is too close to the wheel to mean anything
 
 
@@ -31,94 +30,46 @@ def _intersect(p1, d1, p2, d2) -> Optional[tuple]:
     return (p1[0] + t * d1[0], p1[1] + t * d1[1])
 
 
-def _proj(p, axes):
-    return (p[axes[0]], p[axes[1]])
+def _xz(p):
+    return (p[0], p[2])
 
 
-def _line_through(a, b):
-    return a, (b[0] - a[0], b[1] - a[1])
-
-
-def _arm_front(arm: dict, axes) -> Optional[tuple]:
-    """Line of a wishbone / control arm in the plane `axes`: ball joint to the
-    middle of the inboard pivots (front view)."""
-    out = arm.get("outboard_point")
-    inb = arm.get("inboard_points") or []
-    if not out or not inb:
-        return None
-    mid = [sum(p[i] for p in inb) / len(inb) for i in range(3)]
-    return _line_through(_proj(out, axes), _proj(mid, axes))
-
-
-def _arm_axis(arm: dict, axes) -> Optional[tuple]:
-    """Line through the two inboard pivots, i.e. the axis the arm rotates about
-    (side view)."""
+def _arm_axis(arm: dict) -> Optional[tuple]:
+    """Side-view line through the two inboard pivots of an arm."""
     inb = arm.get("inboard_points") or []
     if len(inb) < 2:
         return None
-    a, b = _proj(inb[0], axes), _proj(inb[1], axes)
+    a, b = _xz(inb[0]), _xz(inb[1])
     if math.hypot(b[0] - a[0], b[1] - a[1]) < _EPS:
         return None
-    return _line_through(a, b)
+    return a, (b[0] - a[0], b[1] - a[1])
 
 
-def _strut_perpendicular(hp: dict, axes) -> Optional[tuple]:
-    """MacPherson upper constraint: the line through the strut top, perpendicular
-    to the strut axis."""
+def _strut_perpendicular(hp: dict) -> Optional[tuple]:
+    """MacPherson upper constraint: the line through the strut top, perpendicular to the
+    strut axis."""
     top, low = hp.get("strut_top"), hp.get("strut_lower")
     if not top or not low:
         return None
-    a, b = _proj(top, axes), _proj(low, axes)
+    a, b = _xz(top), _xz(low)
     d = (b[0] - a[0], b[1] - a[1])
     if math.hypot(*d) < _EPS:
         return None
     return a, (-d[1], d[0])
 
 
-def _upper_lower(topo: dict, axes, kind: str):
-    """(upper_line, lower_line) for the front (`kind` = "front") or side view."""
+def side_view_ic(topo: dict) -> Optional[tuple]:
     hp = topo["upright"]["hardpoints"]
     arms = {L["name"]: L for L in topo.get("links", []) if L.get("type") == "arm"}
     lower = next((arms[n] for n in ("lower_wishbone", "lower_control_arm") if n in arms), None)
     upper = next((arms[n] for n in ("upper_wishbone", "upper_control_arm") if n in arms), None)
-    fn = _arm_front if kind == "front" else _arm_axis
-    lo = fn(lower, axes) if lower else None
+    lo = _arm_axis(lower) if lower else None
     if upper:
-        up = fn(upper, axes)
+        up = _arm_axis(upper)
     elif topo.get("system_type") == "macpherson":
-        up = _strut_perpendicular(hp, axes)
+        up = _strut_perpendicular(hp)
     else:
         up = None
-    return up, lo
-
-
-def roll_centre(topo: dict, wheel_y: float) -> Optional[dict]:
-    """Roll-centre height and front-view instant centre of one corner.
-
-    Returns {"height", "instant_centre": [y, z] | None} (height in m above the
-    ground), or None when the corner has no usable arms.
-    """
-    up, lo = _upper_lower(topo, (1, 2), "front")
-    if not up or not lo:
-        return None
-    ic = _intersect(*up, *lo)
-    contact = (wheel_y, 0.0)
-    if ic is None:                                  # parallel arms: IC at infinity
-        d = lo[1]
-    else:
-        d = (ic[0] - contact[0], ic[1] - contact[1])
-    if abs(d[0]) < _EPS:                            # line is vertical: never meets the centreline
-        return None
-    z = d[1] * (0.0 - contact[0]) / d[0]
-    height = -z
-    if abs(height) > _MAX_RC:
-        return None
-    return {"height": height,
-            "instant_centre": [ic[0], ic[1]] if ic else None}
-
-
-def side_view_ic(topo: dict) -> Optional[tuple]:
-    up, lo = _upper_lower(topo, (0, 2), "side")
     if not up or not lo:
         return None
     return _intersect(*up, *lo)
@@ -146,53 +97,16 @@ def anti_geometry(ic: Optional[Sequence[float]], wheel_x: float, wheelbase: floa
     return {"anti_squat_percent": pct}
 
 
-def kingpin(topo: dict, wheel_xy: Sequence[float], y_sign: int) -> Optional[dict]:
-    """Steering-axis geometry of a front corner (lower ball joint to the upper ball
-    joint, or to the strut top on a MacPherson axle).
-
-    caster_angle / kingpin_inclination in rad (positive: axis leans back / in at the
-    top); mechanical_trail positive when the axis meets the ground ahead of the contact
-    patch; scrub_radius positive when it meets the ground inboard of it.
-    """
-    hp = topo["upright"]["hardpoints"]
-    low = hp.get("lower_ball_joint")
-    up = hp.get("upper_ball_joint") if topo.get("system_type") != "macpherson" \
-        else hp.get("strut_top")
-    if not low or not up:
-        return None
-    dz = low[2] - up[2]                              # > 0 when the upper point is higher
-    if dz < 0.02:
-        return None
-    t = -low[2] / (up[2] - low[2])                   # ground (z = 0) on the axis line
-    gx = low[0] + t * (up[0] - low[0])
-    gy = low[1] + t * (up[1] - low[1])
-    return {
-        "caster_angle": math.atan2(low[0] - up[0], dz),
-        "kingpin_inclination": math.atan2(y_sign * (low[1] - up[1]), dz),
-        "mechanical_trail": gx - wheel_xy[0],
-        "scrub_radius": y_sign * (wheel_xy[1] - gy),
-    }
-
-
-def corner_geometry(topo: dict, wheel_center: Sequence[float], y_sign: int, is_front: bool,
+def corner_geometry(topo: dict, wheel_center: Sequence[float], is_front: bool,
                     wheelbase: float, cg_height: float, front_brake: float) -> dict:
-    """All the derived numbers of one corner.  Keys that cannot be computed are left out."""
+    """The side-view numbers of one corner.  Keys that cannot be computed are left out."""
     out: dict = {}
     if topo.get("system_type") not in ("double_wishbone", "macpherson", "multi_link"):
         return out
-    rc = roll_centre(topo, wheel_center[1])
-    if rc:
-        out["roll_centre_height"] = rc["height"]
-        if rc["instant_centre"]:
-            out["front_view_ic"] = rc["instant_centre"]
     ic = side_view_ic(topo)
     if ic:
         out["side_view_ic"] = list(ic)
         a = anti_geometry(ic, wheel_center[0], wheelbase, cg_height, is_front, front_brake)
         if a:
             out.update(a)
-    if is_front:
-        k = kingpin(topo, wheel_center, y_sign)
-        if k:
-            out["kingpin"] = k
     return out

@@ -58,22 +58,23 @@ All notable changes are documented here.
   Nothing moves on screen and the door / wiper animations are unchanged. Every car with a
   KN5 now has a chassis binding. GLBs made before this need regenerating.
 
-### Derived suspension geometry
+### Side-view suspension geometry
 
 - New `susp_geometry.py`, called from `build_corner`, derives from the static hardpoints of
-  double-wishbone, multi-link and MacPherson corners: **roll-centre height** and front-view
-  instant centre, side-view instant centre with **anti-dive** (front, braking, scaled by the
-  front brake share) and **anti-squat** (rear, all drive force on the axle) in percent,
-  and for the front axle the **steering axis**: caster angle, kingpin inclination,
-  mechanical trail and scrub radius. MacPherson uses the strut top and the perpendicular
-  to the strut axis in place of the upper arm.
-- Written to the wheel station's `alignment`: `caster_trail` and `scrub_radius` (schema
-  fields) and an `x_geometry` block with the rest. These are estimates from the hardpoints
-  (outboard brakes, arm = ball joint to the middle of its pivots), flagged in
-  `x_geometry_note`; the `caster` / `kpi` read from suspensions.ini are left as they were.
-  Solid axles, trailing arms and corners without arms get nothing.
-- Checked on synthetic geometry with hand-computed values (`test_suspension.py`); not yet
-  compared against a real car's published numbers.
+  double-wishbone, multi-link and MacPherson corners what the standard's solver does not give:
+  the side-view instant centre and **anti-dive** (front, braking, scaled by the front brake
+  share) and **anti-squat** (rear, all drive force on the axle) in percent, left out beyond
+  +-200 % where the centre is too close to the wheel to mean anything. Written to the wheel
+  station's `alignment.x_geometry` with a note that it is an estimate.
+- Caster, kingpin inclination, scrub radius, caster trail and roll centre are **not** written:
+  the standard's `tools/loop_solver.py` derives them from the mechanism, and two sets that
+  differ by centimetres are worse than one. (A first version wrote them from the static
+  geometry; on a MacPherson car it put scrub at -17 mm where the solver said +12 mm. The
+  cause was the solver, not the geometry: it reads the tyre radius from the wheel station
+  and fell back to 0.3 m on a car with a 0.45 m wheel, which put its ground plane 15 cm off.)
+- `wheel_stations[].wheel.loaded_radius` is now written (the tyre radius the wheel centre
+  height is built from), so the solver's ground plane, scrub and trail are right. With it the
+  solver and the first version agree to a few mm.
 
 ### Several cars at once
 
