@@ -2261,11 +2261,17 @@ def movable_parts_to_svj(svj: dict, parts: list, mesh_id: str,
     rename: dict = {}
     nb = nj = 0
 
+    # An animation that turns a hub, wheel or steering node is the suspension (or the
+    # steering with its driver rig) travelling: every node it moves, arms and springs
+    # included, is covered by the suspension model and is not a part that opens.
+    susp_anims = {m["animation"] for m in parts if _NOT_MOVABLE.match(m["node"])}
+
     # The movable parts: revolute / prismatic joints with a pivot in the SVJ frame.
     cand, done = [], set()
     for m in parts:
         piv, ax = m.get("pivot_svj"), m.get("axis_svj")
         if (m["joint"] not in ("revolute", "prismatic") or not piv or not ax
+                or m["animation"] in susp_anims
                 or m["node"] in done or m["node"] in (bound or ())
                 or _NOT_MOVABLE.match(m["node"])):
             continue

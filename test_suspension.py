@@ -435,6 +435,13 @@ def test_unified_suspension_output():
     co, cn = _clean(old), _clean(new)
     assert all(cn[k] == co[k] for k in ("tires", "powertrain", "brakes", "aerodynamics"))
 
+def test_static_camber_is_read_in_degrees():
+    import math
+    sec = parse_ini("[S]\nTYPE=DWB\nSTATIC_CAMBER=-2.0\n")["S"]
+    assert abs(parse_suspension_axle(sec)["camber"] - math.radians(-2.0)) < 1e-9
+    sec = parse_ini("[S]\nTYPE=DWB\nCAMBER=-0.015\n")["S"]          # as written
+    assert parse_suspension_axle(sec)["camber"] == -0.015
+
 
 # ── derived geometry (susp_geometry) ─────────────────────────────────────────────────
 import math

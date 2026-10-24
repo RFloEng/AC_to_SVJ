@@ -4,6 +4,20 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Fixes found checking `rw_gra8_ford_escort_gravel`
+
+- **Suspension arms were exported as movable parts.** The `ARM_*` meshes that
+  `car_susp_*.ksanim` moves with the hub became bodies hinged to the chassis (20 of them on
+  this car, with `susp_lf` ... poses). An animation that turns a hub, wheel or steering node
+  is the suspension (or the steering with its driver rig) travelling, so none of its nodes is
+  a movable part now; the suspension model covers them. The GLB animation is unchanged: it is
+  the ksanim as written (frame 0 full droop, the middle frame the rest pose, the last full
+  bump, about +-16 cm on this car).
+- **Static camber was in the wrong unit.** `STATIC_CAMBER` is written in degrees, but the
+  number went into `alignment.camber` (rad) as it was: -2.0 meant -115 degrees. It is now
+  converted (`CAMBER`, which AC does not use, is still taken as written). Affects every car
+  that has a `STATIC_CAMBER`; regenerate.
+
 ### Movable parts follow the standard's vocabulary
 
 - **Side and position from the hinge.** A door, window or seat is named `door_fl` / `door_fr`

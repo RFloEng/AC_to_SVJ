@@ -7,6 +7,7 @@ These helpers keep converter.py focused on SVJ assembly while isolating the
 """
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Optional
@@ -112,6 +113,15 @@ def _b(v) -> Optional[bool]:
     if s in ("0", "FALSE", "NO", "OFF"):
         return False
     return None
+
+
+def _camber_rad(sec) -> Optional[float]:
+    """Static camber in rad: ``STATIC_CAMBER`` is in degrees (AC), ``CAMBER`` as written."""
+    c = _m(sec.get("CAMBER"))
+    if c is not None:
+        return c
+    d = _m(sec.get("STATIC_CAMBER"))
+    return None if d is None else math.radians(d)
 
 
 def _first(*vals, default=None):
@@ -511,8 +521,8 @@ def parse_suspension_axle(sec: dict) -> dict:
         "basey":          _m(sec.get("BASEY")),
         "ride_height":    _first(sec.get("RIDE_HEIGHT"), sec.get("BASEY"),
                                  default=None),
-        "camber":         _first(sec.get("CAMBER"), sec.get("STATIC_CAMBER"),
-                                 default=None),
+        # radians: STATIC_CAMBER is written in degrees by AC (-1.5 = 1.5 deg of negative camber)
+        "camber":         _camber_rad(sec),
         "toe":            _first(sec.get("TOE"), sec.get("TOE_OUT"),
                                  sec.get("STATIC_TOE"), default=None),
         "caster":         _m(sec.get("CASTER")),

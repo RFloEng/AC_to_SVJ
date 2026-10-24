@@ -243,6 +243,22 @@ def test_doors_take_front_rear_and_side_from_the_hinge_and_keep_their_trim_apart
                                                     "hinge_door_fl_002"}
 
 
+def test_suspension_animation_nodes_are_not_movable_parts():
+    """car_susp_LF.ksanim turns HUB_LF, WHEEL_LF and the arm / spring meshes: the arms are
+    the suspension travelling, not parts that open."""
+    import converter as C
+    parts = [
+        _mp("HUB_LF", "car_susp_LF", (-0.1, -0.7, -0.3)),
+        _mp("ARM_LF02", "car_susp_LF", (-0.2, -0.4, -0.3), ax=(1.0, 0.0, 0.0)),
+        _mp("ARM_LF03", "car_susp_LF", (-0.3, -0.4, -0.3), ax=(1.0, 0.0, 0.0)),
+        _mp("DOOR_L", "car_door_L", (-0.6, -0.8, -0.5)),
+    ]
+    svj = {"chassis": {}}
+    nb, nj, ren = C.movable_parts_to_svj(svj, parts, "m")
+    assert set(ren) == {"DOOR_L"} and nb == 1
+    assert [p["id"] for p in svj["poses"]] == ["closed", "door_fl_open"]
+
+
 def test_part_ids_put_the_side_last_and_stay_unique():
     import converter as C
     taken: set = set()
