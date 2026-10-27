@@ -716,6 +716,56 @@ def detect_tyre_compounds(ini: dict) -> list[tuple[str, str]]:
     return pairs
 
 
+_MARKED_SIZE = re.compile(r"(?<![\d./])(\d{3})\s*/\s*(\d{2})\s*(?:Z?R|-)?\s*(\d{2})(?!\d)", re.I)
+
+
+def _marked(text: str) -> Optional[tuple]:
+    """(width mm, aspect %, rim in) of the first plausible tyre size in `text`."""
+    for m in _MARKED_SIZE.finditer(text):
+        w, a, r = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 125 <= w <= 425 and 20 <= a <= 95 and 10 <= r <= 30:
+            return w, a, r
+    return None
+
+
+def parse_marked_tyre_sizes(raw: str) -> dict:
+    """Tyre sizes a car's author wrote into tyres.ini (AC has no field for it).
+
+    Two places: a section's ``NAME=Avon CR322 185/70R13`` (that section) and the comment
+    lines ``;F 235/40ZR18 91 W, 8.0JX18 ...`` / ``;R 295/35ZR18 ...`` (front / rear axle).
+    Returns ``{"sections": {"FRONT_1": (185, 70, 13), ...}, "F": ..., "R": ...}``; the axle
+    entries are the fallback for a section without its own.
+    """
+    out: dict = {"sections": {}}
+    sec = ""
+    for line in (raw or "").splitlines():
+        st = line.strip()
+        m = re.match(r"\[(.+?)\]", st)
+        if m:
+            sec = m.group(1).strip().upper()
+            continue
+        if st.startswith(";"):
+            m = re.match(r";\s*([FR])\b[\s:=-]*(.*)", st, re.I)
+            if m and m.group(1).upper() not in out:
+                size = _marked(m.group(2))
+                if size:
+                    out[m.group(1).upper()] = size
+        elif sec and re.match(r"(FRONT|REAR)(_\d+)?$", sec) and re.match(r"NAME\s*=", st, re.I):
+            size = _marked(st.split("=", 1)[1].split(";")[0])
+            if size:
+                out["sections"].setdefault(sec, size)
+    return out
+
+
+def marked_size_for(marked: dict, section: str) -> Optional[tuple]:
+    """The marked size of a tyres.ini section: its own, else the plain axle section's, else the
+    axle's comment line."""
+    sec = section.upper()
+    axle = "FRONT" if sec.startswith("FRONT") else "REAR"
+    secs = marked.get("sections", {})
+    return secs.get(sec) or secs.get(axle) or marked.get(axle[0])
+
+
 def parse_tyre_extras(sec: dict) -> dict:
     """Capture tyres.ini fields beyond the Pacejka fit.
 
@@ -736,20 +786,6 @@ def parse_tyre_extras(sec: dict) -> dict:
         "dcamber_1":              _m(sec.get("DCAMBER_1")),
         "friction_limit_angle":   _m(sec.get("FRICTION_LIMIT_ANGLE")),
 
-        # ── CSP Extended Physics slip-curve shape ─────────────────────────────
-        # FALLOFF_LEVEL  = kinetic/peak friction ratio (mapped to KINETIC_RATIO in
-        #                  tire_lab; stored here for reference)
-        # FALLOFF_SPEED  = post-peak sharpness (higher → sharper drop-off)
-        # DY_REF / DX_REF = reference peak friction (e.g. for wear normalisation)
-        "csp": {
-            "falloff_level":  _m(sec.get("FALLOFF_LEVEL")),
-            "falloff_speed":  _m(sec.get("FALLOFF_SPEED")),
-            "dy_ref":         _m(sec.get("DY_REF")),
-            "dx_ref":         _m(sec.get("DX_REF")),
-            "cx_mult":        _m(sec.get("CX_MULT")),
-            "flex_gain":      _m(sec.get("FLEX_GAIN")),
-        },
-
         # ── Rolling resistance ────────────────────────────────────────────────
         "rolling_resistance": {
             "k0":             _m(sec.get("ROLLING_RESISTANCE_0")),
@@ -768,7 +804,7 @@ def parse_tyre_extras(sec: dict) -> dict:
         },
     }
     # clean nested Nones
-    for nested in ("rolling_resistance", "pressure_model", "csp"):
+    for nested in ("rolling_resistance", "pressure_model"):
         out[nested] = {k: v for k, v in out[nested].items() if v is not None}
         if not out[nested]:
             out[nested] = None

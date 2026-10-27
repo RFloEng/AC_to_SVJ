@@ -87,6 +87,7 @@ from ac_parsers import (
     parse_damper_tables, parse_bumpstop_tables, parse_inline_lut,
     parse_brakes, parse_aero, parse_car_extras,
     detect_tyre_compounds, parse_tyre_extras, parse_tyre_thermal,
+    parse_marked_tyre_sizes, marked_size_for,
     parse_controller_ini, parse_setup_ranges,
     _parse_vec3, _f, _i, _m, _b, _first, _resolve_lut,
 )
@@ -1326,7 +1327,10 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         label = suffix if suffix else ""
         return f"tire_{section.lower()}{label}_{round(tw*1000)}_{round(asp*100)}r{rim_in}"
 
-    def tire_set_obj(tw, asp, rim_rv, label, compound_suffix):
+    _marked_sizes = parse_marked_tyre_sizes(
+        next((v for k, v in ini_files.items() if k.lower() == "tyres.ini"), ""))
+
+    def tire_set_obj(tw, asp, rim_rv, label, compound_suffix, marked=None):
         rim_in  = round(rim_rv * 2 / 0.0254) - 1  # Kunos +1 inch convention
         rim_d   = round(rim_in * 0.0254, 4)           # nominal diameter (m)
         overall = round(rim_d + 2 * tw * asp, 4)
@@ -1341,7 +1345,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         out = {
             "description":    f"AC-derived tire {size_code} ({label}{compound_suffix})",
             "size_code":      size_code,
-            "source":         "estimated",
+            "source":         "estimated",      # the size code is derived unless marked
             "dimensions":     dims,
             "rim": {"diameter": round(rim_in * 0.0254, 4),
                     "width_nominal": round(tw, 4)},
@@ -1352,6 +1356,20 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         # The schema takes a size code like 205/55R16 and an aspect ratio up to 1; a tyre
         # whose sidewall is taller than it is wide (the data of some mods) gets neither,
         # the heights stay in `dimensions`.
+        if (marked and abs(marked[2] - rim_in) <= 1 and abs(marked[0] / 1000 - tw) <= 0.25 * tw
+                and abs(marked[1] / 100 - asp) <= 0.2 * asp):
+            # the size the car's author wrote in tyres.ini: the nominal figures follow it,
+            # the measured height and overall diameter stay what the physics gives
+            mw, ma, mr = marked
+            out["size_code"] = size_code = f"{mw}/{ma}R{mr}"
+            out["description"] = f"AC tire {size_code} ({label}{compound_suffix})"
+            dims["section_width"], dims["aspect_ratio"] = round(mw / 1000, 4), round(ma / 100, 3)
+            dims["rim_diameter_code"] = mr
+            out["rim"]["diameter"] = round(mr * 0.0254, 4)
+            out["x_size_code_source"] = "tyres.ini (written by the car's author)"
+        elif marked:
+            out["x_size_code_note"] = (f"tyres.ini says {marked[0]}/{marked[1]}R{marked[2]}, "
+                                       "which does not fit the tyre's size in the physics: derived")
         if not re.fullmatch(r"\d{3}/\d{2}R\d{2}", size_code):
             del out["size_code"]
         if asp > 1.0:
@@ -1400,8 +1418,10 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         if br_f: bench_results[f"front{suffix}"] = br_f
         if br_r: bench_results[f"rear{suffix}"]  = br_r
 
-        front_obj = tire_set_obj(tw_f, asp_f, rim_f, "front", suffix)
-        rear_obj  = tire_set_obj(tw_r, asp_r, rim_r, "rear",  suffix)
+        front_obj = tire_set_obj(tw_f, asp_f, rim_f, "front", suffix,
+                                 marked_size_for(_marked_sizes, f_sec))
+        rear_obj  = tire_set_obj(tw_r, asp_r, rim_r, "rear",  suffix,
+                                 marked_size_for(_marked_sizes, r_sec))
 
         # Thermal + extras
         thermal = parse_tyre_thermal(t, suffix)

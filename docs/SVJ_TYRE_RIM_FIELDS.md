@@ -204,7 +204,8 @@ The `_est: true` flag on every tyre set signals that dimensions are estimated fr
 | `tires.front` / `tires.rear` axle block | Not emitted — all data is in `tires.sets` |
 | `rim.width_nominal` (actual rim width) | AC does not store rim width; field is set to tyre section width as approximation |
 | `pressure` (car-specific) | Hardcoded 210 000 Pa; use `pressure_model.ideal_psi` for actual ideal pressure |
-| `tires.sets.<key>.csp` | Present only for CSP Extended Physics cars; omitted for vanilla AC |
+| `tires.sets.<key>.csp` | Not written (until now it held CSP-only values; they are not part of the Pacejka model) |
+| Marked tyre size (`205/45R17`) | AC has no field for it. `size_code` is derived from `WIDTH`, `RADIUS` and `RIM_RADIUS`, except where the car's author wrote the size in `tyres.ini` (`NAME=` of a tyre section, or a `;F ...` / `;R ...` comment): then `size_code` is that size and `x_size_code_source` says so |
 
 ---
 

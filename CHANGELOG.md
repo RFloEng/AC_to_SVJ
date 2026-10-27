@@ -4,6 +4,21 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Tyre size and CSP values
+
+- **Marked tyre size.** AC stores `WIDTH`, `RADIUS` and `RIM_RADIUS` and nothing about the
+  size on the sidewall; the converter derived a size code (`205/39R18`) from them. Where the
+  car's author wrote the size in `tyres.ini` (a tyre section's `NAME=Avon CR322 185/70R13`, or
+  the comment lines `;F 235/40ZR18 ...` / `;R ...`), the set now carries that size (`size_code`,
+  `section_width`, `aspect_ratio`, `rim_diameter_code`, rim diameter) with
+  `x_size_code_source`; the measured section height and overall diameter stay what the
+  physics gives. A mark that contradicts the physics (rim off by more than an inch, width off
+  by 25 %, aspect ratio by 20 %) is ignored and noted in `x_size_code_note`. In a large
+  install 61 cars carry such a mark. Everything else is still derived and flagged `_est`.
+- **CSP-only values are no longer written.** `tires.sets.<key>.csp` (`FALLOFF_LEVEL`,
+  `FALLOFF_SPEED`, `DY_REF`, `DX_REF`, `CX_MULT`, `FLEX_GAIN`) is gone: the fit uses them, but
+  they are not part of the Pacejka model the SVJ carries and meant nothing to a consumer.
+
 ### Suspension migration updated to the standard (commit 5561ab6)
 
 - `svj_migrate/` is re-vendored from the standard's `tools/` (it was 045bb40). Two changes

@@ -229,7 +229,7 @@ parameters were found, or `csp_mixed` when only some were present.
 ### Extended tyre data in SVJ
 
 Beyond the Pacejka block, each tyre set in the SVJ carries additional
-structural and CSP fields wherever the source `tyres.ini` provides them:
+structural fields wherever the source `tyres.ini` provides them:
 
 ```json
 "vertical_stiffness_n_m": 313466,
@@ -240,10 +240,10 @@ structural and CSP fields wherever the source `tyres.ini` provides them:
 "speed_sensitivity":        0.003181,
 "rolling_resistance": { "k0": 9, "k1": 0.00065, "k2": 5154, "pressure_gain": 0.51 },
 "pressure_model": { "static_psi": 21, "ideal_psi": 30, "spring_gain": 7748, ... },
-"csp": { "falloff_level": 0.86, "falloff_speed": 2, "dy_ref": 1.67, "cx_mult": 1.08, ... }
 ```
 
-The `csp` sub-object is omitted for vanilla AC cars that lack these fields.
+CSP-only values (`FALLOFF_*`, `DY_REF`, ...) are used by the fit and not written: they are not
+part of the Pacejka model the SVJ carries.
 
 ## Coordinate system
 
