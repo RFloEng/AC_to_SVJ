@@ -459,6 +459,17 @@ def make_damper_curve(rate: float, factor: float = 1.0) -> list:
     ]
 
 
+def ac_damper_curve(slow: float, fast: Optional[float], thr: Optional[float],
+                    v_max: float = 0.5) -> list:
+    """AC's damper as force against speed (m/s, N): ``slow`` N s/m up to ``thr``, then
+    ``fast`` beyond it (continuous).  Without a usable second slope it is the straight
+    line of ``slow``."""
+    if fast is not None and thr is not None and 0 < thr < v_max and fast != slow:
+        return [[0.0, 0], [round(thr, 5), round(slow * thr, 2)],
+                [v_max, round(slow * thr + fast * (v_max - thr), 2)]]
+    return [[0.0, 0], [v_max, round(slow * v_max, 2)]]
+
+
 def synth_torque_curve(idle_rpm: float, max_rpm: float,
                        cm_bhp: Optional[float]) -> list:
     if cm_bhp and cm_bhp > 0:
@@ -902,8 +913,15 @@ def build_corner(corner_id: str, susp_axle: dict,
         spring["rod_length"] = susp_axle["rod_length"]
 
     _tab = susp_axle.get("damper_tables")
-    _bump_c = make_damper_curve(bump_raw)
-    _reb_c = make_damper_curve(reb_raw, factor=1.5)
+    if susp_axle.get("bump_rate") and susp_axle.get("rebound_rate"):
+        # the car's own numbers: AC's two-slope damper, bump and rebound each
+        _bump_c = ac_damper_curve(bump_raw, susp_axle.get("damp_fast_bump"),
+                                  susp_axle.get("damp_fast_bump_thr"))
+        _reb_c = ac_damper_curve(reb_raw, susp_axle.get("damp_fast_rebound"),
+                                 susp_axle.get("damp_fast_rebound_thr"))
+    else:                                       # no damping in the file: a plausible shape
+        _bump_c = make_damper_curve(bump_raw)
+        _reb_c = make_damper_curve(reb_raw, factor=1.5)
     if _tab:
         # real force-against-speed tables (CSP): speed in m/s, force in N, sign dropped
         _bump_c = [[round(v, 5), round(f, 2)] for v, f in _tab["bump"]]
@@ -1081,6 +1099,18 @@ def build_corner(corner_id: str, susp_axle: dict,
                                    "rate_curve": _curve}
         else:
             corner["static_setup"]["x_bump_stop_curve"] = _curve   # no usable gap
+    elif susp_axle.get("bump_stop_rate"):
+        # vanilla AC: BUMP_STOP_RATE (N/m) after BUMPSTOP_UP of compression, and the same
+        # stop for BUMPSTOP_DN of rebound
+        _bsr = susp_axle["bump_stop_rate"]
+        _bs = susp_axle.get("bumpstop") or {}
+        if _bs.get("up") is not None and 0 <= _bs["up"] < 0.5:
+            corner["bump_stop"] = {"gap": round(_bs["up"], 4), "type": "rubber", "rate": _bsr}
+        if _bs.get("down") is not None and 0 <= _bs["down"] < 0.5:
+            corner["rebound_stop"] = {"gap": round(_bs["down"], 4), "type": "rubber",
+                                      "rate": _bsr}
+    if susp_axle.get("packer_range") and not _bt:
+        corner["static_setup"]["x_packer_range"] = susp_axle["packer_range"]
     wm = susp_axle.get("unsprung_mass")
     if wm:
         corner["wheel"]["mass"] = round(wm / 2, 2)

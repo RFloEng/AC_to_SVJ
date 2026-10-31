@@ -4,6 +4,22 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Dampers and bump stops of vanilla AC
+
+- **Dampers are AC's own two slopes.** The bump and rebound curves were synthesised from one
+  scalar with an invented shape, and the rebound scaled by 1.5; `DAMP_FAST_*` and the
+  thresholds were ignored. Now, when the car gives `DAMP_BUMP` and `DAMP_REBOUND`, the curves
+  are force against speed as AC applies it: `DAMP_*` up to `DAMP_FAST_*THRESHOLD`, then
+  `DAMP_FAST_*` (a straight line without a second slope). Without damping in the file the old
+  plausible shape is kept.
+- **Bump stops were lost in the unified suspension.** For a car without CSP tables they were
+  written under `damper.bumpstops`, which the migration does not read, and the parser looked
+  for `BUMPSTOP_RATE` (AC's key is `BUMP_STOP_RATE`). They are now `bump_stop` (gap
+  `BUMPSTOP_UP`) and `rebound_stop` (gap `BUMPSTOP_DN`) with `BUMP_STOP_RATE`, so the
+  migration writes the stop springs of the standard; `PACKER_RANGE` goes to
+  `static_setup.x_packer_range`. `PROGRESSIVE_SPRING_RATE` is read as well as the old name.
+  Regenerate cars converted before this.
+
 ### Tyre size and CSP values
 
 - **Marked tyre size.** AC stores `WIDTH`, `RADIUS` and `RIM_RADIUS` and nothing about the

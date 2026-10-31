@@ -505,12 +505,19 @@ def parse_suspension_axle(sec: dict) -> dict:
         "hardpoints_ac":  hp or None,  # AC axes, caller transforms
         "bumpstop":       bumpstop or None,
         "rod_length":     _m(sec.get("ROD_LENGTH")),
-        "progressive":    _m(sec.get("PROGRESSIVE_SPRING_FACTOR")),
+        "progressive":    _first(sec.get("PROGRESSIVE_SPRING_RATE"),
+                                 sec.get("PROGRESSIVE_SPRING_FACTOR"), default=None),
         "unsprung_mass":  _first(sec.get("WHEEL_MASS"), sec.get("HUB_MASS"),
                                  sec.get("UNSPRUNG_MASS"), default=None),
         "spring_rate":    _m(sec.get("SPRING_RATE") or sec.get("SPRING")),
         "bump_rate":      _m(sec.get("BUMP") or sec.get("DAMP_BUMP")),
         "rebound_rate":   _m(sec.get("REBOUND") or sec.get("DAMP_REBOUND")),
+        # the second slope of AC's damper: above the threshold speed (m/s) the force grows
+        # with DAMP_FAST_* instead of DAMP_*
+        "damp_fast_bump":        _m(sec.get("DAMP_FAST_BUMP")),
+        "damp_fast_bump_thr":    _m(sec.get("DAMP_FAST_BUMPTHRESHOLD")),
+        "damp_fast_rebound":     _m(sec.get("DAMP_FAST_REBOUND")),
+        "damp_fast_rebound_thr": _m(sec.get("DAMP_FAST_REBOUNDTHRESHOLD")),
         "arb_rate":       _m(sec.get("ARB") or sec.get("ANTI_ROLL_K")),
         # AC's BASEY is *not* ride height — Kunos defines it as
         # "Distance of CG from the centre of the wheel; FrontWheelRadius+BASEY=front CoG".

@@ -435,6 +435,27 @@ def test_unified_suspension_output():
     co, cn = _clean(old), _clean(new)
     assert all(cn[k] == co[k] for k in ("tires", "powertrain", "brakes", "aerodynamics"))
 
+def test_ac_damper_is_two_slopes_and_vanilla_bump_stops_are_kept():
+    from converter import ac_damper_curve
+    assert ac_damper_curve(2244, 1320, 0.03) == [[0.0, 0], [0.03, 67.32], [0.5, 687.72]]
+    assert ac_damper_curve(2000, None, None) == [[0.0, 0], [0.5, 1000.0]]       # straight line
+    body = ("DAMP_BUMP=2244
+DAMP_REBOUND=6500
+DAMP_FAST_BUMP=1320
+DAMP_FAST_BUMPTHRESHOLD=0.03
+"
+            "BUMP_STOP_RATE=35000
+BUMPSTOP_UP=0.06
+BUMPSTOP_DN=0.105
+PACKER_RANGE=0.28
+")
+    c = _corner("DWB", body, "FL")
+    assert c["bump_stop"] == {"gap": 0.06, "type": "rubber", "rate": 35000.0}
+    assert c["rebound_stop"]["gap"] == 0.105
+    assert c["static_setup"]["x_packer_range"] == 0.28
+    assert c["damper"]["bump_curve"] == [[0.0, 0], [0.03, 67.32], [0.5, 687.72]]
+
+
 def test_static_camber_is_read_in_degrees():
     import math
     sec = parse_ini("[S]\nTYPE=DWB\nSTATIC_CAMBER=-2.0\n")["S"]
