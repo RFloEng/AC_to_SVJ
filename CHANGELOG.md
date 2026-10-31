@@ -4,6 +4,29 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### SVJ from other simulators: BeamNG, Forza, Project CARS, rFactor and the standard's examples
+
+- Tried on 33 BeamNG files, one each of Forza Horizon, Project CARS and rFactor, and the 29
+  vehicle examples of the standard: 51 convert, 14 are refused with a reason (12 have three or
+  four axles, which an AC car cannot have; one is a tyre, not a vehicle; one more is missing its
+  chassis). All 51 read back with AC_to_SVJ as four-wheel cars.
+- **Missing sections are filled in** (the standard makes tyres, powertrain and brakes optional): a
+  generic road tyre of the wheel's size, generic brakes and drivetrain, each said in
+  `conversion_log.txt` as `NOTE [loader]`. A null year or mass no longer stops the loader.
+- **Suspension types the standard has and AC does not** map to the closest AC type: de Dion and
+  beam axle to the solid axle, torsion beam and leading arm to the trailing arm, swing and
+  pendulum axle to the semi-trailing arm, Chapman strut to MacPherson, parallelogram to the
+  double wishbone.
+- **No suspension geometry** (BeamNG's corners hold a hub centre only): a typical double
+  wishbone for the track is written, marked `PLACEHOLDER` in the file and in the log, so the car
+  loads instead of failing.
+- **The log says what looks wrong** in the source: a centre of gravity that puts 92 % of the weight
+  on the front axle, a track that does not match the hub centres (both true of the BeamNG files).
+- **The tyre fit works around the car's own wheel load**, from its mass and CG, instead of the
+  reference load of the other simulator (17,100 N for a Skip Barber, whose wheels carry about 1,200 N);
+  `FZ0` is that wheel load. `CX_MULT` is no longer written: the longitudinal stiffness of
+  `tire_lab`'s AC model is scaled so oddly that the fit only hit its bound.
+
 ### SVJ from other simulators (tried on the Richard Burns Rally files)
 
 - **Tyres without AC parameters.** An SVJ whose tyre set has only a Pacejka block (the standard's

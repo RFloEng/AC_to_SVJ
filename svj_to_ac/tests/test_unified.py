@@ -181,3 +181,53 @@ def test_tyres_are_fitted_to_a_pacejka_block_of_another_source() -> None:
                                         DX0=p["DX0"], DX1=p["DX1"], LS_EXPX=p["LS_EXPX"],
                                         FLEX=p["FLEX"]))["mu_y"]
     assert abs(mu_fit - target["mu_y"]) / target["mu_y"] < 0.12
+
+
+def _mx5_json() -> dict:
+    return json.loads((REPO / "examples" / "mx5_nd_club.svj.json").read_text(encoding="utf-8"))
+
+
+def _load_dict(d: dict, tmp_path: Path):
+    p = tmp_path / "car.svj.json"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    return svj_loader.load(p)
+
+
+def test_a_file_without_tyres_brakes_or_powertrain_still_converts(tmp_path) -> None:
+    import pack_car
+    d = _mx5_json()
+    for k in ("tires", "brakes", "powertrain"):
+        d.pop(k)
+    doc = _load_dict(d, tmp_path)
+    assert any("no tyres" in n for n in doc.notes) and any("no brakes" in n for n in doc.notes)
+    res = pack_car.assemble(doc, tmp_path / "out")
+    tyres = _parse((res.data_dir / "tyres.ini").read_text(encoding="utf-8"))
+    assert "FRONT" in tyres and "REAR" in tyres                      # a generic tyre of the wheel's size
+    assert "conversion_log.txt" in {p.name for p in res.car_dir.iterdir()}
+
+
+def test_more_than_two_axles_is_refused_with_a_reason(tmp_path) -> None:
+    d = {"vehicle_info": {}, "chassis": {}, "wheel_stations": [
+        {"id": f"A{i}{s}", "axle": f"A{i}", "side": s} for i in (1, 2, 3) for s in "LR"]}
+    with pytest.raises(svj_loader.SvjLoadError, match="two axles"):
+        _load_dict(d, tmp_path)
+
+
+def test_sparse_corners_get_a_placeholder_geometry(tmp_path) -> None:
+    from ac_writers import suspensions_ini
+    d = _mx5_json()
+    for k in ("FL", "FR", "RL", "RR"):                               # BeamNG gives a hub centre only
+        d["suspension"][k]["topology"] = {"hardpoints": {"hub_centre": [0.0, 0.465, 0.0]}}
+    doc = _load_dict(d, tmp_path)
+    text = suspensions_ini.write(doc, tmp_path / "data").read_text(encoding="utf-8")
+    assert "PLACEHOLDER" in text and "WBCAR_TOP_FRONT" in text and _parse(text)["FRONT"]["TYPE"] == "1"
+
+
+def test_other_suspension_types_map_onto_ac_types(tmp_path) -> None:
+    from ac_writers import suspensions_ini
+    d = _mx5_json()
+    for k in ("RL", "RR"):
+        d["suspension"][k]["topology"]["system_type"] = "de_dion"
+    doc = _load_dict(d, tmp_path)
+    text = suspensions_ini.write(doc, tmp_path / "data").read_text(encoding="utf-8")
+    assert _parse(text)["REAR"]["TYPE"] == "3"                       # AC's solid axle

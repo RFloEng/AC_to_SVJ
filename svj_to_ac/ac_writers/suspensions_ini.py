@@ -143,9 +143,31 @@ def _axle_block(doc: SvjDoc, axle: str, ctx: AxleContext, *, out_dir: Path | Non
         if v is not None:
             block[key] = v
     pickups, trailing = _emit_pickups(doc, axle, ctx, out_dir=out_dir)
+    if not pickups:
+        # the file gives no suspension geometry (BeamNG's corners hold a hub centre only): a
+        # typical double wishbone for this track, so that the car loads, said so in the file
+        pickups, trailing = _placeholder_pickups(ctx), [
+            "PLACEHOLDER suspension geometry: the SVJ file has no hardpoints for this axle;",
+            "a typical double wishbone for this track was written instead."]
+        block["TYPE"] = 1
+        _log_warning(out_dir, f"{axle.lower()} axle has no suspension geometry: placeholder double wishbone")
     block["_pickups"] = pickups
     block["_trailing_comments"] = trailing
     return block
+
+
+def _placeholder_pickups(ctx: AxleContext) -> dict[str, str]:
+    """A typical double wishbone (the proportions of a small sports car), in AC's pickup frame:
+    X inboard from the wheel centre, Y up, Z forward."""
+    ht = ctx.half_track
+    top, low = 0.55 * ht, 0.61 * ht
+    pts = {
+        "WBCAR_TOP_FRONT": (top, 0.088, 0.098), "WBCAR_TOP_REAR": (top, 0.068, -0.116),
+        "WBCAR_BOTTOM_FRONT": (low, -0.099, 0.110), "WBCAR_BOTTOM_REAR": (low, -0.099, -0.130),
+        "WBCAR_STEER": (low, -0.083, 0.116), "WBTYRE_TOP": (0.129, 0.120, -0.013),
+        "WBTYRE_BOTTOM": (0.088, -0.092, 0.004), "WBTYRE_STEER": (0.074, -0.071, 0.106),
+    }
+    return {k: format_vec3([round(a, 6), round(b, 6), round(c, 6)]) for k, (a, b, c) in pts.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -230,6 +252,8 @@ def _canonical_scalar_default(doc: SvjDoc, axle: str, key: str, ctx: AxleContext
             p = _damper_params(d.get(f"{which}_curve"))
             if p and p.get(part) is not None:
                 vals.append(p[part])
+            elif part == "slow" and isinstance(d.get(f"{which}_Ns_per_m"), (int, float)):
+                vals.append(float(d[f"{which}_Ns_per_m"]))               # a scalar (BeamNG)
         m = _mean(vals)
         return None if m is None else round(m, 5)
     return None

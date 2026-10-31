@@ -30,6 +30,18 @@ SYSTEM_TYPE_TO_AC: dict[str, int] = {
     "semi_trailing_arm": 5,
 }
 
+# Other suspension types of the standard, as the AC type that behaves most like them.
+SYSTEM_TYPE_ALIASES: dict[str, str] = {
+    "de_dion": "solid_axle",
+    "beam_axle": "solid_axle",
+    "torsion_beam": "trailing_arm",
+    "leading_arm": "trailing_arm",
+    "swing_axle": "semi_trailing_arm",
+    "pendulum_axle": "semi_trailing_arm",
+    "chapman_strut": "macpherson",
+    "parallelogram": "double_wishbone",
+}
+
 # Inverse map for round-trip checks.
 AC_TO_SYSTEM_TYPE = {v: k for k, v in SYSTEM_TYPE_TO_AC.items()}
 
@@ -116,7 +128,7 @@ def resolve_axle(
             if isinstance(t, dict):
                 st = t.get("system_type")
                 if isinstance(st, str):
-                    system_type = st
+                    system_type = SYSTEM_TYPE_ALIASES.get(st, st)
                     break
 
     return AxleContext(

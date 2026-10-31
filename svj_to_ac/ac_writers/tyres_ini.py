@@ -114,9 +114,13 @@ def _render(doc: SvjDoc, *, log_path: Path | None = None) -> str:
 
 
 def _render_from_svj(doc: SvjDoc, *, log_path: Path | None) -> str:
-    sets = doc.tires.sets or {}
+    sets = dict(doc.tires.sets or {})
     front_keys = [k for k in sets if "front" in k.lower()]
     rear_keys = [k for k in sets if "rear" in k.lower()]
+    for axle, keys in (("front", front_keys), ("rear", rear_keys)):
+        if not keys:                       # a file without tyres for this axle: size from the wheels
+            sets[f"tire_{axle}_generic"] = _generic_set(doc, axle)
+            keys.append(f"tire_{axle}_generic")
 
     sections: list[str] = [format_section("HEADER", {"VERSION": 10}),
                            format_section("COMPOUND_DEFAULT", {"INDEX": 0})]
@@ -127,13 +131,15 @@ def _render_from_svj(doc: SvjDoc, *, log_path: Path | None) -> str:
     for idx, key in enumerate(front_keys):
         suffix = f"_{idx}" if multi else ""
         sec = _compound_section(
-            f"FRONT{suffix}", sets[key], log_path=log_path, side="front", set_key=key
+            f"FRONT{suffix}", sets[key], log_path=log_path, side="front", set_key=key,
+            wheel_load=_wheel_load(doc, "front")
         )
         sections.append(sec)
     for idx, key in enumerate(rear_keys):
         suffix = f"_{idx}" if multi else ""
         sec = _compound_section(
-            f"REAR{suffix}", sets[key], log_path=log_path, side="rear", set_key=key
+            f"REAR{suffix}", sets[key], log_path=log_path, side="rear", set_key=key,
+            wheel_load=_wheel_load(doc, "rear")
         )
         sections.append(sec)
 
@@ -152,6 +158,36 @@ def _render_from_svj(doc: SvjDoc, *, log_path: Path | None) -> str:
     return join_sections(sections)
 
 
+def _wheel_load(doc: SvjDoc, axle: str) -> float | None:
+    """Static load on one wheel of the axle (N), from the mass and where the CG is."""
+    ch = doc.chassis
+    if not (ch.mass_total and ch.wheelbase and ch.center_of_gravity and len(ch.center_of_gravity) == 3):
+        return None
+    fl = doc.suspension.corners.get("FL")
+    front_x = fl.position[0] if fl is not None and len(fl.position) == 3 else 0.0
+    front = min(max(1.0 - (front_x - ch.center_of_gravity[0]) / ch.wheelbase, 0.3), 0.7)
+    share = front if axle == "front" else 1.0 - front
+    return ch.mass_total * 9.81 * share / 2.0
+
+
+def _generic_set(doc: SvjDoc, axle: str) -> dict[str, Any]:
+    """A tyre set with only a size, from the wheels of the axle (or a typical road tyre)."""
+    keys = ("FL", "FR") if axle == "front" else ("RL", "RR")
+    wheel: dict[str, Any] = {}
+    for k in keys:
+        c = doc.suspension.corners.get(k)
+        w = c.raw.get("wheel") if c is not None and isinstance(c.raw, dict) else None
+        if isinstance(w, dict):
+            wheel = w
+            break
+    radius = wheel.get("loaded_radius") or 0.31
+    rim = wheel.get("rim_diameter") or 0.4064
+    return {"description": f"generic {axle} tyre (the file has none)",
+            "dimensions": {"section_width": wheel.get("tire_section_width") or 0.205,
+                           "overall_diameter": 2 * radius},
+            "rim": {"diameter": rim}}
+
+
 def _compound_section(
     name: str,
     compound: Mapping[str, Any],
@@ -159,9 +195,10 @@ def _compound_section(
     log_path: Path | None,
     side: str,
     set_key: str = "",
+    wheel_load: float | None = None,
 ) -> str:
     """Render one ``[FRONT_N]``/``[REAR_N]`` section."""
-    params = fit_ac_params(compound, log_path=log_path, side=side)
+    params = fit_ac_params(compound, log_path=log_path, side=side, wheel_load=wheel_load)
     # Preserve AC's canonical key order for clean diffs.
     block: dict[str, Any] = {}
     label, short = _compound_names(set_key, compound)

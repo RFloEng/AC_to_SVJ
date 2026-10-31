@@ -19,6 +19,7 @@ writers can read either name.
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,9 +31,13 @@ REQUIRED_SECTIONS: tuple[str, ...] = (
     "vehicle_info",
     "chassis",
     "suspension",
-    "tires",
-    "powertrain",
-    "brakes",
+)
+# The standard makes these optional; a file without them still gives a car, with generic parts
+# (reported in ``SvjDoc.notes``).
+FILLED_SECTIONS: tuple[tuple[str, dict, str], ...] = (
+    ("tires", {"sets": {}}, "no tyres: generic road tyres"),
+    ("powertrain", {}, "no powertrain: a generic engine and gearbox"),
+    ("brakes", {}, "no brakes: generic brakes"),
 )
 OPTIONAL_SECTIONS: tuple[str, ...] = ("_metadata", "aerodynamics", "x_assettocorsa")
 SUPPORTED_VERSION = "0.95"
@@ -214,10 +219,43 @@ def load(path: str | Path) -> SvjDoc:
     missing = [s for s in REQUIRED_SECTIONS if s not in data]
     if missing:
         raise MissingSectionError(missing)
+    axles = {str(st.get("axle", "")) for st in data.get("wheel_stations", []) if st.get("axle")}
+    if len(axles) > 2:
+        raise SvjLoadError(
+            f"Assetto Corsa cars have two axles; this vehicle has {len(axles)} "
+            f"({', '.join(sorted(axles))}) and cannot be written as one")
+    data = dict(data)
+    for name, empty, note in FILLED_SECTIONS:
+        if name not in data:
+            data[name] = copy.deepcopy(empty)
+            notes.append(note)
 
     doc = _build_doc(data, source_path=p)
     doc.notes.extend(notes)
+    doc.notes.extend(_plausibility(data))
     return doc
+
+
+def _plausibility(data: dict[str, Any]) -> list[str]:
+    """Things in the file that look wrong (another simulator's exporter), said in the log; the
+    values are written as they are."""
+    out: list[str] = []
+    ch = data.get("chassis") or {}
+    wb, cg = ch.get("wheelbase"), ch.get("center_of_gravity")
+    corners = (data.get("suspension") or {})
+    fl = corners.get("FL") or {}
+    front_x = (fl.get("position") or [0.0, 0.0, 0.0])[0] or 0.0
+    if wb and isinstance(cg, list) and len(cg) == 3:
+        front = 1.0 - (front_x - cg[0]) / wb
+        if not 0.3 <= front <= 0.75:
+            out.append(f"the centre of gravity puts {front:.0%} of the weight on the front axle: "
+                       "check the wheelbase, the origin and the CG in the SVJ file")
+    hub = ((fl.get("topology") or {}).get("hardpoints") or {}).get("hub_centre")
+    tf = ch.get("track_front")
+    if isinstance(hub, list) and len(hub) == 3 and tf and abs(2 * abs(hub[1]) - tf) > 0.15 * tf:
+        out.append(f"the front track ({tf:.3f} m) and the hub centres ({2 * abs(hub[1]):.3f} m apart) "
+                   "disagree")
+    return out
 
 
 def validate(doc: SvjDoc) -> list[SvjError]:
@@ -315,7 +353,7 @@ def _build_vehicle_info(d: dict[str, Any]) -> SvjVehicleInfo:
     return SvjVehicleInfo(
         make=str(d.get("make", "")),
         model=str(d.get("model", "")),
-        year=int(d.get("year", 0)),
+        year=int(d.get("year") or 0),
         variant=str(d.get("variant", "")),
         drive_type=str(d.get("drive_type", "")),
         raw=dict(d),
@@ -324,10 +362,10 @@ def _build_vehicle_info(d: dict[str, Any]) -> SvjVehicleInfo:
 
 def _build_chassis(d: dict[str, Any]) -> SvjChassis:
     return SvjChassis(
-        mass_total=float(d.get("mass_total", 0.0)),
-        wheelbase=float(d.get("wheelbase", 0.0)),
-        track_front=float(d.get("track_front", 0.0)),
-        track_rear=float(d.get("track_rear", 0.0)),
+        mass_total=_num(d.get("mass_total"), 0.0),
+        wheelbase=_num(d.get("wheelbase"), 0.0),
+        track_front=_num(d.get("track_front"), 0.0),
+        track_rear=_num(d.get("track_rear"), 0.0),
         center_of_gravity=list(d.get("center_of_gravity", [0.0, 0.0, 0.0])),
         mass_unsprung_per_corner=dict(d.get("mass_unsprung_per_corner", {})),
         fuel_capacity=_to_optional_float(d.get("fuel_capacity")),
@@ -366,7 +404,7 @@ def _build_powertrain(d: dict[str, Any]) -> SvjPowertrain:
 
 def _build_brakes(d: dict[str, Any]) -> SvjBrakes:
     return SvjBrakes(
-        bias=float(d.get("bias", 0.0)),
+        bias=_num(d.get("bias"), 0.0),
         bias_type=str(d.get("bias_type", "")),
         raw=dict(d),
     )
@@ -401,6 +439,14 @@ def _build_assetto(d: dict[str, Any] | None) -> SvjAssettoExt | None:
         versions=dict(d.get("versions", {})),
         raw=dict(d),
     )
+
+
+def _num(v: Any, default: float = 0.0) -> float:
+    """A float from a value that may be missing or null (another simulator's file)."""
+    try:
+        return default if v is None else float(v)
+    except (TypeError, ValueError):
+        return default
 
 
 def _to_optional_float(v: Any) -> float | None:

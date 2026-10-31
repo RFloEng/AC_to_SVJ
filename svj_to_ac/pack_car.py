@@ -145,6 +145,12 @@ def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None) -> As
     sfx_path.write_text(sfx_text, encoding="utf-8", newline="\n")
     files.append(sfx_path)
 
+    if doc.notes:                              # what the loader filled in or found odd
+        log = car_dir / "conversion_log.txt"
+        with log.open("a", encoding="utf-8") as f:
+            for note in doc.notes:
+                f.write(f"NOTE [loader]: {note}" + chr(10))
+
     return AssembleResult(
         car_dir=car_dir,
         data_dir=data_dir,

@@ -360,9 +360,9 @@ class TestPacejkaInverseDirect:
         assert params["DX0"] == src["DX0"]
         assert params["FZ0"] == src["FZ0"]
 
-    def test_missing_inputs_raises(self) -> None:
-        with pytest.raises(pacejka_inverse.PacejkaInverseError):
-            pacejka_inverse.fit_ac_params({})
+    def test_a_tyre_without_a_force_model_gets_generic_parameters(self) -> None:
+        params = pacejka_inverse.fit_ac_params({"dimensions": {"section_width": 0.2}})
+        assert params["WIDTH"] == 0.2 and 0.5 < params["DY0"] < 3.0
 
     def test_slow_path_returns_plausible_params(self) -> None:
         """The slow path must at least return a finite, in-range DY0/DX0."""

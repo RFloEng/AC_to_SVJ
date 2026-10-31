@@ -73,6 +73,7 @@ def fit_ac_params(
     *,
     log_path: Path | None = None,
     side: str = "front",
+    wheel_load: float | None = None,
 ) -> dict[str, Any]:
     """Return the AC parameter dict for one tyre compound.
 
@@ -90,16 +91,17 @@ def fit_ac_params(
     if fast is not None:
         return fast
     # An SVJ from another simulator: the standard's Pacejka block (MF 5.2 / 6.2).
-    std = _fit_from_standard(compound, log_path=log_path, side=side)
+    std = _fit_from_standard(compound, log_path=log_path, side=side, wheel_load=wheel_load)
     if std is not None:
         return std
     # Slow path. Only attempt if MF 5.2 coefficients are present.
     mf = _get_mf52(compound)
     if mf is None:
-        raise PacejkaInverseError(
-            "compound has neither ``_source_params`` nor ``pacejka_mf52`` -- "
-            "cannot reconstruct AC tyre parameters."
-        )
+        # no force model to read (a tyre given only by its size, or by another model): a
+        # generic road tyre of the right size, said so in the log
+        _log_warning(log_path, f"tyre [{side}] has no Pacejka block: generic road tyre parameters "
+                               "of its size (pick tyres with the Tyre Match tab to do better).")
+        return _conservative_defaults(compound, {})
     fitted = _fit_least_squares(compound, mf)
     _log_warning(
         log_path,
@@ -139,7 +141,7 @@ def _geometry_and_pressure(compound: Mapping[str, Any], out: dict[str, Any]) -> 
 
 
 def _fit_from_standard(compound: Mapping[str, Any], *, log_path: Path | None,
-                       side: str) -> dict[str, Any] | None:
+                       side: str, wheel_load: float | None = None) -> dict[str, Any] | None:
     """AC's tyre parameters from the standard's ``pacejka`` block (pure slip), by fitting AC's
     force model (as tire_lab implements it) to the Pacejka curves.
 
@@ -162,12 +164,15 @@ def _fit_from_standard(compound: Mapping[str, Any], *, log_path: Path | None,
     if not isinstance(lat, Mapping) or not isinstance(lon, Mapping):
         return None
     ref = compound.get("reference") or {}
-    fz0 = float(ref.get("load") or 4000.0)
-    loads = [fz0 * f for f in (0.35, 0.65, 1.0, 1.4, 1.8)]
+    fz_ref = float(ref.get("load") or 4000.0)               # the load the Pacejka block is built at
+    # AC's FZ0 is the load the car's tyre works at; with the weight of the car given, fit around
+    # that, not around a reference load of the other simulator (17,100 N for a Skip Barber)
+    fz0 = float(wheel_load) if wheel_load and wheel_load > 500 else fz_ref
+    loads = [fz0 * f for f in (0.4, 0.7, 1.0, 1.5, 2.2)]
     alpha = np.radians(np.linspace(0.0, 18.0, 37))
     kappa = np.linspace(0.0, 0.35, 36)
-    tgt_y = [np.abs(mf_pure_fy(alpha, fz, 0.0, lat, fz0)) for fz in loads]
-    tgt_x = [np.abs(mf_pure_fx(kappa, fz, 0.0, lon, fz0)) for fz in loads]
+    tgt_y = [np.abs(mf_pure_fy(alpha, fz, 0.0, lat, fz_ref)) for fz in loads]
+    tgt_x = [np.abs(mf_pure_fx(kappa, fz, 0.0, lon, fz_ref)) for fz in loads]
 
     def params(x) -> ACTyreParams:
         return ACTyreParams(name="fit", axle=side, FZ0=fz0, DY0=x[0], DY1=x[1], LS_EXPY=x[2],
@@ -200,7 +205,6 @@ def _fit_from_standard(compound: Mapping[str, Any], *, log_path: Path | None,
         "XMU": round(float(x[8]), 3),
         # the slip angle of the lateral peak at FZ0, and the longitudinal stiffness scale
         "FRICTION_LIMIT_ANGLE": round(math.degrees(float(x[0]) * (1.0 + 0.0008 * fz0) / float(x[6])), 3),
-        "CX_MULT": round(float(x[7]) / 18.0, 4),
     }
     _geometry_and_pressure(compound, out)
     return {k: v for k, v in out.items() if v is not None}
