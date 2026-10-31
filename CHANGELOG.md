@@ -4,6 +4,28 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### SVJ → AC joins this repository
+
+- The inverse converter (`RFloEng/SVJ_to_AC`, v0.1.0) is now `svj_to_ac/`, with its tests and
+  smoke test; they find AC_to_SVJ's modules one folder up instead of a sibling clone.
+- It read only the SVJ 0.95 corner blocks and failed on a file from this converter
+  (`missing required section(s): suspension`). `unified_view.py` derives them from the
+  bodies, joints and elements of SVJ 0.100+; wheel stations, links, the strut, springs,
+  dampers, bump stops and anti-roll bars are read back.
+- Pickups are measured from the wheel centre on all three axes (the old writer left the
+  tyre radius on the vertical axis and the wheelbase on the rear axle's longitudinal one), so
+  a file whose origin is not on the front axle comes out right. On the MX-5 converted from
+  AC, the front and rear `WBCAR_*` / `WBTYRE_*` match the original `suspensions.ini`.
+- `suspensions.ini` is written with AC's own keys: `DAMP_BUMP`, `DAMP_FAST_BUMP`,
+  `DAMP_FAST_BUMPTHRESHOLD` (and rebound) from the damper curve, `BUMP_STOP_RATE`,
+  `BUMPSTOP_UP` / `_DN`, `HUB_MASS` (both wheels), `STATIC_CAMBER` in degrees, `BASEY` from
+  the CG height, `[BASIC] WHEELBASE` / `CG_LOCATION`, and the anti-roll bars in `[ARB]`. The old
+  writer used keys the game does not read (`BUMP`, `REBOUND`, `CAMBER`, `WHEEL_MASS`).
+- Tyre sets are read with `pacejka_mf52` beside `pacejka` (this converter's layout) as well as
+  under `models`.
+- Not done yet: the other `.ini` files are far from complete against a real car, the tyre fit for
+  an SVJ that does not come from AC, and the 3D model.
+
 ### Dampers and bump stops of vanilla AC
 
 - **Dampers are AC's own two slopes.** The bump and rebound curves were synthesised from one

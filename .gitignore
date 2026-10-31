@@ -19,6 +19,7 @@ test_out_svj.json
 # Converter output files (not source)
 *.svj.json
 !examples/*.svj.json
+!svj_to_ac/examples/*.svj.json
 
 # Batch ZIP outputs
 *_ac_collection_svj.zip
@@ -30,3 +31,7 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# pytest
+.pytest_cache/
+pytest-cache-files-*/

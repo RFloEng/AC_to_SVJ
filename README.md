@@ -20,6 +20,14 @@ python gui.py
 
 Opens a native desktop window. No browser required.
 
+## SVJ → AC (`svj_to_ac/`)
+
+The inverse converter lives in [`svj_to_ac/`](svj_to_ac/README.md): it takes an SVJ file and
+writes an Assetto Corsa `content/cars/<model>/` folder (`data/*.ini`, `power.lut`, `ui`),
+plus an FBX skeleton for KsEditor. It reads SVJ 0.100+ unified suspensions
+(`svj_to_ac/unified_view.py`) as well as the older corner blocks. Its tests run with
+`cd svj_to_ac && python -m pytest` and `python svj_to_ac/smoke_test.py`.
+
 ## Desktop GUI
 
 `gui.py` is a standalone tkinter application with two tabs.
