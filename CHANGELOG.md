@@ -4,6 +4,20 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Tyre Match: pick the closest tyres of your own library
+
+- New tab **3 · Tyre Match** (`gui_tyre_match.py`, logic in `tyre_match.py`). The user marks where
+  their AC cars are (`ac_paths.py` also finds Steam libraries and remembers the folder), the
+  library is scanned into a cache, and the tyres of any SVJ file or any car are ranked against it
+  by behaviour (peak grip at three loads, cornering and longitudinal stiffness, slip of the
+  peak, fall-off, camber thrust, from AC's own tyre model for the library and from the AC
+  parameters or the Pacejka block for the target) and by size, with the weight of the size in
+  the user's hands. A curve comparison plot and the chosen car's own `tyres.ini` section can be
+  copied or saved. 560 tyre sections of 164 cars scan in 10 s.
+- `svj_to_ac` writes a `tyres.ini` from such a choice: `tyres_ini.write(doc, out,
+  {"cars_dir": ..., "front": {"car": ..., "section": ...}})`, keeping the converted car's width,
+  radius and rim.
+
 ### SVJ → AC joins this repository
 
 - The inverse converter (`RFloEng/SVJ_to_AC`, v0.1.0) is now `svj_to_ac/`, with its tests and

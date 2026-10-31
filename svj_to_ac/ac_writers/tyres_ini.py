@@ -39,11 +39,71 @@ from . import (
 FILENAME = "tyres.ini"
 
 
-def write(doc: SvjDoc, out_dir: Path) -> Path:
-    """Write ``out_dir / 'tyres.ini'``. Returns the file path."""
+def write(doc: SvjDoc, out_dir: Path, tyre_choice: Mapping[str, Any] | None = None) -> Path:
+    """Write ``out_dir / 'tyres.ini'``. Returns the file path.
+
+    ``tyre_choice`` takes the tyres from cars of an installed AC instead of fitting them:
+    ``{"cars_dir": ".../content/cars", "front": {"car": ..., "section": ...}, "rear": {...},
+    "adapt_size": True}`` (see :func:`tyre_match.rank`).  An axle left out is fitted as usual.
+    """
     out_dir = Path(out_dir)
     log_path = out_dir.parent / "conversion_log.txt"
+    if tyre_choice:
+        text = _render_from_choice(doc, tyre_choice, log_path=log_path)
+        if text is not None:
+            return write_text(out_dir / FILENAME, text)
     return write_text(out_dir / FILENAME, _render(doc, log_path=log_path))
+
+
+def _first_set(doc: SvjDoc, axle: str) -> Mapping[str, Any] | None:
+    for key, body in (doc.tires.sets or {}).items():
+        if axle in key.lower():
+            return body
+    return None
+
+
+def _render_from_choice(doc: SvjDoc, choice: Mapping[str, Any], *, log_path: Path | None) -> str | None:
+    """tyres.ini with the sections of the chosen cars' tyres (their own `[THERMAL_*]` too).
+
+    The grip, stiffness and thermal data are the chosen tyre's; with ``adapt_size`` (the
+    default) the width, radius and rim radius are the SVJ tyre's, so the wheel keeps the size
+    of the car being converted.
+    """
+    import re
+
+    from tyre_match import tyres_ini_sections                       # AC_to_SVJ, one folder up
+
+    cars_dir = choice.get("cars_dir")
+    if not cars_dir:
+        return None
+    out: list[str] = ["[HEADER]", "VERSION=10", "", "[COMPOUND_DEFAULT]", "INDEX=0", ""]
+    used = False
+    for axle in ("front", "rear"):
+        pick = choice.get(axle)
+        if not pick:
+            fitted = _first_set(doc, axle)
+            if fitted is not None:                                 # fit this axle as usual
+                out.append(_compound_section(axle.upper(), fitted, log_path=log_path, side=axle))
+                out.append("")
+            continue
+        text = tyres_ini_sections(Path(cars_dir), pick["car"], pick["section"])
+        src_suffix = pick["section"].split("_", 1)[1] if "_" in pick["section"] else ""
+        text = re.sub(r"^\[(THERMAL_)?(FRONT|REAR)(_\d+)?\]", lambda m: f"[{m.group(1) or ''}{axle.upper()}]",
+                      text, flags=re.M)
+        tset = _first_set(doc, axle)
+        if tset is not None and choice.get("adapt_size", True):
+            dims, rim = tset.get("dimensions") or {}, tset.get("rim") or {}
+            repl = {"WIDTH": dims.get("section_width"),
+                    "RADIUS": (dims.get("overall_diameter") or 0) / 2 or None,
+                    "RIM_RADIUS": (rim.get("diameter") or 0) / 2 or None}
+            for k, v in repl.items():
+                if v:
+                    text = re.sub(rf"^{k}=[^;\r\n]*", f"{k}={v:.4f}", text, count=1, flags=re.M)
+        out.append(f"; {axle}: tyre of {pick['car']} [{pick['section']}] chosen with tyre_match")
+        out.append(text.rstrip())
+        out.append("")
+        used = True
+    return "\n".join(out).rstrip() + "\n" if used else None
 
 
 def _render(doc: SvjDoc, *, log_path: Path | None = None) -> str:

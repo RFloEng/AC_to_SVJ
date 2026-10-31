@@ -83,3 +83,25 @@ def test_scalars_use_ac_keys(roundtrip) -> None:
     # BASEY is the CG height minus the wheel radius (the synthetic test_car uses it as a ride
     # height, so it is not compared): the CG of this car is 0.46 m up, the wheel radius 0.305
     assert float(f["BASEY"]) == pytest.approx(0.305 - 0.46, abs=0.01)
+
+
+def test_tyres_can_come_from_a_car_of_an_installed_ac(tmp_path) -> None:
+    """tyre_choice takes the chosen car's tyre sections and keeps the converted car's size."""
+    import shutil
+
+    from ac_writers import tyres_ini
+    if not TEST_CAR.is_dir():
+        pytest.skip("no test_car")
+    cars = tmp_path / "cars"
+    shutil.copytree(TEST_CAR / "data", cars / "donor" / "data")
+    doc = svj_loader.load(REPO / "examples" / "mx5_nd_club.svj.json")
+    out = tyres_ini.write(doc, tmp_path / "out", {
+        "cars_dir": str(cars), "front": {"car": "donor", "section": "FRONT"}})
+    text = out.read_text(encoding="utf-8")
+    parsed = _parse(text)
+    assert "FRONT" in parsed and "REAR" in parsed                  # the rear is fitted as usual
+    donor = _parse((TEST_CAR / "data" / "tyres.ini").read_text(encoding="utf-8", errors="ignore"))
+    assert parsed["FRONT"]["DY0"] == donor["FRONT"]["DY0"]          # the donor's grip
+    set_ = next(v for k, v in doc.tires.sets.items() if "front" in k)
+    assert float(parsed["FRONT"]["WIDTH"]) == pytest.approx(set_["dimensions"]["section_width"], abs=1e-4)
+    assert "chosen with tyre_match" in text

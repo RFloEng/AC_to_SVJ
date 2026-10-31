@@ -38,6 +38,8 @@ from ac_parsers import parse_ini
 from car_archives import ArchiveCar, extract_car, scan_archive_folder
 from car_audit import audit_folder, write_reports
 from batch_convert import _already_converted, _write_car_log, convert_one
+import ac_paths
+from gui_tyre_match import TyreMatchTab
 from tire_lab import (
     ACTyreParams, parse_tyre_section, run_bench, build_svj_pacejka_blocks,
 )
@@ -376,6 +378,12 @@ class App(tk.Tk):
         nb.add(self._lab_tab, text="  2 · Tire Lab  ")
         self._build_tire_lab()
 
+        # the cars folder is remembered and shared with the tyre matcher
+        self._b_cars_var.set(ac_paths.load_settings().get("cars_dir", ""))
+        self._match_tab = ttk.Frame(nb)
+        nb.add(self._match_tab, text="  3 · Tyre Match  ")
+        self._tyre_match = TyreMatchTab(self._match_tab, self, self._b_cars_var)
+
         self.after(80, self._poll_queue)
 
     # ── Queue pump ────────────────────────────────────────────────────────────
@@ -575,7 +583,9 @@ class App(tk.Tk):
 
     def _browse_cars(self) -> None:
         d = filedialog.askdirectory(title="Select AC cars folder")
-        if d: self._b_cars_var.set(d)
+        if d:
+            self._b_cars_var.set(d)
+            ac_paths.save_settings(cars_dir=d)
 
     def _browse_out(self) -> None:
         d = filedialog.askdirectory(title="Select output folder")

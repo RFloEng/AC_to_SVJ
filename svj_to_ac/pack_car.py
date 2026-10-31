@@ -97,10 +97,12 @@ def model_id(doc: SvjDoc) -> str:
     return "unnamed_car"
 
 
-def assemble(doc: SvjDoc, base_dir: Path) -> AssembleResult:
+def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None) -> AssembleResult:
     """Write the full ``content/cars/<model>/`` tree under ``base_dir``.
 
     ``base_dir`` is the parent of the eventual ``content/`` directory.
+    ``tyre_choice`` takes the tyres from cars of an installed AC (see
+    :func:`ac_writers.tyres_ini.write`) instead of fitting them.
     Returns an :class:`AssembleResult` enumerating every file written
     (deterministic order, suitable for reproducible zipping).
     """
@@ -118,7 +120,7 @@ def assemble(doc: SvjDoc, base_dir: Path) -> AssembleResult:
     # data/*.ini and accompanying LUTs.
     files.append(car_ini.write(doc, data_dir))
     files.append(suspensions_ini.write(doc, data_dir))
-    files.append(tyres_ini.write(doc, data_dir))
+    files.append(tyres_ini.write(doc, data_dir, tyre_choice))
     files.append(engine_ini.write(doc, data_dir))
     # engine_ini writes companion LUTs alongside; gather them up.
     for sibling in sorted(data_dir.glob("power*.lut")):

@@ -30,7 +30,7 @@ plus an FBX skeleton for KsEditor. It reads SVJ 0.100+ unified suspensions
 
 ## Desktop GUI
 
-`gui.py` is a standalone tkinter application with two tabs.
+`gui.py` is a standalone tkinter application with three tabs.
 
 ### 1 · Batch Conversion
 
@@ -76,6 +76,26 @@ Standalone Pacejka MF 5.2 / MF 6.2 bench — three input modes:
 Displays five plots (MF 5.2 lateral / longitudinal / peak-μ-vs-Fz, MF 6.2
 lateral+camber overlay, camber sensitivity & thrust) plus the full MF 5.2 and
 MF 6.2 JSON blocks ready to paste into an SVJ file.
+
+### 3 · Tyre Match
+
+For a car that does not come from AC, the Pacejka coefficients can only be turned back into
+AC's tyre parameters approximately. This tab does something better with your own library:
+
+1. **Mark your cars.** Point it at `content/cars` (or press *Find it*: it looks in every Steam
+   library). The folder is remembered and shared with the batch tab. *Scan tyres* describes
+   every tyre section of every car by what it does (peak grip, cornering stiffness, load and
+   camber sensitivity, how it falls off past the peak) using AC's own tyre model; the first scan
+   takes about two minutes for 2,000 cars, later ones only read what changed.
+2. **Pick the tyre to match:** a tyre set of an SVJ file (its Pacejka block, or the AC
+   parameters it came from), or a tyre of another car.
+3. **Choose what counts:** the axle and how much the size matters against the grip.
+4. **Pick from the closest tyres** (match %, grip %, size %, compound, μ, Cα). *Compare curves*
+   plots lateral and longitudinal force of the target against the candidate;
+   *Copy tyres.ini section* / *Save section…* give you the candidate's own section.
+
+`svj_to_ac` can write a `tyres.ini` from such a choice (`tyre_choice`, see
+`svj_to_ac/ac_writers/tyres_ini.py`) instead of fitting the tyres.
 
 ## Conversion log detail
 

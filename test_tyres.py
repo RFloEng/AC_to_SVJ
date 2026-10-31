@@ -57,6 +57,50 @@ def test_marked_size_goes_into_the_set_and_a_contradicting_one_does_not():
     assert sets["bad"]["size_code"] != "205/20R15" and "x_size_code_note" in sets["bad"]
 
 
+def test_pacejka_pure_slip_peaks_at_its_coefficients():
+    import tyre_match as T
+    lat = {"pCy1": 1.3, "pDy1": 1.2, "pDy2": 0.0, "pEy1": -0.5, "pKy1": -18.0, "pKy2": 2.0}
+    lon = {"pCx1": 1.6, "pDx1": 1.3, "pDx2": 0.0, "pEx1": 0.3, "pKx1": 25.0}
+    f = T.curve_features(lambda a, fz, g: T.mf_pure_fy(a, fz, g, lat, 4000.0),
+                         lambda k, fz, g: T.mf_pure_fx(k, fz, g, lon, 4000.0))
+    assert abs(f["mu_y"] - 1.2) < 0.03 and abs(f["mu_x"] - 1.3) < 0.03     # the peak is D / Fz
+    assert f["c_y"] > 5 and 0.02 < f["alpha_pk"] < 0.4
+
+
+def test_ranking_puts_the_same_tyre_first_and_a_slick_beyond_a_street_tyre():
+    import tyre_match as T
+    from tire_lab import ACTyreParams
+    street = ACTyreParams(DY0=1.15, DX0=1.2, K_a=14.0, K_k=17.0)
+    slick = ACTyreParams(DY0=1.75, DX0=1.8, K_a=24.0, K_k=21.0)
+    mk = lambda name, p, w: {"car": name, "section": "FRONT", "axle": "front", "width": w,
+                             "radius": 0.31, "rim_radius": 0.2, "features": T.ac_features(p)}
+    lib = [mk("slick", slick, 0.25), mk("street", street, 0.205)]
+    target = T.ac_features(ACTyreParams(DY0=1.2, DX0=1.25, K_a=15.0, K_k=17.0))
+    r = T.rank(target, {"width": 0.205, "radius": 0.31, "rim_radius": 0.2}, lib)
+    assert [x["entry"]["car"] for x in r] == ["street", "slick"] and r[0]["score"] > r[1]["score"]
+    same = T.rank(T.ac_features(slick), None, lib)
+    assert same[0]["entry"]["car"] == "slick" and same[0]["score"] == 100.0
+
+
+def test_library_scan_reads_tyre_sections_and_uses_its_cache():
+    import tempfile
+    import tyre_match as T
+    car = Path(__file__).parent / "test_car"
+    with tempfile.TemporaryDirectory() as t:
+        root = Path(t) / "cars"
+        (root / "synth").mkdir(parents=True)
+        import shutil
+        shutil.copytree(car / "data", root / "synth" / "data")
+        cache = Path(t) / "cache.json"
+        lib = T.scan_library(root, cache)
+        assert {e["axle"] for e in lib} == {"front", "rear"} and cache.is_file()
+        assert all(e["features"]["mu_y"] > 0.5 for e in lib)
+        again = T.scan_library(root, cache)
+        assert again == lib
+        text = T.tyres_ini_sections(root, "synth", "FRONT")
+        assert text.startswith("[FRONT]") and "WIDTH" in text
+
+
 ALL_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
