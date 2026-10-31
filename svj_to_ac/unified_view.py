@@ -55,6 +55,17 @@ def _corner_key(station: dict, stations: list) -> str | None:
     return None
 
 
+ARM_HALF = 0.15      # m: half the pickup spacing of an arm that the file gives as one hinge
+
+
+def _z_axis(q) -> list:
+    """Unit z axis of a quaternion (x, y, z, w); the joint axis of a frame."""
+    if not (isinstance(q, (list, tuple)) and len(q) == 4):
+        return [0.0, 0.0, 1.0]
+    x, y, z, w = (float(v) for v in q)
+    return [2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)]
+
+
 class _Doc:
     def __init__(self, data: dict):
         chassis = data.get("chassis") or {}
@@ -125,7 +136,17 @@ def _station_corner(doc: _Doc, st: dict, notes: list) -> dict | None:
             if far == up:
                 continue
             p = _end_on(doc, k, other)
-            if p:
+            if not p:
+                continue
+            if k.get("joint_type") == "revolute" and far in doc.root_names:
+                # an arm hinged about one axis (a single revolute joint): its pickups are two
+                # points of that axis, ARM_HALF either side of the joint frame
+                fr = k.get("frame_b" if k.get("body_a") == other else "frame_a") or {}
+                ax = _z_axis(fr.get("orientation"))
+                inb.extend([[p[i] + ax[i] * ARM_HALF for i in range(3)],
+                            [p[i] - ax[i] * ARM_HALF for i in range(3)]])
+                link["_est"] = True
+            else:
                 inb.append(p)
         inb.sort(key=lambda p: -p[0])                     # front point first
         link["inboard_points"] = inb
@@ -159,17 +180,30 @@ def _station_corner(doc: _Doc, st: dict, notes: list) -> dict | None:
     return corner
 
 
+_AUX = ("bump_stop", "rebound_stop", "helper", "packer")
+
+
 def _wheel_side(doc: _Doc, up: str, kind: str):
-    """The spring / damper element on an upright."""
-    for e in doc.elements:
-        if e.get("type") == kind and up in (e.get("body_a"), e.get("body_b")):
-            return e
+    """The main spring / damper element on an upright: not a stop, helper spring or packer;
+    the one with a rate (spring) or a curve (damper) first."""
+    cands = [e for e in doc.elements
+             if e.get("type") == kind and up in (e.get("body_a"), e.get("body_b"))
+             and not str(e.get("id", "")).startswith(_AUX)]
+    key = "rate" if kind == "spring" else "bump_curve"
+    return next((e for e in cands if e.get(key)), cands[0] if cands else None)
+
+
+def _length(e: dict, doc: _Doc | None = None) -> float | None:
+    a, b = doc.frame(e, "a"), doc.frame(e, "b")
+    if a and b:
+        return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
     return None
 
 
-def _motion_ratio(e: dict) -> tuple:
-    """(motion ratio, guessed): element travel / wheel travel.  An element that was converted
-    from a value quoted at the wheel carries the ratio it was converted with."""
+def _motion_ratio(e: dict, doc: _Doc | None = None, strut: bool = False) -> tuple:
+    """(motion ratio, guessed): element travel / wheel travel.  An element converted from a
+    value quoted at the wheel carries the ratio it was converted with; a strut's is the
+    vertical share of its axis; anything else is taken as 1."""
     conv = e.get("x_converted_from_wheel_rate") or {}
     if isinstance(conv.get("motion_ratio"), (int, float)) and conv["motion_ratio"] > 0:
         return float(conv["motion_ratio"]), False
@@ -178,29 +212,32 @@ def _motion_ratio(e: dict) -> tuple:
     mr = e.get("motion_ratio")
     if isinstance(mr, (int, float)) and mr > 0:
         return float(mr), False
+    if strut and doc is not None:
+        a, b = doc.frame(e, "a"), doc.frame(e, "b")
+        n = _length(e, doc)
+        if a and b and n and n > 0.05:
+            return max(0.4, min(1.0, abs(b[2] - a[2]) / n)), True
     return 1.0, True
 
 
-def _stops(doc: _Doc, up: str) -> dict:
-    """Bump and rebound stops of a corner (spring elements `bump_stop_*` / `rebound_stop_*`
-    on the upright): {"up": gap, "down": gap, "rate": N/m}."""
+def _stops(doc: _Doc, up: str, mr: float = 1.0) -> dict:
+    """Bump and rebound stops of a corner, as AC states them: {"up": travel at which the
+    bump stop engages, "down": the rebound stop's, "rate": N/m}.  An engagement travel is the
+    element's length at the reference pose against the free length of the stop, at the wheel."""
     out: dict = {}
     for e in doc.elements:
         eid = str(e.get("id", ""))
         kind = "up" if eid.startswith("bump_stop") else "down" if eid.startswith("rebound_stop") else None
         if kind is None or up not in (e.get("body_a"), e.get("body_b")):
             continue
-        free = e.get("free_length")
-        curve = e.get("rate_curve") or []
-        if isinstance(free, (int, float)):
-            out[kind] = round(abs(0.30 - free), 5)           # the migration's free length is 0.30 - gap
-            if kind == "down":
-                out[kind] = round(abs(free - 0.30), 5)
-        pts = [p for p in curve if abs(p[0]) > 1e-9]
+        free, ref = e.get("free_length"), _length(e, doc)
+        if isinstance(free, (int, float)) and ref is not None:
+            gap = (ref - free) if kind == "up" else (free - ref)
+            out[kind] = round(max(gap, 0.0) / mr, 5)
+        pts = [p for p in (e.get("rate_curve") or []) if abs(p[0]) > 1e-9 and p[1]]
         if pts and "rate" not in out:
             p = max(pts, key=lambda q: abs(q[1]))
-            if p[0] and p[1]:
-                out["rate"] = round(abs(p[1] / p[0]), 1)
+            out["rate"] = round(abs(p[1] / p[0]) * mr * mr, 1)
     return out
 
 
@@ -226,9 +263,11 @@ def normalize(data: dict) -> tuple[dict, list]:
             continue
         up = st["upright_body"]
         sp, dp = _wheel_side(doc, up, "spring"), _wheel_side(doc, up, "damper")
-        stops = _stops(doc, up)
+        strut = str(st.get("topology_hint") or "") == "macpherson"
+        mr_s = _motion_ratio(sp, doc, strut)[0] if sp else 1.0
+        stops = _stops(doc, up, mr_s)
         if sp:
-            mr, guessed = _motion_ratio(sp)
+            mr, guessed = _motion_ratio(sp, doc, strut)
             conv = sp.get("x_converted_from_wheel_rate") or {}
             rate = conv.get("wheel_rate") or (sp.get("rate") or 0.0) * mr * mr
             corner["spring"] = {"rate": rate, **({"rod_length": sp["rod_length"]}
@@ -237,7 +276,7 @@ def normalize(data: dict) -> tuple[dict, list]:
                 notes.append(f"{key}: spring {sp.get('id')} is referenced to the element and "
                              "has no motion ratio: its rate is used as the wheel rate")
         if dp:
-            mr, _ = _motion_ratio(dp)
+            mr, _ = _motion_ratio(dp, doc, strut)
             d: dict = {}
             for name in ("bump_curve", "rebound_curve"):
                 if dp.get(name):                        # element -> wheel: v / MR, F * MR

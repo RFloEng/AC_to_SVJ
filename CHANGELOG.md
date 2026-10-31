@@ -4,6 +4,25 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### SVJ from other simulators (tried on the Richard Burns Rally files)
+
+- **Tyres without AC parameters.** An SVJ whose tyre set has only a Pacejka block (the standard's
+  `pacejka`, MF 5.2 / 6.2) made `svj_to_ac` stop with `PacejkaInverseError`. The block is now
+  fitted with AC's tyre model (as `tire_lab` has it) at five loads, giving `DY0` / `DY1` /
+  `LS_EXPY`, `DX0` / `DX1` / `LS_EXPX`, `XMU`, `FRICTION_LIMIT_ANGLE` (the slip angle of the
+  lateral peak) and `CX_MULT`, plus size, `RATE` and `DAMP` from the set; compounds get `NAME` and
+  `SHORT_NAME` from the set's name and the file gets `[HEADER]` / `[COMPOUND_DEFAULT]`.
+- **An arm given as one hinge.** A link joined to the chassis by a single revolute joint now
+  gives AC its two pickups: two points of the hinge axis, 0.15 m either side of the joint (an
+  estimate, marked `_est`). The main spring and damper are found among helper springs, packers
+  and stops; a MacPherson spring's motion ratio is the vertical share of its axis; bump and
+  rebound stops engage after the element's length at the reference pose minus the stop's free
+  length, at the wheel (`BUMPSTOP_UP` / `_DN`, `BUMP_STOP_RATE`).
+- On 67 RBR cars (SVJ 0.103) the conversion runs to the end. Converted back to SVJ with
+  AC_to_SVJ, mass, wheelbase and track are exact, the front spring rate within 2 to 5 %, the
+  front tyre's peak grip within 5 % and its cornering stiffness within 8 %. Not checked in AC
+  itself.
+
 ### Tyre Match: pick the closest tyres of your own library
 
 - New tab **3 · Tyre Match** (`gui_tyre_match.py`, logic in `tyre_match.py`). The user marks where

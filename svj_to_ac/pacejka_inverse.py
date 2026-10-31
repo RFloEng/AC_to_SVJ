@@ -89,6 +89,10 @@ def fit_ac_params(
     fast = _try_source_params(compound)
     if fast is not None:
         return fast
+    # An SVJ from another simulator: the standard's Pacejka block (MF 5.2 / 6.2).
+    std = _fit_from_standard(compound, log_path=log_path, side=side)
+    if std is not None:
+        return std
     # Slow path. Only attempt if MF 5.2 coefficients are present.
     mf = _get_mf52(compound)
     if mf is None:
@@ -103,6 +107,103 @@ def fit_ac_params(
         "expect grip drift +/- 5%.",
     )
     return fitted
+
+
+def _geometry_and_pressure(compound: Mapping[str, Any], out: dict[str, Any]) -> None:
+    """WIDTH, RADIUS, RIM_RADIUS, PRESSURE_STATIC, RATE and DAMP from the tyre set."""
+    dims = compound.get("dimensions") or {}
+    rim = compound.get("rim") or {}
+    if isinstance(dims, Mapping):
+        out["WIDTH"] = dims.get("section_width")
+        if dims.get("overall_diameter"):
+            out["RADIUS"] = float(dims["overall_diameter"]) / 2.0
+        else:
+            out["RADIUS"] = dims.get("carcass_radius") or dims.get("rolling_radius")
+        if not (isinstance(rim, Mapping) and rim.get("diameter")) and dims.get("rim_radius"):
+            out["RIM_RADIUS"] = dims["rim_radius"]
+    if isinstance(rim, Mapping) and rim.get("diameter") is not None:
+        out["RIM_RADIUS"] = float(rim["diameter"]) / 2.0
+    pressure = compound.get("pressure")
+    if pressure is not None:
+        from units import pa_to_psi
+
+        out["PRESSURE_STATIC"] = int(round(pa_to_psi(float(pressure))))
+    stiff = compound.get("stiffness") or {}
+    cons = compound.get("construction") or {}
+    vert = (stiff.get("vertical") if isinstance(stiff, Mapping) else None)         or (cons.get("vertical_stiffness") if isinstance(cons, Mapping) else None)
+    if vert:
+        out["RATE"] = float(vert)
+    damp = cons.get("vertical_damping") if isinstance(cons, Mapping) else None
+    if damp:
+        out["DAMP"] = float(damp)
+
+
+def _fit_from_standard(compound: Mapping[str, Any], *, log_path: Path | None,
+                       side: str) -> dict[str, Any] | None:
+    """AC's tyre parameters from the standard's ``pacejka`` block (pure slip), by fitting AC's
+    force model (as tire_lab implements it) to the Pacejka curves.
+
+    Grip and load sensitivity come from DY0 / DY1 / LS_EXPY (lateral) and DX0 / DX1 / LS_EXPX
+    (longitudinal), the stiffnesses from FRICTION_LIMIT_ANGLE (the slip angle of the lateral
+    peak) and CX_MULT, the post-peak level from XMU.  Returns None when the set has no
+    Pacejka block to read.
+    """
+    try:
+        import numpy as np
+        from scipy.optimize import least_squares
+        from tire_lab import ACTyreParams, ac_fx, ac_fy
+        from tyre_match import mf_pure_fx, mf_pure_fy
+    except Exception:                                             # noqa: BLE001
+        return None
+    blk = compound.get("pacejka") if isinstance(compound.get("pacejka"), Mapping) else _mf52_block(compound)
+    if not isinstance(blk, Mapping):
+        return None
+    lat, lon = blk.get("lateral"), blk.get("longitudinal")
+    if not isinstance(lat, Mapping) or not isinstance(lon, Mapping):
+        return None
+    ref = compound.get("reference") or {}
+    fz0 = float(ref.get("load") or 4000.0)
+    loads = [fz0 * f for f in (0.35, 0.65, 1.0, 1.4, 1.8)]
+    alpha = np.radians(np.linspace(0.0, 18.0, 37))
+    kappa = np.linspace(0.0, 0.35, 36)
+    tgt_y = [np.abs(mf_pure_fy(alpha, fz, 0.0, lat, fz0)) for fz in loads]
+    tgt_x = [np.abs(mf_pure_fx(kappa, fz, 0.0, lon, fz0)) for fz in loads]
+
+    def params(x) -> ACTyreParams:
+        return ACTyreParams(name="fit", axle=side, FZ0=fz0, DY0=x[0], DY1=x[1], LS_EXPY=x[2],
+                            DX0=x[3], DX1=x[4], LS_EXPX=x[5], K_a=x[6], K_k=x[7], FLEX=0.0008,
+                            CAMBER_GAIN=0.0, KINETIC_RATIO=x[8], PRESSURE_REF_PSI=29.0,
+                            PRESSURE_NOW_PSI=29.0, PRESSURE_GAIN=0.0, source="fit")
+
+    def residuals(x):
+        p = params(x)
+        r = []
+        for fz, ty, tx in zip(loads, tgt_y, tgt_x):
+            r.append((np.abs(ac_fy(alpha, fz, 0.0, p)) - ty) / fz)
+            r.append((np.abs(ac_fx(kappa, fz, 0.0, p)) - tx) / fz)
+        return np.concatenate(r)
+
+    mu_y0 = float(tgt_y[2].max() / fz0)
+    mu_x0 = float(tgt_x[2].max() / fz0)
+    x0 = np.array([mu_y0, -0.05, 0.9, mu_x0, -0.05, 0.9, 16.0, 18.0, 0.9])
+    lo = [0.3, -0.5, 0.4, 0.3, -0.5, 0.4, 4.0, 4.0, 0.5]
+    hi = [3.5, 0.5, 1.4, 3.5, 0.5, 1.4, 60.0, 80.0, 1.0]
+    fit = least_squares(residuals, x0, bounds=(lo, hi), max_nfev=300)
+    x = fit.x
+    rmse = float(np.sqrt(np.mean(fit.fun ** 2)))
+    _log_warning(log_path, f"tyre [{side}] fitted to the Pacejka block (rms {rmse:.3f} of the load); "
+                           "AC's tyre model is simpler than Pacejka, expect grip drift.")
+    out: dict[str, Any] = {
+        "FZ0": round(fz0), "DY0": round(float(x[0]), 4), "DY1": round(float(x[1]), 4),
+        "LS_EXPY": round(float(x[2]), 4), "DX0": round(float(x[3]), 4),
+        "DX1": round(float(x[4]), 4), "LS_EXPX": round(float(x[5]), 4), "FLEX": 0.0008,
+        "XMU": round(float(x[8]), 3),
+        # the slip angle of the lateral peak at FZ0, and the longitudinal stiffness scale
+        "FRICTION_LIMIT_ANGLE": round(math.degrees(float(x[0]) * (1.0 + 0.0008 * fz0) / float(x[6])), 3),
+        "CX_MULT": round(float(x[7]) / 18.0, 4),
+    }
+    _geometry_and_pressure(compound, out)
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def _mf52_block(compound: Mapping[str, Any]) -> Mapping[str, Any] | None:

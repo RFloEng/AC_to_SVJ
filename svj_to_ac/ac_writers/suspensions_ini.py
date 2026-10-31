@@ -123,7 +123,8 @@ def _render_axle_section(axle: str, block: dict[str, Any]) -> str:
     lines.append(f"TYPE={format_value(block['TYPE'])}")
     for key in SCALAR_KEYS:
         if key in block and block[key] is not None:
-            lines.append(f"{key}={format_value(block[key])}")
+            v = block[key]
+            lines.append(f"{key}={format_value(round(v, 5) if isinstance(v, float) else v)}")
     for k, v in block.get("_pickups", {}).items():
         lines.append(f"{k}={v}")
     for comment_line in block.get("_trailing_comments", []):

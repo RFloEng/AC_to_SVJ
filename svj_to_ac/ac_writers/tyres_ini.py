@@ -118,7 +118,8 @@ def _render_from_svj(doc: SvjDoc, *, log_path: Path | None) -> str:
     front_keys = [k for k in sets if "front" in k.lower()]
     rear_keys = [k for k in sets if "rear" in k.lower()]
 
-    sections: list[str] = []
+    sections: list[str] = [format_section("HEADER", {"VERSION": 10}),
+                           format_section("COMPOUND_DEFAULT", {"INDEX": 0})]
     n_front = len(front_keys)
     n_rear = len(rear_keys)
     multi = max(n_front, n_rear) > 1
@@ -126,13 +127,13 @@ def _render_from_svj(doc: SvjDoc, *, log_path: Path | None) -> str:
     for idx, key in enumerate(front_keys):
         suffix = f"_{idx}" if multi else ""
         sec = _compound_section(
-            f"FRONT{suffix}", sets[key], log_path=log_path, side="front"
+            f"FRONT{suffix}", sets[key], log_path=log_path, side="front", set_key=key
         )
         sections.append(sec)
     for idx, key in enumerate(rear_keys):
         suffix = f"_{idx}" if multi else ""
         sec = _compound_section(
-            f"REAR{suffix}", sets[key], log_path=log_path, side="rear"
+            f"REAR{suffix}", sets[key], log_path=log_path, side="rear", set_key=key
         )
         sections.append(sec)
 
@@ -157,11 +158,15 @@ def _compound_section(
     *,
     log_path: Path | None,
     side: str,
+    set_key: str = "",
 ) -> str:
     """Render one ``[FRONT_N]``/``[REAR_N]`` section."""
     params = fit_ac_params(compound, log_path=log_path, side=side)
     # Preserve AC's canonical key order for clean diffs.
     block: dict[str, Any] = {}
+    label, short = _compound_names(set_key, compound)
+    if label:
+        block["NAME"], block["SHORT_NAME"] = label, short
     for key in CANONICAL_AC_KEYS:
         if key in params and params[key] is not None:
             block[key] = params[key]
@@ -170,6 +175,18 @@ def _compound_section(
         if key not in block and val is not None:
             block[key] = val
     return format_section(name, block)
+
+
+def _compound_names(set_key: str, compound: Mapping[str, Any]) -> tuple[str, str]:
+    """AC's NAME / SHORT_NAME of a compound from the name of its tyre set (``tire_michelin_front_
+    tarmac_dry`` is "Michelin Tarmac Dry", "MTD"); empty when the set has no distinguishing name."""
+    import re
+
+    tokens = [t for t in re.split(r"[_\s]+", set_key.lower()) if t and t not in ("tire", "tyre", "front", "rear")]
+    tokens = [t for t in tokens if not re.fullmatch(r"\d+(r\d+)?", t)]
+    if not tokens:
+        return "", ""
+    return " ".join(t.capitalize() for t in tokens), "".join(t[0] for t in tokens).upper()[:3]
 
 
 def _thermal_section(name: str, compound: Mapping[str, Any]) -> str | None:
