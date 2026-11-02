@@ -93,9 +93,20 @@ def _coef(d: dict, name: str, default: float = 0.0) -> float:
     return float(v) if isinstance(v, (int, float)) else default
 
 
+def _bcde(x, fz, blk: dict):
+    """The magic formula in its short form, as simulators with a simple tyre give it: `B`, `C`,
+    `D` (the friction coefficient, so the peak is D * Fz at any load) and `E`."""
+    x = np.asarray(x, float)
+    b, c = _coef(blk, "B", 10.0), _coef(blk, "C", 1.5)
+    bx = b * x
+    return _coef(blk, "D", 1.0) * fz * np.sin(c * np.arctan(bx - _coef(blk, "E") * (bx - np.arctan(bx))))
+
+
 def mf_pure_fy(alpha, fz, gamma, lat: dict, fz0: float):
     """Pacejka pure-slip lateral force (MF 6.2 equations; absent coefficients are zero, so an
-    MF 5.2 block works too)."""
+    MF 5.2 block works too; a block of B, C, D, E only is the short form)."""
+    if "pCy1" not in lat and "B" in lat and "D" in lat:
+        return _bcde(alpha, fz, lat)
     alpha = np.asarray(alpha, float)
     dfz = (fz - fz0) / fz0
     sh = _coef(lat, "pHy1") + _coef(lat, "pHy2") * dfz + _coef(lat, "pHy3") * gamma
@@ -118,7 +129,9 @@ def mf_pure_fy(alpha, fz, gamma, lat: dict, fz0: float):
 
 
 def mf_pure_fx(kappa, fz, gamma, lon: dict, fz0: float):
-    """Pacejka pure-slip longitudinal force (MF 6.2 equations)."""
+    """Pacejka pure-slip longitudinal force (MF 6.2 equations, or the B, C, D, E short form)."""
+    if "pCx1" not in lon and "B" in lon and "D" in lon:
+        return _bcde(kappa, fz, lon)
     kappa = np.asarray(kappa, float)
     dfz = (fz - fz0) / fz0
     kx = kappa + _coef(lon, "pHx1") + _coef(lon, "pHx2") * dfz

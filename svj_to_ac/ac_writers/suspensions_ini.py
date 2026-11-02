@@ -205,9 +205,14 @@ def _canonical_scalar_default(doc: SvjDoc, axle: str, key: str, ctx: AxleContext
     if key == "TRACK":
         return doc.chassis.track_front if axle == "FRONT" else doc.chassis.track_rear
     if key == "BASEY":
-        # AC: wheel radius + BASEY = height of the CG
+        # AC: BASEY = wheel radius - height of the CG = the CG's z minus the wheel centre's z
+        # (SVJ z points down), in whatever frame the file is in
         cg = doc.chassis.center_of_gravity
-        return round(ctx.rolling_radius + float(cg[2]), 4) if cg and len(cg) == 3 else None
+        if not (cg and len(cg) == 3):
+            return None
+        if ctx.wheel_center is not None:
+            return round(float(cg[2]) - ctx.wheel_center[2], 4)
+        return round(ctx.rolling_radius + float(cg[2]), 4)
     if key == "HUB_MASS":
         ms = [w.get("mass") for w in wheels if w.get("mass") is not None]
         if not ms:

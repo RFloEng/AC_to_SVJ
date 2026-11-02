@@ -28,13 +28,13 @@ from typing import Any
 from unified_view import normalize as normalize_unified
 
 REQUIRED_SECTIONS: tuple[str, ...] = (
-    "vehicle_info",
     "chassis",
     "suspension",
 )
 # The standard makes these optional; a file without them still gives a car, with generic parts
 # (reported in ``SvjDoc.notes``).
 FILLED_SECTIONS: tuple[tuple[str, dict, str], ...] = (
+    ("vehicle_info", {}, "no vehicle_info: the car is named after the file"),
     ("tires", {"sets": {}}, "no tyres: generic road tyres"),
     ("powertrain", {}, "no powertrain: a generic engine and gearbox"),
     ("brakes", {}, "no brakes: generic brakes"),
@@ -225,6 +225,10 @@ def load(path: str | Path) -> SvjDoc:
             f"Assetto Corsa cars have two axles; this vehicle has {len(axles)} "
             f"({', '.join(sorted(axles))}) and cannot be written as one")
     data = dict(data)
+    if "tires" in data:
+        data["tires"], tnote = _tire_sets(data["tires"])
+        if tnote:
+            notes.append(tnote)
     for name, empty, note in FILLED_SECTIONS:
         if name not in data:
             data[name] = copy.deepcopy(empty)
@@ -236,6 +240,32 @@ def load(path: str | Path) -> SvjDoc:
     return doc
 
 
+def _tire_sets(tires: Any) -> tuple[Any, str]:
+    """Tyres given per axle (``tires.front`` / ``tires.rear`` with a radius, a width and a
+    magic-formula block, as the Race07 files have them) become tyre sets."""
+    if not isinstance(tires, dict) or "sets" in tires:
+        return tires, ""
+    sets: dict[str, Any] = {}
+    for axle in ("front", "rear"):
+        t = tires.get(axle)
+        if not isinstance(t, dict):
+            continue
+        s: dict[str, Any] = {"description": f"{axle} tyre of the file",
+                             "dimensions": {"section_width": t.get("width"),
+                                            "overall_diameter": 2 * t["radius"] if t.get("radius") else None},
+                             "reference": {"load": 4000.0}}
+        if t.get("pressure_nominal"):
+            s["pressure"] = t["pressure_nominal"]
+        pj = t.get("pacejka")
+        if isinstance(pj, dict) and isinstance(pj.get("lateral"), dict):
+            s["pacejka"] = {"model": "MF52", "lateral": pj["lateral"],
+                            "longitudinal": pj.get("longitudinal") or pj["lateral"]}
+        sets[f"tire_{axle}"] = s
+    if not sets:
+        return tires, ""
+    return {**tires, "sets": sets}, "tyres given per axle: read as one tyre set per axle"
+
+
 def _plausibility(data: dict[str, Any]) -> list[str]:
     """Things in the file that look wrong (another simulator's exporter), said in the log; the
     values are written as they are."""
@@ -244,7 +274,8 @@ def _plausibility(data: dict[str, Any]) -> list[str]:
     wb, cg = ch.get("wheelbase"), ch.get("center_of_gravity")
     corners = (data.get("suspension") or {})
     fl = corners.get("FL") or {}
-    front_x = (fl.get("position") or [0.0, 0.0, 0.0])[0] or 0.0
+    hp0 = ((fl.get("topology") or {}).get("upright") or {}).get("hardpoints") or {}
+    front_x = (fl.get("position") or hp0.get("wheel_center") or [0.0, 0.0, 0.0])[0] or 0.0
     if wb and isinstance(cg, list) and len(cg) == 3:
         front = 1.0 - (front_x - cg[0]) / wb
         if not 0.3 <= front <= 0.75:
@@ -379,9 +410,12 @@ def _build_suspension(d: dict[str, Any]) -> SvjSuspension:
     for name in CORNERS:
         if name in d:
             c = d[name]
+            hp = ((c.get("topology") or {}).get("upright") or {}).get("hardpoints") or {}
             corners[name] = SvjCorner(
                 name=name,
-                position=list(c.get("position", [0.0, 0.0, 0.0])),
+                # a corner without a position gives its wheel centre in the upright's hardpoints
+                # (the Race07 files, whose origin is at the CG, not at the front axle)
+                position=list(c.get("position") or hp.get("wheel_center") or [0.0, 0.0, 0.0]),
                 topology=dict(c.get("topology", {})),
                 raw=dict(c),
             )

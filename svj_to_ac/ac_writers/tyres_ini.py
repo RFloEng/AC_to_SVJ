@@ -117,8 +117,11 @@ def _render_from_svj(doc: SvjDoc, *, log_path: Path | None) -> str:
     sets = dict(doc.tires.sets or {})
     front_keys = [k for k in sets if "front" in k.lower()]
     rear_keys = [k for k in sets if "rear" in k.lower()]
+    unlabelled = [k for k in sets if k not in front_keys and k not in rear_keys]
     for axle, keys in (("front", front_keys), ("rear", rear_keys)):
-        if not keys:                       # a file without tyres for this axle: size from the wheels
+        if not keys and unlabelled:        # one tyre set for the whole car (named "default")
+            keys.append(unlabelled[0])
+        elif not keys:                     # a file without tyres for this axle: size from the wheels
             sets[f"tire_{axle}_generic"] = _generic_set(doc, axle)
             keys.append(f"tire_{axle}_generic")
 
@@ -132,14 +135,14 @@ def _render_from_svj(doc: SvjDoc, *, log_path: Path | None) -> str:
         suffix = f"_{idx}" if multi else ""
         sec = _compound_section(
             f"FRONT{suffix}", sets[key], log_path=log_path, side="front", set_key=key,
-            wheel_load=_wheel_load(doc, "front")
+            wheel_load=_wheel_load(doc, "front"), fallback_size=_generic_set(doc, "front")
         )
         sections.append(sec)
     for idx, key in enumerate(rear_keys):
         suffix = f"_{idx}" if multi else ""
         sec = _compound_section(
             f"REAR{suffix}", sets[key], log_path=log_path, side="rear", set_key=key,
-            wheel_load=_wheel_load(doc, "rear")
+            wheel_load=_wheel_load(doc, "rear"), fallback_size=_generic_set(doc, "rear")
         )
         sections.append(sec)
 
@@ -196,9 +199,15 @@ def _compound_section(
     side: str,
     set_key: str = "",
     wheel_load: float | None = None,
+    fallback_size: Mapping[str, Any] | None = None,
 ) -> str:
     """Render one ``[FRONT_N]``/``[REAR_N]`` section."""
     params = fit_ac_params(compound, log_path=log_path, side=side, wheel_load=wheel_load)
+    if fallback_size:                      # a tyre set without a size: the wheel's
+        dims, rim = fallback_size.get("dimensions") or {}, fallback_size.get("rim") or {}
+        params.setdefault("WIDTH", dims.get("section_width"))
+        params.setdefault("RADIUS", (dims.get("overall_diameter") or 0) / 2 or None)
+        params.setdefault("RIM_RADIUS", (rim.get("diameter") or 0) / 2 or None)
     # Preserve AC's canonical key order for clean diffs.
     block: dict[str, Any] = {}
     label, short = _compound_names(set_key, compound)

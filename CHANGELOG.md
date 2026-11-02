@@ -4,6 +4,19 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Test cars: SVJ from RBR, Project CARS 2 and Race07 into AC, with a borrowed model
+
+- `assemble(..., model_name=, donor_car=)` copies the 3D model, skins, textures, animations and
+  sound bank of an installed AC car into the new car (its data, UI and CSP configuration stay
+  behind), so a converted car can be driven before it has a model of its own: the physics are the SVJ's,
+  the looks and wheel positions the donor's, said in the log.
+- Found by building a car from each: a file without `vehicle_info` is named after the file; a corner
+  without `position` gives its wheel centre from the upright's hardpoints (Race07's origin is at the CG, not
+  at the front axle, which had made every pickup and the CG share wrong); `BASEY` is the CG's z minus
+  the wheel centre's z, true in any frame; tyres given per axle (`tires.front` / `tires.rear`) and
+  the short magic formula (`B`, `C`, `D`, `E`, with `D` the friction coefficient) are read; one tyre set
+  named "default" serves both axles, with the size from the wheel when the set has none.
+
 ### SVJ from other simulators: BeamNG, Forza, Project CARS, rFactor and the standard's examples
 
 - Tried on 33 BeamNG files, one each of Forza Horizon, Project CARS and rFactor, and the 29

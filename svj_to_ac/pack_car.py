@@ -94,20 +94,26 @@ def model_id(doc: SvjDoc) -> str:
     vi = doc.vehicle_info
     if vi and vi.model:
         return _slugify(f"{vi.make}_{vi.model}".strip("_"))
+    if doc.source_path is not None:                  # no name in the file: the file's
+        return _slugify(doc.source_path.name.split(".")[0])
     return "unnamed_car"
 
 
-def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None) -> AssembleResult:
+def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None,
+             model_name: str | None = None, donor_car: Path | None = None) -> AssembleResult:
     """Write the full ``content/cars/<model>/`` tree under ``base_dir``.
 
     ``base_dir`` is the parent of the eventual ``content/`` directory.
+    ``model_name`` is the folder name (default: from the file); ``donor_car`` is the folder of an
+    installed AC car whose 3D model (`*.kn5`, skins, textures, animations) is copied in, so the car
+    can be driven before it has a model of its own: the physics are the SVJ's, the looks the donor's.
     ``tyre_choice`` takes the tyres from cars of an installed AC (see
     :func:`ac_writers.tyres_ini.write`) instead of fitting them.
     Returns an :class:`AssembleResult` enumerating every file written
     (deterministic order, suitable for reproducible zipping).
     """
     base_dir = Path(base_dir)
-    name = model_id(doc)
+    name = _slugify(model_name) if model_name else model_id(doc)
     car_dir = base_dir / "content" / "cars" / name
     data_dir = car_dir / "data"
     ui_dir = car_dir / "ui"
@@ -145,6 +151,11 @@ def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None) -> As
     sfx_path.write_text(sfx_text, encoding="utf-8", newline="\n")
     files.append(sfx_path)
 
+    if donor_car is not None:
+        files.extend(copy_donor_model(Path(donor_car), car_dir))
+        _note_to_log(car_dir, f"3D model borrowed from the installed car {Path(donor_car).name}: "
+                              "the physics are this SVJ's, the looks and the wheel positions are not")
+
     if doc.notes:                              # what the loader filled in or found odd
         log = car_dir / "conversion_log.txt"
         with log.open("a", encoding="utf-8") as f:
@@ -158,6 +169,34 @@ def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None) -> As
         sfx_dir=sfx_dir,
         files=tuple(sorted({f.resolve() for f in files})),
     )
+
+
+_DONOR_SKIP = {"data", "data.acd", "ui", "unencrypted", "extension", "_setup", "setups",
+               "ui_car.json", "readme.txt", "donate.url"}
+
+
+def copy_donor_model(donor: Path, car_dir: Path) -> list[Path]:
+    """Copy a donor car's visual files (kn5 models, skins, textures, animations, shadows) into
+    `car_dir` (its sound bank too); its data, UI and CSP configuration are left behind."""
+    import shutil
+
+    copied: list[Path] = []
+    for item in sorted(donor.iterdir()):
+        if item.name.lower() in _DONOR_SKIP or item.suffix.lower() in (".txt", ".url"):
+            continue
+        dst = car_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, dst, dirs_exist_ok=True)
+            copied.extend(p for p in dst.rglob("*") if p.is_file())
+        else:
+            shutil.copy2(item, dst)
+            copied.append(dst)
+    return copied
+
+
+def _note_to_log(car_dir: Path, text: str) -> None:
+    with (car_dir / "conversion_log.txt").open("a", encoding="utf-8") as f:
+        f.write(f"NOTE [donor]: {text}" + chr(10))
 
 
 def zip_folder(

@@ -231,3 +231,53 @@ def test_other_suspension_types_map_onto_ac_types(tmp_path) -> None:
     doc = _load_dict(d, tmp_path)
     text = suspensions_ini.write(doc, tmp_path / "data").read_text(encoding="utf-8")
     assert _parse(text)["REAR"]["TYPE"] == "3"                       # AC's solid axle
+
+
+def test_tyres_given_as_short_magic_formula_blocks_are_fitted(tmp_path) -> None:
+    """Race07 gives tyres per axle with B, C, D, E; PC2 gives one set named "default"."""
+    import pack_car
+    d = _mx5_json()
+    d["tires"] = {"front": {"radius": 0.28, "width": 0.245, "pressure_nominal": 135000.0, "model": "pacejka",
+                            "pacejka": {"lateral": {"B": 10.0, "C": 1.9, "D": 1.65, "E": -1.0},
+                                        "longitudinal": {"B": 14.0, "C": 1.65, "D": 1.65, "E": -1.0}}},
+                  "rear": {"radius": 0.29, "width": 0.275, "pressure_nominal": 135000.0}}
+    doc = _load_dict(d, tmp_path)
+    assert any("per axle" in n for n in doc.notes)
+    tyres = _parse((pack_car.assemble(doc, tmp_path / "a").data_dir / "tyres.ini").read_text(encoding="utf-8"))
+    assert float(tyres["FRONT"]["WIDTH"]) == 0.245 and 1.4 < float(tyres["FRONT"]["DY0"]) < 1.9
+    d["tires"] = {"sets": {"default": {"reference": {"load": 4000.0},
+                                       "pacejka": {"model": "MF52",
+                                                   "lateral": {"B": 9.6, "C": 1.35, "D": 1.85, "E": 0.65},
+                                                   "longitudinal": {"B": 9.8, "C": 1.65, "D": 1.85, "E": 0.65}}}}}
+    doc = _load_dict(d, tmp_path)
+    tyres = _parse((pack_car.assemble(doc, tmp_path / "b").data_dir / "tyres.ini").read_text(encoding="utf-8"))
+    assert {"FRONT", "REAR"} <= set(tyres) and 1.5 < float(tyres["REAR"]["DY0"]) < 2.2
+    assert float(tyres["FRONT"]["RADIUS"]) > 0.2                        # the size comes from the wheel
+
+
+def test_a_donor_car_lends_its_model_but_not_its_data(tmp_path) -> None:
+    import pack_car
+    donor = tmp_path / "donor"
+    (donor / "data").mkdir(parents=True)
+    (donor / "skins" / "red").mkdir(parents=True)
+    (donor / "ui").mkdir()
+    (donor / "donor.kn5").write_bytes(b"kn5")
+    (donor / "collider.kn5").write_bytes(b"kn5")
+    (donor / "skins" / "red" / "body.dds").write_bytes(b"dds")
+    (donor / "data" / "car.ini").write_text("[BASIC]" + chr(10) + "NAME=donor" + chr(10))
+    doc = svj_loader.load(REPO / "examples" / "mx5_nd_club.svj.json")
+    res = pack_car.assemble(doc, tmp_path / "out", model_name="my test car", donor_car=donor)
+    assert res.car_dir.name == "my_test_car"
+    assert (res.car_dir / "donor.kn5").is_file() and (res.car_dir / "skins" / "red" / "body.dds").is_file()
+    assert "NAME=donor" not in (res.data_dir / "car.ini").read_text(encoding="utf-8")   # our data
+    assert "borrowed from the installed car donor" in (res.car_dir / "conversion_log.txt").read_text(encoding="utf-8")
+
+
+def test_a_file_without_vehicle_info_is_named_after_itself(tmp_path) -> None:
+    import pack_car
+    d = _mx5_json()
+    d.pop("vehicle_info")
+    p = tmp_path / "Caterham_CSR200.json"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    doc = svj_loader.load(p)
+    assert pack_car.model_id(doc) == "caterham_csr200"
