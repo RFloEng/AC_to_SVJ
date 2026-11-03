@@ -25,6 +25,9 @@ def _ts_long() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+_MESH_GLOBS = ("*.glb", "*.usdz", "*.usdc", "*.usd", "*.usda")      # a car's meshes, in either format
+
+
 def _already_converted(car_out: Path, need_glb: bool) -> bool:
     """True when a car's output folder already holds its SVJ (and, when GLBs are
     wanted, at least one GLB beside it or in meshes/)."""
@@ -32,7 +35,7 @@ def _already_converted(car_out: Path, need_glb: bool) -> bool:
         if not car_out.is_dir() or not any(car_out.glob("*.svj.json")):
             return False
         if need_glb:
-            return any(car_out.glob("*.glb")) or any((car_out / "meshes").glob("*.glb"))
+            return any(any(d.glob(pat)) for d in (car_out, car_out / "meshes") for pat in _MESH_GLOBS)
         return True
     except OSError:
         return False
@@ -99,7 +102,7 @@ def _write_car_log(car_out: Path, stem: str, car_path: Path,
             for sub in ("meshes", ""):
                 glb_dir = car_out / sub if sub else car_out
                 if glb_dir.is_dir():
-                    for g in sorted(glb_dir.glob("*.glb")):
+                    for g in sorted(p for pat in _MESH_GLOBS for p in glb_dir.glob(pat)):
                         lines.append(f"  {sub + '/' if sub else ''}{g.name}")
 
     lines += ["", hdr, ""]
@@ -175,6 +178,7 @@ def convert_one(job: dict, emit: Optional[Callable[[str], None]] = None) -> dict
             data_dir=data_dir,
             ctrl_files=ctrl_files,
             glb_output_dir=glb_dir,
+            mesh_format=job.get("mesh_format", "glb"),
             include_skins=job["include_skins"],
             meshes_subdir=job["mesh_sub"],
             include_damage_textures=job["include_damage"],
@@ -197,7 +201,7 @@ def convert_one(job: dict, emit: Optional[Callable[[str], None]] = None) -> dict
         if glb_src is not None and glb_src.is_dir():
             mesh_out = car_out / mesh_sub if mesh_sub else car_out
             mesh_out.mkdir(exist_ok=True)
-            for g in glb_src.glob("*.glb"):
+            for g in [p for pat in _MESH_GLOBS for p in glb_src.glob(pat)]:
                 shutil.copy2(str(g), str(mesh_out / g.name))
 
         if include_plots and bench:
@@ -241,8 +245,9 @@ def convert_one(job: dict, emit: Optional[Callable[[str], None]] = None) -> dict
         glb_note = ""
         if convert_glb:
             glb_ok = (glb_src is not None and glb_src.is_dir()
-                      and any(glb_src.glob("*.glb")))
-            glb_note = "  ✓ GLB exported" if glb_ok else "  ⚠ no GLB"
+                      and any(any(glb_src.glob(pat)) for pat in _MESH_GLOBS))
+            kind = "USD" if job.get("mesh_format") == "usd" else "GLB"
+            glb_note = f"  ✓ {kind} exported" if glb_ok else f"  ⚠ no {kind}"
         put(f"✓ Done: {car_path.name} — {len(bench)} tire fit(s){glb_note}")
         success = True
         res["status"] = "ok"

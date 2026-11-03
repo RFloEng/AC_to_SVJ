@@ -302,7 +302,8 @@ def validate(doc: SvjDoc) -> list[SvjError]:
                     "warning",
                 )
             )
-        if doc.metadata.coordinate_system and doc.metadata.coordinate_system != EXPECTED_COORDS:
+        if (doc.metadata.coordinate_system and not isinstance(doc.metadata.coordinate_system, dict)
+                and doc.metadata.coordinate_system != EXPECTED_COORDS):
             errors.append(
                 SvjError(
                     "_metadata.coordinate_system",

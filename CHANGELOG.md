@@ -95,6 +95,26 @@ All notable changes are documented here.
 - Not done yet: the other `.ini` files are far from complete against a real car, the tyre fit for
   an SVJ that does not come from AC, and the 3D model.
 
+### OpenUSD meshes (SVJ 0.105, spec 22.10)
+
+- The standard now lets `assets.meshes[]` be OpenUSD as well as glTF. `build_svj(mesh_format="usd")`
+  (and the batch tab's *Meshes* box: GLB or USD) exports each LOD as a `.usdz` package: the GLB
+  is made as before and converted with the standard's `gltf2usd.py` (vendored as
+  `svj_migrate/gltf2usd.py`, with the `mesh_check.py` it needs), which was extended to carry the
+  textures (base colour and normal maps as `UsdUVTexture` into `UsdPreviewSurface`, packed into the
+  USDZ). The binding names stay `SVJ::category::id` (prim `SVJ__category__id` with `svj:node`), the
+  entries carry `format: "usd"` and the file declares 0.105. On the MX-5, 364 nodes, 154 meshes, 198k
+  triangles and 23 textures go across; 12.6 MB against 21.5 MB for the GLB.
+- Not carried: glTF animations (the doors and wipers are joints and poses in the SVJ, which is the
+  authority) and the other skins (only the default one). Without `usd-core`, or if a file cannot be
+  converted, the GLB is kept and the entry says `.glb`.
+- A file with meshes now declares the asset's axes, `_metadata.coordinate_system = {up: Y, forward:
+  -Z, handedness: right}` (spec 22.4); the physics stay SAE J670. The standard's mesh check had been
+  guessing them and warning. It also warns that uprights and discs are "not bound by any part": the
+  bindings of a unified suspension sit on the wheel stations (`wheel_stations[].visual`), which its
+  `integrity_check.py --meshes` does not read yet (the same for GLB and USD, and for the standard's own
+  migration).
+
 ### Dampers and bump stops of vanilla AC
 
 - **Dampers are AC's own two slopes.** The bump and rebound curves were synthesised from one

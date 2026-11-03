@@ -12,6 +12,9 @@ algorithms, standards, and libraries the code relies on, and the projects whose
 <https://github.com/RFloEng/SVJ-standard-vehicle-json> (`tools/`, commit 5561ab6,
 Apache License 2.0, the same project whose standard this converter writes)
 
+`svj_migrate/` also holds `gltf2usd.py` and `mesh_check.py` (commit 72be86a; the converter of GLB files to
+OpenUSD, extended here to carry textures, and the mesh checks it needs).
+
 `svj_migrate/` is a copy of the standard's suspension migration
 (`migrate_suspension.py`) with the modules it needs (`multibody_check.py`,
 `suspension_view.py`, and the part-name tables of `constraints_check.py` as

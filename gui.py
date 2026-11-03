@@ -503,10 +503,13 @@ class App(tk.Tk):
                         variable=self._b_plots_var).pack(side="left")
         self._b_glb_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            opts, text="Convert KN5 → GLB",
+            opts, text="Convert KN5 → meshes",
             variable=self._b_glb_var,
             state="normal" if _KN5 else "disabled",
-        ).pack(side="left", padx=16)
+        ).pack(side="left", padx=(16, 4))
+        self._b_mesh_var = tk.StringVar(value="GLB (glTF)")
+        ttk.Combobox(opts, textvariable=self._b_mesh_var, state="readonly", width=12,
+                     values=("GLB (glTF)", "USD (.usdz)")).pack(side="left", padx=(0, 16))
         self._b_skins_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             opts, text="Embed skins (liveries)",
@@ -708,6 +711,7 @@ class App(tk.Tk):
             f"▶ Starting batch: {len(selected)} car(s) selected from {cars_folder}",
             "info")
 
+        self._mesh_format = "usd" if "USD" in self._b_mesh_var.get() else "glb"
         threading.Thread(
             target=self._batch_worker,
             args=(
@@ -809,6 +813,7 @@ class App(tk.Tk):
                     "src": src, "car_out": out_root / out_names[i],
                     "include_plots": include_plots,
                     "convert_glb": bool(convert_glb and _KN5),
+                    "mesh_format": getattr(self, "_mesh_format", "glb"),
                     "include_skins": include_skins, "mesh_sub": mesh_sub,
                     "include_damage": include_damage,
                     "highest_lod_only": highest_lod_only,

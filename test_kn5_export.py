@@ -487,6 +487,41 @@ def test_chassis_group():
     assert not by["SVJ::body::chassis"].matrix and not by["SVJ::body::chassis"].translation
 
 
+def test_converter_can_write_usd_meshes():
+    """mesh_format="usd": the GLBs become USDZ packages, the manifest says so, the file declares
+    0.105 and the binding names are found in the stage (spec 22.10)."""
+    import shutil
+    try:
+        from pxr import Usd
+    except ImportError:
+        return                                        # usd-core is optional
+    from converter import build_svj, read_car_directory, _clean
+    src = Path(__file__).parent / "test_car"
+    if not src.is_dir():
+        return
+    with tempfile.TemporaryDirectory() as t:
+        car = Path(t) / "synthcar"
+        shutil.copytree(src, car)
+        tree = N("ROOT", children=[N("BODY", "mesh"), N("SUSP_LF", "mesh"), N("WHEEL_LF", "mesh"),
+                                   N("DISC_LF", "mesh"), N("WHEEL_RR", "mesh")])
+        (car / "synthcar.kn5").write_bytes(make_kn5(tree, materials=[("MAT", "ksPerPixel", {}, {})]))
+        ini, cm, ctrl, dd = read_car_directory(car)
+        out = Path(t) / "out"
+        svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl, glb_output_dir=out,
+                                mesh_format="usd")
+        svj = _clean(svj)
+        usd = out / "meshes" / "synthcar.usdz"
+        assert usd.is_file() and not list((out / "meshes").glob("*.glb")), log
+        entry = svj["assets"]["meshes"][0]
+        assert entry["uri"] == "meshes/synthcar.usdz" and entry["format"] == "usd"
+        assert svj["_metadata"]["version"] == "0.105"
+        assert svj["_metadata"]["coordinate_system"]["up"] == "Y"
+        stage = Usd.Stage.Open(str(usd))
+        named = {p.GetAttribute("svj:node").Get() for p in stage.Traverse()
+                 if p.GetAttribute("svj:node") and p.GetAttribute("svj:node").HasValue()}
+        assert "SVJ::body::chassis" in named and "SVJ::wheel::wheel_fl" in named
+
+
 def test_converter_emits_v0992_bindings():
     """Synthetic car folder -> real build_svj: bindings exist, are named by the
     SVJ::<category>::<id> convention, and the exported GLB contains those nodes."""

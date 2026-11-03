@@ -3,3 +3,4 @@ scipy>=1.10
 matplotlib>=3.7
 Pillow>=10.0
 pygltflib>=1.15
+usd-core>=24.0          # OpenUSD meshes (SVJ 0.105); only needed for the USD mesh format
