@@ -10,7 +10,9 @@ Writes a USD stage that follows the SVJ rules for USD assets:
   * a node named `SVJ::category::id` becomes the prim `SVJ__category__id` carrying the attribute
     `svj:node = "SVJ::category::id"` (also taken from a node's `extras.svj_node`),
   * triangle meshes (modes 4, 5, 6) as UsdGeomMesh with normals and the first UV set,
-  * the base colour, metallic and roughness factors as a UsdPreviewSurface material (textures are not converted).
+  * the base colour, metallic and roughness factors as a UsdPreviewSurface material, with the base-colour and
+    normal textures, the alpha mode (MASK -> opacityThreshold, BLEND -> opacity from the texture alpha),
+    clearcoat, the specular cap (as ior) and the occlusion map (second UV set as the `st1` primvar).
 
 glTF animations are NOT carried over: animation, poses and solids in a USD asset may only be copies of data already in the
 SVJ JSON (spec §22.10), so a converter must first put them in the JSON (joints, `poses[]`).
@@ -172,7 +174,7 @@ def convert(src, dst, root_name="Root", animate=None):
         stats["textures"] += 1
         return images[src_i]
 
-    def texture_network(mat, sh, input_name, tex_index, srgb, normal=False):
+    def texture_network(mat, sh, input_name, tex_index, srgb, normal=False, primvar="st", channel=None):
         """A UsdUVTexture (reading the `st` primvar) feeding `input_name` of the surface shader."""
         path = image_file(tex_index)
         if path is None:
@@ -180,7 +182,7 @@ def convert(src, dst, root_name="Root", animate=None):
         tag = input_name
         st = UsdShade.Shader.Define(stage, f"{mat.GetPath()}/stReader_{tag}")
         st.CreateIdAttr("UsdPrimvarReader_float2")
-        st.CreateInput("varname", Sdf.ValueTypeNames.String).Set("st")
+        st.CreateInput("varname", Sdf.ValueTypeNames.String).Set(primvar)
         st.CreateOutput("result", Sdf.ValueTypeNames.Float2)
         tx = UsdShade.Shader.Define(stage, f"{mat.GetPath()}/tex_{tag}")
         tx.CreateIdAttr("UsdUVTexture")
@@ -192,10 +194,14 @@ def convert(src, dst, root_name="Root", animate=None):
         if normal:                                  # tangent-space normal map: [0, 1] -> [-1, 1]
             tx.CreateInput("scale", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(2, 2, 2, 1))
             tx.CreateInput("bias", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(-1, -1, -1, 0))
+        if channel:                                 # one channel into a scalar input (occlusion)
+            out = tx.CreateOutput(channel, Sdf.ValueTypeNames.Float)
+            sh.CreateInput(input_name, Sdf.ValueTypeNames.Float).ConnectToSource(out)
+            return tx
         out = tx.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
         sh.CreateInput(input_name, Sdf.ValueTypeNames.Color3f if not normal else Sdf.ValueTypeNames.Normal3f
                        ).ConnectToSource(out)
-        return True
+        return tx
 
     def material(index):
         if index in materials:
@@ -207,7 +213,8 @@ def convert(src, dst, root_name="Root", animate=None):
         sh = UsdShade.Shader.Define(stage, f"{mat.GetPath()}/Surface")
         sh.CreateIdAttr("UsdPreviewSurface")
         sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*col[:3]))
-        sh.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(float(col[3]))
+        alpha_mode = m.get("alphaMode", "OPAQUE")
+        sh.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(1.0 if alpha_mode == "OPAQUE" else float(col[3]))
         sh.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(float(pbr.get("metallicFactor", 1.0)))
         sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(float(pbr.get("roughnessFactor", 1.0)))
         if m.get("emissiveFactor"):
@@ -215,7 +222,24 @@ def convert(src, dst, root_name="Root", animate=None):
         mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
         bct = (pbr.get("baseColorTexture") or {}).get("index")
         if bct is not None:
-            texture_network(mat, sh, "diffuseColor", bct, True)
+            tx = texture_network(mat, sh, "diffuseColor", bct, True)
+            if tx and alpha_mode != "OPAQUE":       # the texture's alpha drives the transparency
+                sh.GetInput("opacity").ConnectToSource(tx.CreateOutput("a", Sdf.ValueTypeNames.Float))
+        ext = m.get("extensions") or {}
+        cc = ext.get("KHR_materials_clearcoat")
+        if cc:                                      # lacquer over the paint
+            sh.CreateInput("clearcoat", Sdf.ValueTypeNames.Float).Set(float(cc.get("clearcoatFactor", 0.0)))
+            sh.CreateInput("clearcoatRoughness", Sdf.ValueTypeNames.Float).Set(float(cc.get("clearcoatRoughnessFactor", 0.0)))
+        sp = ext.get("KHR_materials_specular")
+        if sp and "specularFactor" in sp:           # cap on the reflectance: F0 = 0.04 * factor -> ior
+            r = (0.04 * max(min(float(sp["specularFactor"]), 1.0), 0.0)) ** 0.5
+            sh.CreateInput("ior", Sdf.ValueTypeNames.Float).Set(round((1.0 + r) / (1.0 - r), 4))
+        ot = m.get("occlusionTexture") or {}
+        if ot.get("index") is not None:             # AC's detail map, on the second UV set
+            primvar = "st" if not ot.get("texCoord") else f"st{ot['texCoord']}"
+            texture_network(mat, sh, "occlusion", ot["index"], False, primvar=primvar, channel="r")
+        if alpha_mode == "MASK":                    # cut-out: pixels below the cutoff are dropped
+            sh.CreateInput("opacityThreshold", Sdf.ValueTypeNames.Float).Set(float(m.get("alphaCutoff", 0.5)))
         nt = (m.get("normalTexture") or {}).get("index")
         if nt is not None:
             texture_network(mat, sh, "normal", nt, False, normal=True)
@@ -239,12 +263,14 @@ def convert(src, dst, root_name="Root", animate=None):
             idx = [int(i) for i in idx[:ntri * 3]]
             nrm = read_accessor(gltf, buffers, attrs["NORMAL"]) if "NORMAL" in attrs else None
             uv = read_accessor(gltf, buffers, attrs["TEXCOORD_0"]) if "TEXCOORD_0" in attrs else None
+            uv1 = read_accessor(gltf, buffers, attrs["TEXCOORD_1"]) if "TEXCOORD_1" in attrs else None
             used = sorted(set(idx))
             if len(used) < len(pts):                      # primitives often share one vertex buffer: keep only the vertices this one uses
                 remap = {old: new for new, old in enumerate(used)}
                 pts = [pts[i] for i in used]
                 nrm = [nrm[i] for i in used] if nrm else None
                 uv = [uv[i] for i in used] if uv else None
+                uv1 = [uv1[i] for i in used] if uv1 else None
                 idx = [remap[i] for i in idx]
             mesh = UsdGeom.Mesh.Define(stage, f"{parent_path}/mesh_{j}")
             mesh.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(*p) for p in pts]))
@@ -260,6 +286,9 @@ def convert(src, dst, root_name="Root", animate=None):
             if uv:
                 st = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.vertex)
                 st.Set(Vt.Vec2fArray([Gf.Vec2f(u, 1.0 - v) for u, v in uv]))          # glTF's V runs down, USD's up
+            if uv1:
+                st1 = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st1", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.vertex)
+                st1.Set(Vt.Vec2fArray([Gf.Vec2f(u, 1.0 - v) for u, v in uv1]))
             mat, col = material(prim.get("material"))
             UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(mat)
             mesh.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*col[:3])]))

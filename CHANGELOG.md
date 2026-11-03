@@ -4,6 +4,15 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### USD meshes keep their transparency
+
+- `gltf2usd` ignored the glTF `alphaMode`, so glass, headlights and cut-out grilles came out opaque.
+  Now `BLEND` and `MASK` take the opacity from the base-colour texture's alpha, `MASK` also sets
+  `opacityThreshold` from `alphaCutoff`, and `OPAQUE` forces opacity 1. Tests in `test_usd_alpha.py`.
+- The USD material also takes the glTF clearcoat (`clearcoat`, `clearcoatRoughness`), the reflectance
+  cap `KHR_materials_specular` (as `ior`, F0 = 0.04 x factor) and AC's detail map (`occlusion`, read
+  from a second UV set written as the `st1` primvar).
+
 ### Test cars: SVJ from RBR, Project CARS 2 and Race07 into AC, with a borrowed model
 
 - `assemble(..., model_name=, donor_car=)` copies the 3D model, skins, textures, animations and
