@@ -6,12 +6,15 @@ All notable changes are documented here.
 
 ### USD meshes keep their transparency
 
+- The glTF base-colour factor now tints the base texture in the USD (`scale` on the `UsdUVTexture`). It was dropped, so
+  paint whose colour is the factor times a grey texture (the Murcielago's yellow) came out grey/black in Blender.
+
 - `gltf2usd` ignored the glTF `alphaMode`, so glass, headlights and cut-out grilles came out opaque.
   Now `BLEND` and `MASK` take the opacity from the base-colour texture's alpha, `MASK` also sets
   `opacityThreshold` from `alphaCutoff`, and `OPAQUE` forces opacity 1. Tests in `test_usd_alpha.py`.
 - The USD material also takes the glTF clearcoat (`clearcoat`, `clearcoatRoughness`), the reflectance
-  cap `KHR_materials_specular` (as `ior`, F0 = 0.04 x factor) and AC's detail map (`occlusion`, read
-  from a second UV set written as the `st1` primvar).
+  cap `KHR_materials_specular` (as `ior`, F0 = 0.04 x factor). AC's detail map is not carried: as
+  `occlusion` USD viewers show the tiled pattern at full strength (Toyota Sera interior), unlike glTF's ambient-only AO.
 
 ### Test cars: SVJ from RBR, Project CARS 2 and Race07 into AC, with a borrowed model
 

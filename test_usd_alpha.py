@@ -66,17 +66,11 @@ def test_opaque_ignores_the_alpha_channel(tmp_path):
     assert sh.GetInput("opacity").Get() == 1.0
 
 
-def test_clearcoat_specular_cap_and_detail_map_reach_the_usd(tmp_path):
+def test_clearcoat_and_specular_cap_reach_the_usd_but_the_detail_map_does_not(tmp_path):
     g = _gltf("OPAQUE")
     g["materials"][0]["extensions"] = {"KHR_materials_clearcoat": {"clearcoatFactor": 0.8, "clearcoatRoughnessFactor": 0.1},
                                        "KHR_materials_specular": {"specularFactor": 0.5}}
     g["materials"][0]["occlusionTexture"] = {"index": 0, "texCoord": 1}
-    g["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"] = 1
-    g["buffers"][0]["uri"] = "data:application/octet-stream;base64," + base64.b64encode(
-        struct.pack("<9f", 0, 0, 0, 1, 0, 0, 0, 1, 0) + struct.pack("<6f", 0, 0, 1, 0, 0, 1)).decode()
-    g["buffers"][0]["byteLength"] = 60
-    g["bufferViews"] = [{"buffer": 0, "byteLength": 36}, {"buffer": 0, "byteOffset": 36, "byteLength": 24}]
-    g["accessors"].append({"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2"})
     src = tmp_path / "x.gltf"
     src.write_text(json.dumps(g))
     dst = str(tmp_path / "x.usda")
@@ -85,6 +79,17 @@ def test_clearcoat_specular_cap_and_detail_map_reach_the_usd(tmp_path):
     sh = UsdShade.Shader(next(p for p in stage.Traverse() if p.GetName() == "Surface"))
     assert abs(sh.GetInput("clearcoat").Get() - 0.8) < 1e-6
     assert 1.2 < sh.GetInput("ior").Get() < 1.4            # factor 0.5 -> F0 0.02 -> ior ~1.38
-    assert sh.GetInput("occlusion").HasConnectedSource()
-    mesh = next(p for p in stage.Traverse() if p.GetTypeName() == "Mesh")
-    assert mesh.GetAttribute("primvars:st1").IsValid()
+    assert not sh.GetInput("occlusion")                    # a tiled detail map is not ambient occlusion
+
+
+def test_base_colour_factor_tints_the_texture(tmp_path):
+    g = _gltf("OPAQUE")
+    g["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"] = [1.0, 0.67, 0.1, 1.0]
+    src = tmp_path / "t.gltf"
+    src.write_text(json.dumps(g))
+    dst = str(tmp_path / "t.usda")
+    gltf2usd.convert(str(src), dst, "Car")
+    stage = Usd.Stage.Open(dst)
+    tx = UsdShade.Shader(next(p for p in stage.Traverse() if p.GetName() == "tex_diffuseColor"))
+    sc = tx.GetInput("scale").Get()
+    assert abs(sc[1] - 0.67) < 1e-6 and abs(sc[2] - 0.1) < 1e-6
