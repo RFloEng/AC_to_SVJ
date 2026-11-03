@@ -116,10 +116,13 @@ All notable changes are documented here.
   `format: "usd"`. On the MX-5, 364 nodes, 154 meshes, 198k triangles, 23 textures and 11 animated nodes go across,
   12.6 MB against 21.5 MB for the GLB. Not carried: the other skins (only the default).
 - A file with meshes declares the asset's axes, `_metadata.coordinate_system = {up: Y, forward: -Z, handedness:
-  right}` (spec 22.4); the physics stay SAE J670. Two warnings of the standard's mesh check remain, both
-  its own limits: uprights and discs are "not bound by any part" (a unified suspension binds them on the wheel
-  stations, `wheel_stations[].visual`, which it does not read) and the chassis "is animated" (its group
-  node contains the doors, which have their own bodies and joints).
+  right}` (spec 22.4); the physics stay SAE J670.
+- **Checked against the standard's mesh check (commit e4bc53f, which now reads `wheel_stations[]` and
+  `constraints[]` and attributes animation to the nearest bound node):** USD, USD with preview and GLB
+  outputs of the MX-5, the Touareg and the Escort give no warning, only the notes that the JSON wins over
+  the door's and wipers' animation. The GLB no longer animates the suspension's travel either
+  (`animation_nodes` of `kn5_all_lods_to_glbs`): the SVJ has no joint for those nodes, so the asset
+  moves only the doors, wipers, shifter and headlight that it has.
 
 ### Dampers and bump stops of vanilla AC
 

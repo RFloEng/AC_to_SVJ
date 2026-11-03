@@ -2022,6 +2022,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 # a node for it AND the SVJ output has the part to carry it.
                 node_rename: dict = {}
                 _movable_nodes: set = set()                  # glTF nodes of parts the SVJ has a joint for
+                _movable_ac: set = set()                     # and their names in the KN5
                 for part in map_ac_nodes_to_svj_parts(node_names):
                     vis = {"mesh_ref": mesh_id, "node": part["node"]}
                     st = part["station"]
@@ -2093,6 +2094,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                                                                   bound=set(node_rename))
                             node_rename.update(_ren)
                             _movable_nodes = set(_ren.values())
+                            _movable_ac = set(_ren.keys())
                             log.append(f"✓ Moving parts: {len(_moving)} animated node(s); "
                                        f"{_nb} movable part(s), {_nj} joint(s) → "
                                        f"constraints / poses")
@@ -2111,7 +2113,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                             placement=_placement, reports=_reports,
                             include_damage_textures=include_damage_textures,
                             highest_lod_only=highest_lod_only,
-                            include_animations=include_animations)
+                            include_animations=include_animations,
+                            animation_nodes=_movable_ac if include_animations else None)
                         if _usd:
                             exported = _glbs_to_usd(exported, mesh_entries, svj, log,
                                                     animate=_movable_nodes if include_animations else None,

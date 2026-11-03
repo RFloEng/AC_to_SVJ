@@ -353,3 +353,20 @@ def test_usd_can_keep_a_glb_preview_beside_it():
         entry = svj["assets"]["meshes"][0]
         assert entry["uri"] == "meshes/car.usdz" and entry["preview"] == "meshes/car.glb"
         assert (out / "meshes" / "car.glb").is_file() and svj["_metadata"]["version"] == "0.106"
+
+
+def test_glb_animates_only_the_parts_the_svj_has_joints_for():
+    """A suspension animation (the wheel and hub travelling) has no joint in the SVJ, so the asset
+    does not move it either (spec 22.10, rule 8); the door's animation stays."""
+    import pygltflib
+    import converter as C
+    with tempfile.TemporaryDirectory() as t:
+        car = _car_with_wheels_and_door(Path(t))
+        frames, _m = _door()
+        _ksanim(car / "animations" / "car_susp_LF.ksanim", {"WHEEL_LF": frames})
+        ini, cm, ctrl, dd = C.read_car_directory(car)
+        out = Path(t) / "out"
+        C.build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl, glb_output_dir=out, include_plots=False,
+                    mesh_format="glb")
+        g = pygltflib.GLTF2().load_binary(str(out / "meshes" / "car.glb"))
+        assert [a.name for a in g.animations] == ["car_door"]

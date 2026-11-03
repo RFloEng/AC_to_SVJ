@@ -2231,6 +2231,7 @@ def kn5_all_lods_to_glbs(
     reports: Optional[dict] = None,
     highest_lod_only: bool = False,
     include_animations: bool = True,
+    animation_nodes: Optional[set] = None,
 ) -> dict[str, Path]:
     """
     Export one GLB per LOD found in an AC car folder.
@@ -2257,6 +2258,9 @@ def kn5_all_lods_to_glbs(
     placement     : Exact physics placement, see kn5_to_glb().
     reports       : Optional dict filled with ``{lod_label: export report}``.
     highest_lod_only : Export only LOD A (the highest quality), skipping B-D.
+    animation_nodes : AC node names; when given, only the animation of these nodes is exported (the
+                      parts the SVJ has a joint for: spec 22.10 rule 8 asks that an asset move nothing
+                      the JSON does not).  None exports every animated node.
     include_animations : Export the car's ``animations/*.ksanim`` (doors, wipers, shifter)
                     as glTF animations (default on).
 
@@ -2278,6 +2282,10 @@ def kn5_all_lods_to_glbs(
         try:
             from ksanim import load_car_animations
             anims = load_car_animations(car_path) or None
+            if anims and animation_nodes is not None:          # only the nodes the SVJ has joints for
+                anims = {name: {n: t for n, t in tracks.items() if n in animation_nodes}
+                         for name, tracks in anims.items()}
+                anims = {name: tracks for name, tracks in anims.items() if tracks} or None
         except Exception:                                      # noqa: BLE001
             anims = None
     results: dict[str, Path] = {}

@@ -1,4 +1,4 @@
-# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/mesh_check.py (commit af68666, Apache-2.0).
+# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/mesh_check.py (commit e4bc53f, Apache-2.0).
 # Unchanged except for this header.
 """
 SVJ mesh-side binding checker (spec §22.9, §22.10).
@@ -248,7 +248,9 @@ class _Index:
 
     def __init__(self):
         self.names, self.extras, self.boxes, self.present = {}, {}, {}, []
-        self.info = {}          # key -> {"physics": [...], "mass": [...], "collision": bool, "animated": bool}: data other than shape and look
+        # subtree_info(key, exclude) -> {"physics": [...], "mass": [...], "collision": bool, "animated": bool}: data other than shape and look
+        # in the subtree of `key`, leaving out the subtrees of the keys in `exclude` (nodes bound to a part of their own)
+        self.subtree_info = None
 
 
 class MeshSkip(MeshError):
@@ -277,14 +279,34 @@ def _index_gltf(path, ref, uri, warnings):
         if name and name.startswith(NODE_PREFIX) or sv:
             ix.present.append((name if name and name.startswith(NODE_PREFIX) else sv, sv))
     ix.boxes = node_boxes(gltf)
+    animated = {t["node"] for a in gltf.get("animations") or [] for ch in a.get("channels") or [] for t in [ch.get("target") or {}]
+                if isinstance(t.get("node"), int) and t.get("path") in ("translation", "rotation", "scale")}
+    children = {i: [c for c in (n.get("children") or []) if isinstance(c, int)] for i, n in enumerate(nodes)}
+
+    def subtree_info(key, exclude):
+        info, stack, seen = {"physics": [], "mass": [], "collision": False, "animated": False}, [key], set()
+        while stack:
+            i = stack.pop()
+            if i in seen:
+                continue
+            seen.add(i)
+            info["animated"] = info["animated"] or i in animated
+            stack += [c for c in children.get(i, []) if c not in exclude]
+        return info
+
+    ix.subtree_info = subtree_info
     return ix
 
 
-def _usd_non_appearance(prim, Usd, UsdGeom):
+def _usd_non_appearance(prim, Usd, UsdGeom, exclude=()):
     """What a prim and its descendants carry besides shape and look (spec 22.10, rule 8): physics schemas and attributes,
     masses, collision shapes, and animated transforms. All of it may only be a copy of data that the SVJ JSON has first."""
     info = {"physics": [], "mass": [], "collision": False, "animated": False}
-    for p in Usd.PrimRange(prim):
+    it = iter(Usd.PrimRange(prim))
+    for p in it:
+        if p.GetPath() != prim.GetPath() and str(p.GetPath()) in exclude:
+            it.PruneChildren()                       # a node bound to a part of its own: its data belong to that part
+            continue
         schemas = list(p.GetAppliedSchemas()) + ([p.GetTypeName()] if p.GetTypeName().startswith("Physics") else [])
         attrs = [a for a in p.GetAuthoredAttributes() if a.GetName().startswith("physics:")]
         if schemas and any(s.startswith("Physics") for s in schemas) or attrs:
@@ -336,9 +358,9 @@ def _index_usd(path, ref, uri, warnings):
         for lg in {x for x in (logical, by_name) if x}:
             ix.names.setdefault(lg, []).append(key)
         ix.present.append((logical or by_name, None))
-        ix.info[key] = _usd_non_appearance(prim, Usd, UsdGeom)
         rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
         ix.boxes[key] = None if rng.IsEmpty() else ([rng.GetMin()[k] * mpu for k in range(3)], [rng.GetMax()[k] * mpu for k in range(3)])
+    ix.subtree_info = lambda key, exclude: _usd_non_appearance(stage.GetPrimAtPath(key), Usd, UsdGeom, set(exclude))
     return ix
 
 
@@ -419,7 +441,7 @@ def check_meshes(data, bindings, base_dir):
         except MeshError as e:
             warnings.append(f"[mesh '{ref}'] {uri}: {e}" + (" (a placeholder path?)" if not os.path.exists(path) else ""))
             continue
-        bound, items = set(), []
+        bound, items, resolved = set(), [], []
         for b in by_mesh.get(ref, []):
             node, loc = b["visual"]["node"], b["location"]
             bound.add(node)
@@ -435,8 +457,14 @@ def check_meshes(data, bindings, base_dir):
             box = ix.boxes.get(idx[0])
             if b.get("pos") is not None and box is not None and b["visual"].get("placement", "rigid") == "rigid":
                 items.append((loc, node, b["pos"], box))
-            if ix.info.get(idx[0]):
-                _check_copy_of_json(data, b, loc, node, uri, ix.info[idx[0]], warnings, notes)
+            resolved.append((b, loc, node, idx[0]))
+        # animation and physics data of a node belong to the NEAREST bound node: a bound descendant (a door under the body
+        # node) is left out of its bound ancestors and checked against its own part
+        bound_keys = {key for _, _, _, key in resolved}
+        for b, loc, node, key in resolved:
+            info = ix.subtree_info(key, bound_keys - {key}) if ix.subtree_info else None
+            if info and (info["animated"] or info["physics"] or info["mass"] or info["collision"]):
+                _check_copy_of_json(data, b, loc, node, uri, info, warnings, notes)
         for name, via in ix.present:
             m = re.match(r"^SVJ::([a-z0-9_]+)::", name or "")
             if m and m.group(1) not in CATEGORY_SKIP_ORPHAN and name not in bound and via not in bound:
