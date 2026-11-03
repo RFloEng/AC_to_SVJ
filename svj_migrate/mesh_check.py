@@ -1,4 +1,4 @@
-# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/mesh_check.py (commit 72be86a, Apache-2.0).
+# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/mesh_check.py (commit af68666, Apache-2.0).
 # Unchanged except for this header.
 """
 SVJ mesh-side binding checker (spec §22.9, §22.10).
@@ -248,6 +248,7 @@ class _Index:
 
     def __init__(self):
         self.names, self.extras, self.boxes, self.present = {}, {}, {}, []
+        self.info = {}          # key -> {"physics": [...], "mass": [...], "collision": bool, "animated": bool}: data other than shape and look
 
 
 class MeshSkip(MeshError):
@@ -277,6 +278,26 @@ def _index_gltf(path, ref, uri, warnings):
             ix.present.append((name if name and name.startswith(NODE_PREFIX) else sv, sv))
     ix.boxes = node_boxes(gltf)
     return ix
+
+
+def _usd_non_appearance(prim, Usd, UsdGeom):
+    """What a prim and its descendants carry besides shape and look (spec 22.10, rule 8): physics schemas and attributes,
+    masses, collision shapes, and animated transforms. All of it may only be a copy of data that the SVJ JSON has first."""
+    info = {"physics": [], "mass": [], "collision": False, "animated": False}
+    for p in Usd.PrimRange(prim):
+        schemas = list(p.GetAppliedSchemas()) + ([p.GetTypeName()] if p.GetTypeName().startswith("Physics") else [])
+        attrs = [a for a in p.GetAuthoredAttributes() if a.GetName().startswith("physics:")]
+        if schemas and any(s.startswith("Physics") for s in schemas) or attrs:
+            info["physics"] += [s for s in schemas if s.startswith("Physics")] or ["physics:*"]
+        m = p.GetAttribute("physics:mass")
+        if m and m.HasAuthoredValue() and isinstance(m.Get(), (int, float)):
+            info["mass"].append(float(m.Get()))
+        if "PhysicsCollisionAPI" in schemas or "PhysicsMeshCollisionAPI" in schemas:
+            info["collision"] = True
+        xf = UsdGeom.Xformable(p)
+        if xf and xf.TransformMightBeTimeVarying():
+            info["animated"] = True
+    return info
 
 
 def _index_usd(path, ref, uri, warnings):
@@ -315,9 +336,49 @@ def _index_usd(path, ref, uri, warnings):
         for lg in {x for x in (logical, by_name) if x}:
             ix.names.setdefault(lg, []).append(key)
         ix.present.append((logical or by_name, None))
+        ix.info[key] = _usd_non_appearance(prim, Usd, UsdGeom)
         rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
         ix.boxes[key] = None if rng.IsEmpty() else ([rng.GetMin()[k] * mpu for k in range(3)], [rng.GetMax()[k] * mpu for k in range(3)])
     return ix
+
+
+def _check_preview(ref, prev, base_dir, nodes, warnings):
+    """The glTF preview of a USD asset exists and carries every bound node (spec 22.10)."""
+    if os.path.splitext(prev)[1].lower() not in GLTF_EXT:
+        warnings.append(f"[mesh '{ref}'] preview '{prev}' is not a .glb or .gltf file")
+        return
+    ppath = os.path.normpath(os.path.join(base_dir, prev))
+    try:
+        pix = _index_gltf(ppath, ref, prev, warnings)
+    except MeshError as e:
+        warnings.append(f"[mesh '{ref}'] preview {prev}: {e}" + (" (not generated yet? tools/usd2gltf.py writes it)" if not os.path.exists(ppath) else ""))
+        return
+    for node in sorted(nodes):
+        if node not in pix.names and node not in pix.extras:
+            warnings.append(f"[mesh '{ref}'] preview {prev} does not contain the bound node '{node}' (regenerate it from the USD asset)")
+
+
+def _check_copy_of_json(data, binding, loc, node, uri, info, warnings, notes):
+    """Spec 22.10, rule 8: physics data and animation in an asset may only be copies of what the JSON has first."""
+    ids = binding.get("ids") or set()
+    chassis = data.get("chassis") or {}
+    part = chassis if "chassis" in ids else next((b for b in (chassis.get("mass_bodies") or []) if isinstance(b, dict) and b.get("id") in ids), None)
+    jmass = (part or {}).get("mass_total" if "chassis" in ids else "mass")
+    if info["physics"] and part is None:
+        warnings.append(f"[{loc}] '{node}' in {uri} carries physics data ({', '.join(sorted(set(info['physics'])))}) but the JSON has no body for this part: the JSON must have it first")
+    for m in info["mass"]:
+        if not isinstance(jmass, (int, float)):
+            warnings.append(f"[{loc}] '{node}' in {uri} carries a mass ({m:g} kg) that the JSON does not have for this part")
+        elif abs(m - jmass) > 1e-6 * max(1.0, abs(jmass)):
+            warnings.append(f"[{loc}] the mass in {uri} for '{node}' ({m:g} kg) differs from the JSON ({jmass:g} kg); the JSON wins")
+    if info["collision"] and part is not None and not part.get("collision"):
+        warnings.append(f"[{loc}] '{node}' in {uri} carries a collision shape that the JSON has no `collision` proxy for (spec 28)")
+    if info["animated"]:
+        moved = {c.get("body_b") for c in (data.get("constraints") or []) if isinstance(c, dict) and c.get("type") == "joint"}
+        if ids & moved:
+            notes.append(f"[{loc}] '{node}' is animated in {uri} and the JSON moves this part by a joint; the JSON wins, the asset's animation is ignored")
+        else:
+            warnings.append(f"[{loc}] '{node}' is animated in {uri} but the JSON has no joint that moves this part: an animation must be in the JSON first (joint, poses[])")
 
 
 def check_meshes(data, bindings, base_dir):
@@ -345,6 +406,11 @@ def check_meshes(data, bindings, base_dir):
             notes.append(f"[mesh '{ref}'] '{uri}' is not a glTF or OpenUSD asset; its nodes are not checked")
             continue
         path = os.path.normpath(os.path.join(base_dir, uri))
+        prev = entry.get("preview")
+        if prev and fmt == "usd":
+            _check_preview(ref, prev, base_dir, {b["visual"]["node"] for b in by_mesh.get(ref, [])}, warnings)
+        elif prev:
+            notes.append(f"[mesh '{ref}'] `preview` only applies to OpenUSD assets; ignored for {uri}")
         try:
             ix = (_index_usd if fmt == "usd" else _index_gltf)(path, ref, uri, warnings)
         except MeshSkip as e:
@@ -369,6 +435,8 @@ def check_meshes(data, bindings, base_dir):
             box = ix.boxes.get(idx[0])
             if b.get("pos") is not None and box is not None and b["visual"].get("placement", "rigid") == "rigid":
                 items.append((loc, node, b["pos"], box))
+            if ix.info.get(idx[0]):
+                _check_copy_of_json(data, b, loc, node, uri, ix.info[idx[0]], warnings, notes)
         for name, via in ix.present:
             m = re.match(r"^SVJ::([a-z0-9_]+)::", name or "")
             if m and m.group(1) not in CATEGORY_SKIP_ORPHAN and name not in bound and via not in bound:

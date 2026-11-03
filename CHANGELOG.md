@@ -95,25 +95,31 @@ All notable changes are documented here.
 - Not done yet: the other `.ini` files are far from complete against a real car, the tyre fit for
   an SVJ that does not come from AC, and the 3D model.
 
-### OpenUSD meshes (SVJ 0.105, spec 22.10)
+### OpenUSD meshes, the default (SVJ 0.105 / 0.106, spec 22.10)
 
-- The standard now lets `assets.meshes[]` be OpenUSD as well as glTF. `build_svj(mesh_format="usd")`
-  (and the batch tab's *Meshes* box: GLB or USD) exports each LOD as a `.usdz` package: the GLB
-  is made as before and converted with the standard's `gltf2usd.py` (vendored as
-  `svj_migrate/gltf2usd.py`, with the `mesh_check.py` it needs), which was extended to carry the
-  textures (base colour and normal maps as `UsdUVTexture` into `UsdPreviewSurface`, packed into the
-  USDZ). The binding names stay `SVJ::category::id` (prim `SVJ__category__id` with `svj:node`), the
-  entries carry `format: "usd"` and the file declares 0.105. On the MX-5, 364 nodes, 154 meshes, 198k
-  triangles and 23 textures go across; 12.6 MB against 21.5 MB for the GLB.
-- Not carried: glTF animations (the doors and wipers are joints and poses in the SVJ, which is the
-  authority) and the other skins (only the default one). Without `usd-core`, or if a file cannot be
-  converted, the GLB is kept and the entry says `.glb`.
-- A file with meshes now declares the asset's axes, `_metadata.coordinate_system = {up: Y, forward:
-  -Z, handedness: right}` (spec 22.4); the physics stay SAE J670. The standard's mesh check had been
-  guessing them and warning. It also warns that uprights and discs are "not bound by any part": the
-  bindings of a unified suspension sit on the wheel stations (`wheel_stations[].visual`), which its
-  `integrity_check.py --meshes` does not read yet (the same for GLB and USD, and for the standard's own
-  migration).
+- **USD is now the mesh format; glTF is the second option.** `build_svj(mesh_format=...)` takes `"usd"` (the
+  default: each LOD as a `.usdz` package), `"usd+glb"` (the same, with the GLB kept beside it as the
+  entry's `preview`, for viewers that read glTF only; the file declares 0.106) or `"glb"` (as before).
+  The batch tab's *Meshes* box offers the same three. The GLB is made as before and converted
+  with the standard's `gltf2usd.py` (vendored as `svj_migrate/gltf2usd.py`, with the `mesh_check.py` it needs,
+  commit af68666), extended to carry the textures (base colour and normal maps as `UsdUVTexture` into
+  `UsdPreviewSurface`, packed in the USDZ) and the movement of parts. `usd-core` is in `requirements.txt`; without it,
+  or if a file cannot be converted, the GLB is kept and the entry says `.glb`.
+- **Animation (rule 8 of 22.10: only as a copy of the JSON).** The nodes of the parts the SVJ has a joint and a pose for
+  (doors, wipers, shifter, headlight: the `SVJ::body::*` nodes of the movable parts) get their movement from the
+  ksanim as translate / orient / scale time samples; each animation has its own window of the timeline
+  (30 time codes per second, listed in the layer's `svj.animations`, one sample returning the node to its
+  rest pose). The suspension's travel (hubs, arms, springs) is not carried: the SVJ has no joint for those
+  nodes and the rule forbids kinematics the JSON lacks. The standard's `integrity_check.py --meshes` reads
+  the doors' and wipers' animation and notes that the JSON wins.
+- The binding names stay `SVJ::category::id` (prim `SVJ__category__id` with `svj:node`), entries carry
+  `format: "usd"`. On the MX-5, 364 nodes, 154 meshes, 198k triangles, 23 textures and 11 animated nodes go across,
+  12.6 MB against 21.5 MB for the GLB. Not carried: the other skins (only the default).
+- A file with meshes declares the asset's axes, `_metadata.coordinate_system = {up: Y, forward: -Z, handedness:
+  right}` (spec 22.4); the physics stay SAE J670. Two warnings of the standard's mesh check remain, both
+  its own limits: uprights and discs are "not bound by any part" (a unified suspension binds them on the wheel
+  stations, `wheel_stations[].visual`, which it does not read) and the chassis "is animated" (its group
+  node contains the doors, which have their own bodies and joints).
 
 ### Dampers and bump stops of vanilla AC
 

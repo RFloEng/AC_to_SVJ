@@ -542,7 +542,7 @@ def test_converter_emits_v0992_bindings():
         ini, cm, ctrl, dd = read_car_directory(car)
         out = Path(t) / "out"
         svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
-                                glb_output_dir=out)
+                                mesh_format="glb", glb_output_dir=out)
         svj = _clean(svj)
         glb = out / "meshes" / "synthcar.glb"
         assert glb.is_file(), log
@@ -702,7 +702,7 @@ def test_converter_uses_unencrypted_copy():
         ini, cm, ctrl, dd = read_car_directory(car)
         out = Path(t) / "out"
         svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
-                                glb_output_dir=out)
+                                mesh_format="glb", glb_output_dir=out)
         glbs = list((out / "meshes").glob("*.glb"))
         assert [g.name for g in glbs] == ["model_decrypted.glb"], (glbs, log)
         assert any("skipped (encrypted)" in l for l in log), log
@@ -710,7 +710,7 @@ def test_converter_uses_unencrypted_copy():
         # a car with ONLY an encrypted KN5 is refused and explained, never exported
         (car / "unencrypted" / "model_decrypted.kn5").unlink()
         svj2, log2, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
-                                  glb_output_dir=Path(t) / "out2")
+                                  mesh_format="glb", glb_output_dir=Path(t) / "out2")
         assert "assets" not in svj2 and any("UNENCRYPTED" in l for l in log2), log2
 
 
@@ -859,7 +859,7 @@ def test_meshes_next_to_json():
                                 ("", "synthcar.glb", "out_flat")):
             out = Path(t) / Path(where).parts[0]
             svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
-                                    glb_output_dir=out, meshes_subdir=sub)
+                                    mesh_format="glb", glb_output_dir=out, meshes_subdir=sub)
             svj = _clean(svj)
             assert svj["assets"]["meshes"][0]["uri"] == uri, svj["assets"]
             assert (Path(t) / where / "synthcar.glb").is_file(), (where, log)
@@ -1095,7 +1095,7 @@ def test_converter_places_the_mesh_from_graphics_offset():
         _write(car / "synthcar.kn5", N("ROOT", children=[N("BODY", "mesh"), *wheels]))
         ini, cm, ctrl, dd = read_car_directory(car)
         svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
-                                glb_output_dir=Path(t) / "out")
+                                mesh_format="glb", glb_output_dir=Path(t) / "out")
     assert any("Mesh placement: GRAPHICS_OFFSET" in l for l in log), log
     assert any("wheels placed from physics: FL, FR, RL, RR" in l for l in log), log
     assert svj["x_assettocorsa"]["graphics"]["offset"] == [0.0, -0.5, -0.19]
@@ -1108,7 +1108,7 @@ def test_converter_falls_back_without_graphics_offset():
         _write(car / "synthcar.kn5", _wheel_car(0.04))
         ini, cm, ctrl, dd = read_car_directory(car)
         svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
-                                glb_output_dir=Path(t) / "out")
+                                mesh_format="glb", glb_output_dir=Path(t) / "out")
     assert any("wheel centres matched to the physics" in l for l in log), log
 
 
@@ -1222,9 +1222,9 @@ def test_converter_applies_graphics_pitch_only_when_asked():
         _write(car / "synthcar.kn5", _wheel_car(0.04))
         ini, cm, ctrl, dd = read_car_directory(car)
         svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
-                                glb_output_dir=Path(t) / "o1", apply_graphics_pitch=True)
+                                mesh_format="glb", glb_output_dir=Path(t) / "o1", apply_graphics_pitch=True)
         _, log_off, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl,
-                                  glb_output_dir=Path(t) / "o2")      # default: off
+                                  mesh_format="glb", glb_output_dir=Path(t) / "o2")      # default: off
     assert any("GRAPHICS_PITCH_ROTATION 1.5° applied" in l for l in log), log
     assert any("not applied" in l and "GRAPHICS_PITCH_ROTATION" in l for l in log_off), log_off
     assert svj["x_assettocorsa"]["graphics"]["pitch_rotation_deg"] == 1.5

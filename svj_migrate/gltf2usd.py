@@ -1,5 +1,5 @@
-# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/gltf2usd.py (commit 72be86a, Apache-2.0).
-# Changed: the import of mesh_check; textures are converted (see _texture_network).
+# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/gltf2usd.py (commit af68666, Apache-2.0).
+# Changed: the import of mesh_check; textures are converted; animation of the nodes the caller names (derived from the SVJ joints, spec 22.10 rule 8).
 #!/usr/bin/env python3
 """
 glTF / GLB -> OpenUSD converter for SVJ assets (spec §22.10).
@@ -11,6 +11,9 @@ Writes a USD stage that follows the SVJ rules for USD assets:
     `svj:node = "SVJ::category::id"` (also taken from a node's `extras.svj_node`),
   * triangle meshes (modes 4, 5, 6) as UsdGeomMesh with normals and the first UV set,
   * the base colour, metallic and roughness factors as a UsdPreviewSurface material (textures are not converted).
+
+glTF animations are NOT carried over: animation, poses and solids in a USD asset may only be copies of data already in the
+SVJ JSON (spec §22.10), so a converter must first put them in the JSON (joints, `poses[]`).
 
 Needs the `usd-core` library: pip install usd-core.
 
@@ -112,8 +115,14 @@ def _prim_name(name, fallback, taken):
     return cand
 
 
-def convert(src, dst, root_name="Root"):
-    """Convert `src` (.glb / .gltf) to the USD file `dst` (.usd, .usda, .usdc or .usdz). Returns a summary dict."""
+def convert(src, dst, root_name="Root", animate=None):
+    """Convert `src` (.glb / .gltf) to the USD file `dst` (.usd, .usda, .usdc or .usdz). Returns a summary dict.
+
+    `animate` is a set of glTF node names whose animation is carried over, as time samples of
+    translate / orient / scale ops. The caller names the nodes of parts the SVJ JSON has a joint for
+    (spec 22.10, rule 8: an animation in an asset must correspond to a joint of the file). Each glTF
+    animation gets its own window of the timeline (30 time codes per second), followed by one sample
+    that returns its nodes to the rest pose; the windows are listed in the layer's `svj.animations`."""
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
     gltf, glb_bin = read_glb(src)
     buffers = _buffers(gltf, glb_bin, os.path.dirname(os.path.abspath(src)))
@@ -127,7 +136,7 @@ def convert(src, dst, root_name="Root"):
     stage.GetRootLayer().customLayerData = {"svj": {"converted_from": os.path.basename(src), "tool": "tools/gltf2usd.py"}}
     root = UsdGeom.Xform.Define(stage, "/" + root_name)
     stage.SetDefaultPrim(root.GetPrim())
-    materials, stats = {}, {"nodes": 0, "meshes": 0, "triangles": 0, "named": 0, "textures": 0}
+    materials, stats = {}, {"nodes": 0, "meshes": 0, "triangles": 0, "named": 0, "textures": 0, "animated": 0}
     tex_dir = os.path.splitext(target)[0] + "_tex"
     images = {}
 
@@ -227,20 +236,28 @@ def convert(src, dst, root_name="Root"):
             elif mode == 6:
                 idx = [t for i in range(1, len(idx) - 1) for t in (idx[0], idx[i], idx[i + 1])]
             ntri = len(idx) // 3
+            idx = [int(i) for i in idx[:ntri * 3]]
+            nrm = read_accessor(gltf, buffers, attrs["NORMAL"]) if "NORMAL" in attrs else None
+            uv = read_accessor(gltf, buffers, attrs["TEXCOORD_0"]) if "TEXCOORD_0" in attrs else None
+            used = sorted(set(idx))
+            if len(used) < len(pts):                      # primitives often share one vertex buffer: keep only the vertices this one uses
+                remap = {old: new for new, old in enumerate(used)}
+                pts = [pts[i] for i in used]
+                nrm = [nrm[i] for i in used] if nrm else None
+                uv = [uv[i] for i in used] if uv else None
+                idx = [remap[i] for i in idx]
             mesh = UsdGeom.Mesh.Define(stage, f"{parent_path}/mesh_{j}")
             mesh.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(*p) for p in pts]))
             mesh.CreateFaceVertexCountsAttr(Vt.IntArray([3] * ntri))
-            mesh.CreateFaceVertexIndicesAttr(Vt.IntArray([int(i) for i in idx[:ntri * 3]]))
+            mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(idx))
             mesh.CreateSubdivisionSchemeAttr("none")
             lo = [min(p[k] for p in pts) for k in range(3)]
             hi = [max(p[k] for p in pts) for k in range(3)]
             mesh.CreateExtentAttr(Vt.Vec3fArray([Gf.Vec3f(*lo), Gf.Vec3f(*hi)]))
-            if "NORMAL" in attrs:
-                nrm = read_accessor(gltf, buffers, attrs["NORMAL"])
+            if nrm:
                 mesh.CreateNormalsAttr(Vt.Vec3fArray([Gf.Vec3f(*n) for n in nrm]))
                 mesh.SetNormalsInterpolation("vertex")
-            if "TEXCOORD_0" in attrs:
-                uv = read_accessor(gltf, buffers, attrs["TEXCOORD_0"])
+            if uv:
                 st = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.vertex)
                 st.Set(Vt.Vec2fArray([Gf.Vec2f(u, 1.0 - v) for u, v in uv]))          # glTF's V runs down, USD's up
             mat, col = material(prim.get("material"))
@@ -248,6 +265,32 @@ def convert(src, dst, root_name="Root"):
             mesh.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*col[:3])]))
             stats["meshes"] += 1
             stats["triangles"] += ntri
+
+    fps = 30.0
+    anim_samples, windows, cursor = {}, {}, 0
+    allowed = set(animate or ())
+    skipped = 0
+    for a in (gltf.get("animations") or []) if allowed else []:
+        chans = []
+        for ch in a.get("channels") or []:
+            tgt = ch.get("target") or {}
+            ni, pth = tgt.get("node"), tgt.get("path")
+            if ni is None or pth not in ("translation", "rotation", "scale"):
+                continue
+            if (nodes[ni].get("name") or "") not in allowed:
+                skipped += 1
+                continue
+            sm = a["samplers"][ch["sampler"]]
+            chans.append((ni, pth, read_accessor(gltf, buffers, sm["input"]), read_accessor(gltf, buffers, sm["output"])))
+        if not chans:
+            continue
+        n_frames = max(round(t * fps) for _, _, times, _ in chans for t in times)
+        for ni, pth, times, vals in chans:
+            lst = anim_samples.setdefault(ni, {}).setdefault(pth, [])
+            lst.extend((cursor + round(t * fps), v) for t, v in zip(times, vals))
+            lst.append((cursor + n_frames + 1, vals[0]))             # back to the rest pose
+        windows[a.get("name") or f"animation_{len(windows)}"] = {"start": cursor, "end": cursor + n_frames}
+        cursor += n_frames + 3
 
     def add_node(i, parent_path, taken, depth=0):
         if depth > 64:
@@ -260,7 +303,20 @@ def convert(src, dst, root_name="Root"):
         path = f"{parent_path}/{name}"
         x = UsdGeom.Xform.Define(stage, path)
         m = mc._local(n)
-        if m != mc._ident():
+        if i in anim_samples and "matrix" not in n:
+            tr, ro, sc = n.get("translation") or [0, 0, 0], n.get("rotation") or [0, 0, 0, 1], n.get("scale") or [1, 1, 1]
+            top, rop, sop = x.AddTranslateOp(), x.AddOrientOp(), x.AddScaleOp()
+            top.Set(Gf.Vec3d(*tr))
+            rop.Set(Gf.Quatf(ro[3], ro[0], ro[1], ro[2]))
+            sop.Set(Gf.Vec3f(*sc))
+            for tc, v in anim_samples[i].get("translation", []):
+                top.Set(Gf.Vec3d(*v), tc)
+            for tc, v in anim_samples[i].get("rotation", []):
+                rop.Set(Gf.Quatf(v[3], v[0], v[1], v[2]), tc)
+            for tc, v in anim_samples[i].get("scale", []):
+                sop.Set(Gf.Vec3f(*v), tc)
+            stats["animated"] += 1
+        elif m != mc._ident():
             x.AddTransformOp().Set(Gf.Matrix4d([[m[j][k] for j in range(4)] for k in range(4)]))      # USD uses row vectors: transpose
         if logical:
             x.GetPrim().CreateAttribute("svj:node", Sdf.ValueTypeNames.String, custom=True).Set(logical)
@@ -278,6 +334,16 @@ def convert(src, dst, root_name="Root"):
     taken = set(["Materials"])
     for i in roots:
         add_node(i, "/" + root_name, taken)
+    if windows:
+        stage.SetTimeCodesPerSecond(fps)
+        stage.SetStartTimeCode(0)
+        stage.SetEndTimeCode(cursor)
+        data = dict(stage.GetRootLayer().customLayerData)
+        data["svj"] = {**data.get("svj", {}), "animations": windows}
+        stage.GetRootLayer().customLayerData = data
+    if gltf.get("animations"):
+        notes.append(f"{len(windows)} glTF animation(s) carried over for the nodes named by the caller; the others "
+                     f"({skipped} channel(s) of nodes without a joint in the SVJ) are not: spec 22.10, rule 8")
     stage.GetRootLayer().Save()
     if ext == ".usdz":
         from pxr import UsdUtils
@@ -304,7 +370,7 @@ def main(argv):
         print(f"error: {e}")
         return 1
     print(f"{argv[1]}: {r['nodes']} nodes, {r['meshes']} meshes, {r['triangles']} triangles, "
-          f"{r['named']} SVJ nodes, {r['textures']} textures")
+          f"{r['named']} SVJ nodes, {r['textures']} textures, {r['animated']} animated nodes")
     for n in r["notes"]:
         print(f"  note: {n}")
     return 0

@@ -288,3 +288,68 @@ def run() -> bool:
 
 if __name__ == "__main__":
     sys.exit(0 if run() else 1)
+
+
+def _car_with_wheels_and_door(t: Path):
+    """The synthetic car folder of the converter tests with a door that opens (animations/)."""
+    import shutil
+    frames, m = _door()
+    def at(x, y, z):
+        mat = list(T.IDENTITY)
+        mat[12], mat[13], mat[14] = x, y, z
+        return mat
+    root = T.N("ROOT", children=[
+        T.N("BODY", "mesh"), T.N("DOOR", matrix=m, children=[T.N("g_door", "mesh")]),
+        T.N("WHEEL_LF", matrix=at(0.75, 0.3, 1.3), children=[T.N("tyre_lf", "mesh")]),
+        T.N("WHEEL_RF", matrix=at(-0.75, 0.3, 1.3), children=[T.N("tyre_rf", "mesh")]),
+        T.N("WHEEL_LR", matrix=at(0.75, 0.3, -1.3), children=[T.N("tyre_lr", "mesh")]),
+        T.N("WHEEL_RR", matrix=at(-0.75, 0.3, -1.3), children=[T.N("tyre_rr", "mesh")])])
+    car = Path(t) / "car"
+    shutil.copytree(Path(__file__).parent / "test_car", car)
+    (car / "car.kn5").write_bytes(T.make_kn5(root, materials=[("MAT", "ksPerPixel", {}, {})]))
+    (car / "animations").mkdir()
+    _ksanim(car / "animations" / "car_door.ksanim", {"DOOR": frames})
+    return car
+
+
+def test_usd_carries_the_movement_of_the_parts_the_svj_has_joints_for():
+    try:
+        from pxr import Usd, UsdGeom
+    except ImportError:
+        return
+    import converter as C
+    with tempfile.TemporaryDirectory() as t:
+        car = _car_with_wheels_and_door(Path(t))
+        ini, cm, ctrl, dd = C.read_car_directory(car)
+        out = Path(t) / "out"
+        svj, log, _ = C.build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl, glb_output_dir=out,
+                                  include_plots=False)                  # USD is the default
+        svj = C._clean(svj)
+        usd = out / "meshes" / "car.usdz"
+        assert usd.is_file() and not list((out / "meshes").glob("*.glb")), log
+        door = next(b for b in svj["chassis"]["mass_bodies"] if b["id"].startswith("door"))
+        assert any(c["id"] == "hinge_" + door["id"] for c in svj["constraints"])   # a joint for it
+        stage = Usd.Stage.Open(str(usd))
+        prim = next(p for p in stage.Traverse() if p.GetName() == "SVJ__body__" + door["id"])
+        ops = UsdGeom.Xformable(prim).GetOrderedXformOps()
+        assert [o.GetOpName() for o in ops] == ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+        samples = ops[1].GetTimeSamples()
+        assert len(samples) >= 3 and stage.GetEndTimeCode() > samples[-1] - 2
+        assert stage.GetRootLayer().customLayerData["svj"]["animations"]["car_door"]["end"] > 0
+
+
+def test_usd_can_keep_a_glb_preview_beside_it():
+    try:
+        import pxr  # noqa: F401
+    except ImportError:
+        return
+    import converter as C
+    with tempfile.TemporaryDirectory() as t:
+        car = _car_with_wheels_and_door(Path(t))
+        ini, cm, ctrl, dd = C.read_car_directory(car)
+        out = Path(t) / "out"
+        svj, log, _ = C.build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl, glb_output_dir=out,
+                                  include_plots=False, mesh_format="usd+glb")
+        entry = svj["assets"]["meshes"][0]
+        assert entry["uri"] == "meshes/car.usdz" and entry["preview"] == "meshes/car.glb"
+        assert (out / "meshes" / "car.glb").is_file() and svj["_metadata"]["version"] == "0.106"

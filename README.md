@@ -9,8 +9,8 @@
 Converts **Assetto Corsa** car data into the
 [SVJ v0.97 standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
 — SAE J670 axes, SI units — runs a virtual Pacejka MF 6.2 bench on every
-tyre section, and exports all KN5 mesh LODs as ready-to-use `.glb` files, or as OpenUSD (`.usdz`, SVJ 0.105: pick
-*USD* next to *Convert KN5 → meshes*; needs `usd-core`).
+tyre section, and exports all KN5 mesh LODs as OpenUSD (`.usdz`, SVJ 0.105, with the movement of doors and wipers and
+the textures; needs `usd-core`), optionally with a glTF preview, or as plain `.glb`.
 
 ## Install
 

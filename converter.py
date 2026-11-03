@@ -1147,17 +1147,21 @@ def fit_tyre_axle_section(
     return mf52, mf62, result
 
 
-def _glbs_to_usd(exported: dict, entries: list, svj: dict, log: list) -> dict:
-    """Turn the exported GLBs into USDZ packages (SVJ 0.105, spec 22.10) and delete the GLBs.
+def _glbs_to_usd(exported: dict, entries: list, svj: dict, log: list,
+                 animate: Optional[set] = None, keep_glb: bool = False) -> dict:
+    """Turn the exported GLBs into USDZ packages (SVJ 0.105, spec 22.10).
 
     The shapes, the node hierarchy (`SVJ::category::id` nodes as prims with `svj:node`) and the
-    appearance (colours and textures) go across; glTF animations do not: the doors and wipers
-    are in the SVJ JSON as joints and poses, which is the authority.  Without the optional
-    `usd-core` library, or if a file cannot be converted, the GLB is kept and its manifest entry
-    says so.  Returns {lod: path of the file that exists}.
+    appearance (colours and textures) go across. The movement of the nodes in `animate` (the doors,
+    wipers, ... the SVJ has a joint and a pose for) goes across as time samples, one window of the
+    timeline per animation; the suspension's travel does not (the SVJ has no joint for those
+    nodes: it is the suspension model's, and rule 8 of 22.10 forbids kinematics the JSON lacks).
+    With `keep_glb` the GLB stays beside the USD as its `preview` (SVJ 0.106) for viewers that
+    read glTF only; otherwise it is deleted. Without the optional `usd-core`, or if a file cannot be
+    converted, the GLB is kept and its manifest entry says so. Returns {lod: path of the main file}.
     """
     out: dict = {}
-    done = 0
+    done = animated = 0
     try:
         from svj_migrate import gltf2usd
     except Exception:                                        # noqa: BLE001
@@ -1168,8 +1172,13 @@ def _glbs_to_usd(exported: dict, entries: list, svj: dict, log: list) -> dict:
         try:
             if gltf2usd is None:
                 raise ImportError("the usd-core library is missing (pip install usd-core)")
-            gltf2usd.convert(str(glb), str(usd), "Car")
-            Path(glb).unlink()
+            res = gltf2usd.convert(str(glb), str(usd), "Car", animate=animate)
+            animated += res.get("animated", 0)
+            if keep_glb:
+                if entry is not None:
+                    entry["preview"] = entry["uri"][:-len(".usdz")] + ".glb"
+            else:
+                Path(glb).unlink()
             out[lbl] = usd
             done += 1
         except Exception as e:                               # noqa: BLE001
@@ -1179,9 +1188,9 @@ def _glbs_to_usd(exported: dict, entries: list, svj: dict, log: list) -> dict:
                 entry["uri"] = entry["uri"][:-len(".usdz")] + ".glb"
                 entry.pop("format", None)
     if done:
-        log.append("ℹ USD meshes carry shapes, node names and appearance (the default skin); the "
-                   "doors' and wipers' movement is in the SVJ (joints and poses), not in the asset, "
-                   "and the other skins are not carried")
+        log.append(f"ℹ USD meshes carry shapes, node names and appearance (the default skin)"
+                   + (f" and the movement of {animated} node(s) the SVJ has joints for" if animated else "")
+                   + "; the suspension's travel and the other skins are not carried")
     return out
 
 
@@ -1201,7 +1210,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               include_plots: bool = True,
               include_animations: bool = True,
               unified_suspension: bool = True,
-              mesh_format: str = "glb",
+              mesh_format: str = "usd",
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
@@ -1981,7 +1990,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 # GLBs live in <meshes_subdir>/ next to the JSON, or directly
                 # beside it when meshes_subdir is "" (URIs are relative to the JSON).
                 _mp        = f"{meshes_subdir}/" if meshes_subdir else ""
-                _usd       = mesh_format == "usd"
+                _usd       = mesh_format.startswith("usd")
                 _ext       = ".usdz" if _usd else ".glb"
                 glb_uri    = f"{_mp}{kn5_path.stem}{_ext}"
                 mesh_id    = _mesh_slug(kn5_path.stem)
@@ -2012,6 +2021,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 # (SVJ::<category>::<id>); a part is bound only when the KN5 has
                 # a node for it AND the SVJ output has the part to carry it.
                 node_rename: dict = {}
+                _movable_nodes: set = set()                  # glTF nodes of parts the SVJ has a joint for
                 for part in map_ac_nodes_to_svj_parts(node_names):
                     vis = {"mesh_ref": mesh_id, "node": part["node"]}
                     st = part["station"]
@@ -2082,6 +2092,7 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                             _nb, _nj, _ren = movable_parts_to_svj(svj, _moving, mesh_id,
                                                                   bound=set(node_rename))
                             node_rename.update(_ren)
+                            _movable_nodes = set(_ren.values())
                             log.append(f"✓ Moving parts: {len(_moving)} animated node(s); "
                                        f"{_nb} movable part(s), {_nj} joint(s) → "
                                        f"constraints / poses")
@@ -2102,7 +2113,9 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                             highest_lod_only=highest_lod_only,
                             include_animations=include_animations)
                         if _usd:
-                            exported = _glbs_to_usd(exported, mesh_entries, svj, log)
+                            exported = _glbs_to_usd(exported, mesh_entries, svj, log,
+                                                    animate=_movable_nodes if include_animations else None,
+                                                    keep_glb=mesh_format == "usd+glb")
                         for lbl, out_p in exported.items():
                             log.append(f"✓ {'USD' if _usd else 'GLB'} LOD {lbl} written → {_mp}{out_p.name}")
                         _ra = _reports.get("A") or {}
@@ -2142,6 +2155,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
         svj["_metadata"]["coordinate_system"] = {"up": "Y", "forward": "-Z", "handedness": "right"}
         if any(m.get("format") == "usd" for m in _meshes):
             svj["_metadata"]["version"] = "0.105"             # `assets.meshes[].format` (spec 22.10)
+        if any(m.get("preview") for m in _meshes):
+            svj["_metadata"]["version"] = "0.106"             # `assets.meshes[].preview`
 
     log.append(f"✓ SVJ v{svj['_metadata'].get('version', SVJ_VERSION)} output built (converter v{CONV_VER})")
     return svj, log, bench_results

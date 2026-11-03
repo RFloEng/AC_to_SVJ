@@ -178,7 +178,7 @@ def convert_one(job: dict, emit: Optional[Callable[[str], None]] = None) -> dict
             data_dir=data_dir,
             ctrl_files=ctrl_files,
             glb_output_dir=glb_dir,
-            mesh_format=job.get("mesh_format", "glb"),
+            mesh_format=job.get("mesh_format", "usd"),
             include_skins=job["include_skins"],
             meshes_subdir=job["mesh_sub"],
             include_damage_textures=job["include_damage"],
@@ -246,7 +246,7 @@ def convert_one(job: dict, emit: Optional[Callable[[str], None]] = None) -> dict
         if convert_glb:
             glb_ok = (glb_src is not None and glb_src.is_dir()
                       and any(any(glb_src.glob(pat)) for pat in _MESH_GLOBS))
-            kind = "USD" if job.get("mesh_format") == "usd" else "GLB"
+            kind = "GLB" if job.get("mesh_format") == "glb" else "USD"
             glb_note = f"  ✓ {kind} exported" if glb_ok else f"  ⚠ no {kind}"
         put(f"✓ Done: {car_path.name} — {len(bench)} tire fit(s){glb_note}")
         success = True
