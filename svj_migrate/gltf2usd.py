@@ -105,6 +105,23 @@ def read_accessor(gltf, buffers, index):
     return out
 
 
+def _drop_alpha(data):
+    """PNG bytes without the alpha channel.  A texture that nothing reads the alpha of (an opaque material,
+    a normal map) often has it empty; Blender's USD importer loads it as straight alpha and then loses the RGB
+    where alpha is 0, so the surface comes out black.  Left alone when PIL is missing or there is no alpha."""
+    try:
+        import io
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        if im.mode not in ("RGBA", "LA", "PA"):
+            return data
+        out = io.BytesIO()
+        im.convert("RGB").save(out, "PNG")
+        return out.getvalue()
+    except Exception:
+        return data
+
+
 def _prim_name(name, fallback, taken):
     """A legal prim name: letters, digits and underscore, not starting with a digit, unique among siblings."""
     m = re.match(r"^SVJ::([a-z]+)::(.+)$", name or "")
@@ -142,16 +159,18 @@ def convert(src, dst, root_name="Root", animate=None):
     materials, stats = {}, {"nodes": 0, "meshes": 0, "triangles": 0, "named": 0, "textures": 0, "animated": 0}
     tex_dir = os.path.splitext(target)[0] + "_tex"
     images = {}
+    used_files = set()
 
-    def image_file(tex_index):
+    def image_file(tex_index, keep_alpha=True):
         """Write the image of glTF texture `tex_index` next to the stage; the asset path (relative)
         or None when it cannot be read."""
         tex = (gltf.get("textures") or [])[tex_index] if tex_index is not None else None
         src_i = tex.get("source") if tex else None
         if src_i is None or src_i >= len(gltf.get("images") or []):
             return None
-        if src_i in images:
-            return images[src_i]
+        key = (src_i, keep_alpha)
+        if key in images:
+            return images[key]
         img = gltf["images"][src_i]
         data = None
         if img.get("bufferView") is not None:
@@ -164,20 +183,28 @@ def convert(src, dst, root_name="Root", animate=None):
             with open(os.path.join(os.path.dirname(os.path.abspath(src)), img["uri"]), "rb") as f:
                 data = f.read()
         if not data:
-            images[src_i] = None
+            images[key] = None
             return None
+        if not keep_alpha:
+            data = _drop_alpha(data)
         ext = ".png" if data[:4] == bytes([0x89]) + b"PNG" else ".jpg" if data[:3] == bytes([0xff, 0xd8, 0xff]) else ".png"
         os.makedirs(tex_dir, exist_ok=True)
-        name = f"tex_{src_i}{ext}"
+        if not keep_alpha and data[:4] == bytes([0x89]) + b"PNG":
+            ext = ".png"
+        stem = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.splitext(str(img.get("name") or ""))[0]).strip("_") or f"tex_{src_i}"
+        name, k = stem + ext, 2
+        while name in used_files:                   # same image with and without alpha, or two with one name
+            name, k = f"{stem}_{k}{ext}", k + 1
+        used_files.add(name)
         with open(os.path.join(tex_dir, name), "wb") as f:
             f.write(data)
-        images[src_i] = "./" + os.path.basename(tex_dir) + "/" + name
+        images[key] = "./" + os.path.basename(tex_dir) + "/" + name
         stats["textures"] += 1
-        return images[src_i]
+        return images[key]
 
-    def texture_network(mat, sh, input_name, tex_index, srgb, normal=False, primvar="st", channel=None, factor=None):
+    def texture_network(mat, sh, input_name, tex_index, srgb, normal=False, primvar="st", channel=None, factor=None, keep_alpha=False):
         """A UsdUVTexture (reading the `st` primvar) feeding `input_name` of the surface shader."""
-        path = image_file(tex_index)
+        path = image_file(tex_index, keep_alpha)
         if path is None:
             return False
         tag = input_name
@@ -225,7 +252,7 @@ def convert(src, dst, root_name="Root", animate=None):
         mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
         bct = (pbr.get("baseColorTexture") or {}).get("index")
         if bct is not None:
-            tx = texture_network(mat, sh, "diffuseColor", bct, True, factor=col)
+            tx = texture_network(mat, sh, "diffuseColor", bct, True, factor=col, keep_alpha=alpha_mode != "OPAQUE")
             if tx and alpha_mode != "OPAQUE":       # the texture's alpha drives the transparency
                 sh.GetInput("opacity").ConnectToSource(tx.CreateOutput("a", Sdf.ValueTypeNames.Float))
         ext = m.get("extensions") or {}

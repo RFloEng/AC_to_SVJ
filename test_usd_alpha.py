@@ -93,3 +93,25 @@ def test_base_colour_factor_tints_the_texture(tmp_path):
     tx = UsdShade.Shader(next(p for p in stage.Traverse() if p.GetName() == "tex_diffuseColor"))
     sc = tx.GetInput("scale").Get()
     assert abs(sc[1] - 0.67) < 1e-6 and abs(sc[2] - 0.1) < 1e-6
+
+
+def test_opaque_materials_get_images_without_alpha(tmp_path):
+    from PIL import Image
+    import io
+    # 1x1 PNG with alpha 0: the RGB must survive in the USD's image
+    buf = io.BytesIO()
+    Image.new("RGBA", (1, 1), (120, 120, 120, 0)).save(buf, "PNG")
+    g = _gltf("OPAQUE")
+    g["images"][0]["uri"] = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    src = tmp_path / "o.gltf"
+    src.write_text(json.dumps(g))
+    gltf2usd.convert(str(src), str(tmp_path / "o.usda"), "Car")
+    files = list((tmp_path / "o_tex").glob("*.png"))
+    assert files and all(Image.open(f).mode == "RGB" for f in files)
+    # a blended material keeps its alpha
+    g = _gltf("BLEND")
+    g["images"][0]["uri"] = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    src = tmp_path / "b.gltf"
+    src.write_text(json.dumps(g))
+    gltf2usd.convert(str(src), str(tmp_path / "b.usda"), "Car")
+    assert all(Image.open(f).mode == "RGBA" for f in (tmp_path / "b_tex").glob("*.png"))

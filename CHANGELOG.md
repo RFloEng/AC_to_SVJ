@@ -6,6 +6,12 @@ All notable changes are documented here.
 
 ### USD meshes keep their transparency
 
+- Images of materials that do not read their alpha (opaque materials, normal maps) are written without the alpha channel.
+  KN5 diffuse maps such as BODY_AO often have alpha 0 everywhere; Blender's USD importer treats the PNG as straight alpha and
+  loses the RGB there, so the paint came out black (the glTF importer marks those images channel-packed, which is why the GLB
+  was fine). Blended / cut-out materials keep their alpha.
+- The texture files in the USDZ are named after the source image (`BODY_AO.png`), as in the GLB, instead of `tex_N`.
+
 - The glTF base-colour factor now tints the base texture in the USD (`scale` on the `UsdUVTexture`). It was dropped, so
   paint whose colour is the factor times a grey texture (the Murcielago's yellow) came out grey/black in Blender.
 
