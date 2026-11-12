@@ -25,6 +25,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    from svj_migrate.frame import convert as _convert_frame, frame_of, tyres_to_iso
+except ImportError:                                  # run from inside svj_to_ac: the repo root holds svj_migrate
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from svj_migrate.frame import convert as _convert_frame, frame_of, tyres_to_iso
 from unified_view import normalize as normalize_unified
 
 REQUIRED_SECTIONS: tuple[str, ...] = (
@@ -215,7 +221,15 @@ def load(path: str | Path) -> SvjDoc:
     if not isinstance(data, dict):
         raise SvjLoadError(f"SVJ root must be an object, got {type(data).__name__}")
 
-    data, notes = normalize_unified(data)          # SVJ 0.100+: derive the corner blocks
+    notes: list[str] = []
+    data, rewritten = tyres_to_iso(data)           # a tyre set in SAE signs: ISO signs, what pacejka_inverse reads
+    if rewritten:
+        notes.append(f"tyre sets rewritten from SAE to ISO signs: {', '.join(rewritten)}")
+    if frame_of(data) == "ISO_8855":               # SVJ 0.109+ default; the writers work in SAE J670 axes
+        data, _ = _convert_frame(data, "SAE_J670")
+        notes.append("axes: ISO 8855 file read in SAE J670 axes for the writers")
+    data, unified_notes = normalize_unified(data)  # SVJ 0.100+: derive the corner blocks
+    notes.extend(unified_notes)
     missing = [s for s in REQUIRED_SECTIONS if s not in data]
     if missing:
         raise MissingSectionError(missing)

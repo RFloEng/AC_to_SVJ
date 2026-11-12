@@ -499,8 +499,11 @@ class App(tk.Tk):
         opts.pack(fill="x", padx=8, pady=(0, 2))
 
         self._b_plots_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Include tire comparison PNGs",
+        ttk.Checkbutton(opts, text="Include tire comparison plots (JPG)",
                         variable=self._b_plots_var).pack(side="left")
+        self._b_thumb_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opts, text="Include AC thumbnail",
+                        variable=self._b_thumb_var).pack(side="left", padx=(16, 0))
         self._b_glb_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             opts, text="Convert KN5 → meshes",
@@ -728,6 +731,7 @@ class App(tk.Tk):
                 self._b_lod_var.get(),
                 self._b_skip_var.get(),
                 self._workers(),
+                self._b_thumb_var.get(),
             ),
             daemon=True,
         ).start()
@@ -741,7 +745,8 @@ class App(tk.Tk):
                       include_damage: bool = False,
                       highest_lod_only: bool = False,
                       skip_existing: bool = False,
-                      workers: int = 1) -> None:
+                      workers: int = 1,
+                      include_thumbnail: bool = True) -> None:
         # flat_meshes: put the GLBs beside the JSON instead of in meshes/
         mesh_sub = "" if flat_meshes else "meshes"
         q   = self._q
@@ -814,6 +819,7 @@ class App(tk.Tk):
                 jobs.append((i, {
                     "src": src, "car_out": out_root / out_names[i],
                     "include_plots": include_plots,
+                    "include_thumbnail": include_thumbnail,
                     "convert_glb": bool(convert_glb and _KN5),
                     "mesh_format": getattr(self, "_mesh_format", "usd"),
                     "include_skins": include_skins, "mesh_sub": mesh_sub,

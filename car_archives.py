@@ -207,6 +207,8 @@ def _wanted(rel: str, include_skins: bool) -> bool:
         return True                      # car.kn5, LODs, and an unencrypted/ copy
     if parts[0] == "skins" and include_skins:
         return PurePosixPath(low).suffix in _SKIN_EXT
+    if len(parts) == 3 and parts[0] == "skins" and parts[2] == "preview.jpg":
+        return True                      # the thumbnail, even without the skins
     return False
 
 

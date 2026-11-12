@@ -25,6 +25,20 @@ def _ts_long() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def find_car_thumbnail(car_path: Path) -> Optional[Path]:
+    """The ``preview.jpg`` AC shows for a car: the first skin's (alphabetical, the one the game
+    loads by default), else the first skin that has one.  None when the car has none."""
+    skins = Path(car_path) / "skins"
+    try:
+        for d in sorted((d for d in skins.iterdir() if d.is_dir()), key=lambda d: d.name.lower()):
+            for f in d.iterdir():
+                if f.is_file() and f.name.lower() == "preview.jpg":
+                    return f
+    except OSError:
+        pass
+    return None
+
+
 _MESH_GLOBS = ("*.glb", "*.usdz", "*.usdc", "*.usd", "*.usda")      # a car's meshes, in either format
 
 
@@ -93,11 +107,13 @@ def _write_car_log(car_out: Path, stem: str, car_path: Path,
         lines += ["", "─" * 70, "OUTPUT FILES", "─" * 70]
         lines.append(f"  {stem}.svj.json")
         lines.append(f"  conversion_log.txt  ← this file")
+        if (car_out / f"{stem}.thumbnail.jpg").is_file():
+            lines.append(f"  {stem}.thumbnail.jpg")
         if include_plots and bench:
             for axle_key in bench:
                 tag = axle_key.replace(" ", "_")
                 for suffix in ("lateral", "longitudinal", "mu_vs_fz"):
-                    lines.append(f"  {stem}.tires_{tag}_{suffix}.png")
+                    lines.append(f"  {stem}.tires_{tag}_{suffix}.jpg")
         if convert_glb:
             for sub in ("meshes", ""):
                 glb_dir = car_out / sub if sub else car_out
@@ -204,18 +220,24 @@ def convert_one(job: dict, emit: Optional[Callable[[str], None]] = None) -> dict
             for g in [p for pat in _MESH_GLOBS for p in glb_src.glob(pat)]:
                 shutil.copy2(str(g), str(mesh_out / g.name))
 
+        if job.get("include_thumbnail", True):
+            thumb = find_car_thumbnail(car_path)
+            if thumb is not None:
+                shutil.copy2(str(thumb), str(car_out / f"{stem}.thumbnail.jpg"))
+                put(f"ℹ Thumbnail: {thumb.parent.name}/preview.jpg")
+
         if include_plots and bench:
             for axle_key, br in bench.items():
                 tag = axle_key.replace(" ", "_")
-                (car_out / f"{stem}.tires_{tag}_lateral.png").write_bytes(br.lateral_png)
-                (car_out / f"{stem}.tires_{tag}_longitudinal.png"
+                (car_out / f"{stem}.tires_{tag}_lateral.jpg").write_bytes(br.lateral_png)
+                (car_out / f"{stem}.tires_{tag}_longitudinal.jpg"
                  ).write_bytes(br.longitudinal_png)
-                (car_out / f"{stem}.tires_{tag}_mu_vs_fz.png").write_bytes(br.mu_vs_fz_png)
+                (car_out / f"{stem}.tires_{tag}_mu_vs_fz.jpg").write_bytes(br.mu_vs_fz_png)
                 if br.mf62_camber_png:
-                    (car_out / f"{stem}.tires_{tag}_mf62_camber.png"
+                    (car_out / f"{stem}.tires_{tag}_mf62_camber.jpg"
                      ).write_bytes(br.mf62_camber_png)
                 if br.mf62_lateral_png:
-                    (car_out / f"{stem}.tires_{tag}_mf62_lateral.png"
+                    (car_out / f"{stem}.tires_{tag}_mf62_lateral.jpg"
                      ).write_bytes(br.mf62_lateral_png)
 
                 vi = svj.get("vehicle_info", {})

@@ -352,7 +352,7 @@ def test_usd_can_keep_a_glb_preview_beside_it():
                                   include_plots=False, mesh_format="usd+glb")
         entry = svj["assets"]["meshes"][0]
         assert entry["uri"] == "meshes/car.usdz" and entry["preview"] == "meshes/car.glb"
-        assert (out / "meshes" / "car.glb").is_file() and svj["_metadata"]["version"] == "0.106"
+        assert (out / "meshes" / "car.glb").is_file() and svj["_metadata"]["version"] == "0.109"
 
 
 def test_glb_animates_only_the_parts_the_svj_has_joints_for():

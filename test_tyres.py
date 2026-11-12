@@ -118,3 +118,19 @@ def run() -> bool:
 
 if __name__ == "__main__":
     sys.exit(0 if run() else 1)
+
+
+def test_generated_tyre_sets_follow_the_standards_sign_oracle():
+    """The standard's evaluator (spec 11.13) on a set from the bench: slip right gives a force to the left (+Y in ISO
+    axes), driving slip a forward force, and leaning right pushes the tyre right, at any slip angle."""
+    from svj_migrate.tiremodel import params, forces
+    import tire_lab
+    res = tire_lab.run_bench(tire_lab.ACTyreParams())
+    s = {"pacejka": tire_lab.build_svj_mf62_block(res)}
+    p = params(s)
+    fz, vx = 4000.0, 20.0
+    assert forces(p, fz, 0.0, 0.05, 0.0, None, vx)["Fy"] > 0
+    assert forces(p, fz, 0.05, 0.0, 0.0, None, vx)["Fx"] > 0
+    for alpha in (0.0, 0.04, -0.04):
+        thrust = forces(p, fz, 0.0, alpha, 0.05, None, vx)["Fy"] - forces(p, fz, 0.0, alpha, 0.0, None, vx)["Fy"]
+        assert thrust < 0, alpha

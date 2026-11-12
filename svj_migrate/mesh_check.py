@@ -1,5 +1,5 @@
-# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/mesh_check.py (commit e4bc53f, Apache-2.0).
-# Unchanged except for this header.
+# Vendored from RFloEng/SVJ-standard-vehicle-json, tools/mesh_check.py (commit 8564da9, Apache-2.0).
+# Only the frame_of import was changed.
 """
 SVJ mesh-side binding checker (spec §22.9, §22.10).
 
@@ -33,6 +33,8 @@ import math
 import os
 import re
 import struct
+
+from .frame import frame_of
 
 NODE_PREFIX = "SVJ::"
 CATEGORY_SKIP_ORPHAN = ("helper", "lod")
@@ -206,20 +208,23 @@ def _cross(a, b):
     return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 
 
-def convention(up, forward, handedness="right"):
-    """Rows of the matrix that maps asset axes to SAE J670 (x forward, y right, z down), or None."""
+def convention(up, forward, handedness="right", frame="SAE_J670"):
+    """Rows of the matrix that maps asset axes to the vehicle frame, or None: ISO 8855 (x forward, y left, z up) or
+    legacy SAE J670 (x forward, y right, z down), the default here for callers that pass no frame."""
     u, f = _axis(up), _axis(forward)
     if u is None or f is None or sum(a * b for a, b in zip(u, f)) != 0:
         return None
-    r = _cross(f, u) if str(handedness).lower() != "left" else _cross(u, f)
+    r = _cross(f, u) if str(handedness).lower() != "left" else _cross(u, f)       # the asset's right-hand axis
+    if frame == "ISO_8855":
+        return [f, [-c for c in r], u]
     return [f, r, [-c for c in u]]
 
 
-CANDIDATES = (("SAE J670 axes", None), ("Y-up, -Z forward (Blender export)", ("Y", "-Z")), ("Y-up, +Z forward (glTF front)", ("Y", "Z")),
+CANDIDATES = (("the vehicle axes", None), ("Y-up, -Z forward (Blender export)", ("Y", "-Z")), ("Y-up, +Z forward (glTF front)", ("Y", "Z")),
               ("Z-up, +X forward", ("Z", "X")))
 
 
-def _to_sae(box, rows):
+def _to_frame(box, rows):
     pts = [[sum(rows[i][k] * p[k] for k in range(3)) for i in range(3)] for p in
            ([x, y, z] for x in (box[0][0], box[1][0]) for y in (box[0][1], box[1][1]) for z in (box[0][2], box[1][2]))]
     return [min(p[k] for p in pts) for k in range(3)], [max(p[k] for p in pts) for k in range(3)]
@@ -279,6 +284,10 @@ def _index_gltf(path, ref, uri, warnings):
         if name and name.startswith(NODE_PREFIX) or sv:
             ix.present.append((name if name and name.startswith(NODE_PREFIX) else sv, sv))
     ix.boxes = node_boxes(gltf)
+    for k, im in enumerate(gltf.get("images") or []):
+        u = im.get("uri") if isinstance(im, dict) else None
+        if isinstance(u, str) and not u.startswith("data:") and not os.path.exists(os.path.normpath(os.path.join(os.path.dirname(path), u))):
+            warnings.append(f"[mesh '{ref}'] texture image {k} ({u}) referenced by {uri} does not exist: ship the image beside the asset")
     animated = {t["node"] for a in gltf.get("animations") or [] for ch in a.get("channels") or [] for t in [ch.get("target") or {}]
                 if isinstance(t.get("node"), int) and t.get("path") in ("translation", "rotation", "scale")}
     children = {i: [c for c in (n.get("children") or []) if isinstance(c, int)] for i, n in enumerate(nodes)}
@@ -344,7 +353,15 @@ def _index_usd(path, ref, uri, warnings):
         warnings.append(f"[mesh '{ref}'] the stage {uri} has metersPerUnit = {mpu:g}; spec 22.10 requires 1 (the geometry is checked in metres)")
     cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
     ix = _Index()
+    missing_tex = set()
     for prim in stage.Traverse():
+        if prim.GetTypeName() == "Shader":                          # a texture the asset refers to must be shipped with it (spec 22.10)
+            idattr = prim.GetAttribute("info:id")
+            fattr = prim.GetAttribute("inputs:file")
+            if idattr and idattr.Get() == "UsdUVTexture" and fattr and fattr.HasAuthoredValue():
+                ap = fattr.Get()
+                if ap is not None and ap.path and not ap.resolvedPath:
+                    missing_tex.add(ap.path)
         attr = prim.GetAttribute("svj:node")
         logical = attr.Get() if attr and attr.HasAuthoredValue() else None
         logical = logical if isinstance(logical, str) else None
@@ -360,6 +377,8 @@ def _index_usd(path, ref, uri, warnings):
         ix.present.append((logical or by_name, None))
         rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
         ix.boxes[key] = None if rng.IsEmpty() else ([rng.GetMin()[k] * mpu for k in range(3)], [rng.GetMax()[k] * mpu for k in range(3)])
+    for t in sorted(missing_tex):
+        warnings.append(f"[mesh '{ref}'] texture {t} referenced by {uri} was not found: ship the image beside the asset or pack the asset as .usdz")
     ix.subtree_info = lambda key, exclude: _usd_non_appearance(stage.GetPrimAtPath(key), Usd, UsdGeom, set(exclude))
     return ix
 
@@ -411,7 +430,8 @@ def check_meshes(data, bindings, base_dir):
     if not meshes:
         return [], warnings, ["--meshes: the file declares no assets.meshes; nothing to check"]
     declared = (data.get("_metadata") or {}).get("coordinate_system")
-    declared_rows = convention(declared.get("up"), declared.get("forward"), declared.get("handedness", "right")) if isinstance(declared, dict) else None
+    frame = frame_of(data)
+    declared_rows = convention(declared.get("up"), declared.get("forward"), declared.get("handedness", "right"), frame) if isinstance(declared, dict) else None
 
     by_mesh = {}
     for b in bindings:
@@ -469,11 +489,11 @@ def check_meshes(data, bindings, base_dir):
             m = re.match(r"^SVJ::([a-z0-9_]+)::", name or "")
             if m and m.group(1) not in CATEGORY_SKIP_ORPHAN and name not in bound and via not in bound:
                 warnings.append(f"[mesh '{ref}'] node '{name}' in {uri} is not bound by any part of this file")
-        _check_geometry(ref, uri, entry, items, declared_rows, warnings, notes)
+        _check_geometry(ref, uri, entry, items, declared_rows, warnings, notes, frame)
     return [], warnings, notes
 
 
-def _check_geometry(ref, uri, entry, items, declared_rows, warnings, notes):
+def _check_geometry(ref, uri, entry, items, declared_rows, warnings, notes, frame):
     if len(items) < 1:
         return
     xf = asset_transform(entry)
@@ -498,20 +518,20 @@ def _check_geometry(ref, uri, entry, items, declared_rows, warnings, notes):
     def score(rows, shift=(0.0, 0.0, 0.0)):
         ok, gaps = 0, []
         for loc, node, pos, box in boxes:
-            sb = _to_sae(box, rows) if rows else box
+            sb = _to_frame(box, rows) if rows else box
             sb = ([sb[0][k] + shift[k] for k in range(3)], [sb[1][k] + shift[k] for k in range(3)])
             g = _gap(pos, sb)
             gaps.append(g)
             ok += g <= 0.10 + 0.15 * _diag(sb)
         return ok / len(boxes), gaps
 
-    cands = [("the declared coordinate_system", declared_rows)] if declared_rows else [("SAE J670 axes", None)]
-    cands += [(n, convention(*a)) for n, a in CANDIDATES if a and convention(*a) != declared_rows]
+    cands = [("the declared coordinate_system", declared_rows)] if declared_rows else [(f"the {frame} vehicle axes", None)]
+    cands += [(n, convention(*a, frame=frame)) for n, a in CANDIDATES if a and convention(*a, frame=frame) != declared_rows]
     scores = [(score(rows)[0], i, name, rows) for i, (name, rows) in enumerate(cands)]
     first = scores[0]
 
     def outliers(rows):
-        sae = [(loc, node, pos, _to_sae(box, rows) if rows else box) for loc, node, pos, box in boxes]
+        sae = [(loc, node, pos, _to_frame(box, rows) if rows else box) for loc, node, pos, box in boxes]
         for (loc, node, pos, b), g in list(zip(sae, score(rows)[1])):
             if g > 0.10 + 0.15 * _diag(b):
                 c = [(b[0][k] + b[1][k]) / 2 for k in range(3)]
@@ -526,13 +546,13 @@ def _check_geometry(ref, uri, entry, items, declared_rows, warnings, notes):
         warnings.append(f"[mesh '{ref}'] the geometry in {uri} fits {best[2]} better than {first[2]}: check _metadata.coordinate_system")
         return
     rows = best[3] if best[0] > first[0] else first[3]
-    sae = [(loc, node, pos, _to_sae(box, rows) if rows else box) for loc, node, pos, box in boxes]
+    sae = [(loc, node, pos, _to_frame(box, rows) if rows else box) for loc, node, pos, box in boxes]
     shift = tuple(_median([pos[k] - (b[0][k] + b[1][k]) / 2 for _, _, pos, b in sae]) for k in range(3))
     if len(boxes) >= 3 and max(abs(s) for s in shift) > 0.05 and score(rows, shift)[0] >= 0.7:
-        # the asset sits at -shift against the SVJ origin (SAE axes); x_transform.position is in the asset's own axes
+        # the asset sits at -shift against the SVJ origin (vehicle axes); x_transform.position is in the asset's own axes
         fix = [sum(rows[i][k] * shift[i] for i in range(3)) for k in range(3)] if rows else list(shift)
         warnings.append(f"[mesh '{ref}'] the geometry in {uri} appears shifted by ({-shift[0]:+.3f}, {-shift[1]:+.3f}, {-shift[2]:+.3f}) m "
-                        f"(SAE x, y, z) against the SVJ origin; set x_transform.position to about ({fix[0]:+.3f}, {fix[1]:+.3f}, {fix[2]:+.3f}) "
+                        f"(x, y, z of the vehicle frame) against the SVJ origin; set x_transform.position to about ({fix[0]:+.3f}, {fix[1]:+.3f}, {fix[2]:+.3f}) "
                         f"(asset axes) or re-export with the origin at the front axle")
         return
     outliers(rows)

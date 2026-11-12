@@ -47,11 +47,12 @@ ac_svj_batch_YYYYMMDD_HHMMSS_convX.X.X_svjX.XX/
   {car_name}/
     {model}.svj.json           ← converted vehicle data
     conversion_log.txt         ← detailed per-car log with fit quality table
-    {model}.tires_front_lateral.png
-    {model}.tires_front_longitudinal.png
-    {model}.tires_front_mu_vs_fz.png
-    {model}.tires_front_mf62_camber.png
-    {model}.tires_front_mf62_lateral.png
+    {model}.tires_front_lateral.jpg
+    {model}.tires_front_longitudinal.jpg
+    {model}.tires_front_mu_vs_fz.jpg
+    {model}.tires_front_mf62_camber.jpg
+    {model}.tires_front_mf62_lateral.jpg
+    {model}.thumbnail.jpg          (the car's AC preview.jpg, optional)
     meshes/{model}.glb         ← if KN5 → GLB enabled
   batch_summary.csv            ← fit quality for every axle/compound
   batch_run_TIMESTAMP.log      ← master log combining all cars

@@ -92,6 +92,7 @@ from ac_parsers import (
     _parse_vec3, _f, _i, _m, _b, _first, _resolve_lut,
 )
 from svj_migrate import migrate as migrate_suspension
+from svj_migrate.frame import convert as frame_convert, flip_vector as frame_flip_vector
 from susp_geometry import corner_geometry
 from svj_migrate.naming import canonical_part_id
 from tire_lab import (
@@ -1211,12 +1212,13 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
               include_animations: bool = True,
               unified_suspension: bool = True,
               mesh_format: str = "usd",
+              frame: str = "ISO_8855",
               ) -> tuple[dict, list[str], dict]:
     """
     Returns (svj_dict, log_lines, bench_results_by_axle_compound).
 
-    ``include_plots=False`` skips rendering the tire comparison PNGs (the slowest part
-    when no GLB is made); the SVJ is identical, the bench results carry empty PNGs.
+    ``include_plots=False`` skips rendering the tire comparison plots (JPEG) (the slowest part
+    when no GLB is made); the SVJ is identical, the bench results carry empty images.
 
     ``unified_suspension`` (default) writes the suspension as bodies, joints and elements
     plus ``wheel_stations`` (SVJ 0.100, spec 25); False keeps the deprecated corner-based
@@ -2143,9 +2145,11 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
             except Exception as _kn5_err:
                 log.append(f"⚠ KN5 scan skipped ({kn5_path.name}): {_kn5_err}")
 
+    _unified_ok = False
     if unified_suspension:
         try:
             svj, _notes = migrate_suspension(svj)
+            _unified_ok = True
             log.append(f"✓ Suspension written as bodies, joints and elements "
                        f"({len(svj.get('wheel_stations', []))} wheel stations, "
                        f"{len(svj.get('constraints', []))} constraints; spec 25)")
@@ -2154,18 +2158,64 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
 
     _meshes = (svj.get("assets") or {}).get("meshes") or []
     if _meshes:
-        # the asset's own axes (glTF's: Y up, -Z forward) as an object, physics stay SAE J670 (spec 22.4)
+        # the asset's own axes (glTF's: Y up, -Z forward) as an object; the physics frame goes to
+        # `physics_frame` when the file is converted below (spec 22.4)
         svj["_metadata"]["coordinate_system"] = {"up": "Y", "forward": "-Z", "handedness": "right"}
         if any(m.get("format") == "usd" for m in _meshes):
             svj["_metadata"]["version"] = "0.105"             # `assets.meshes[].format` (spec 22.10)
         if any(m.get("preview") for m in _meshes):
             svj["_metadata"]["version"] = "0.106"             # `assets.meshes[].preview`
 
+    if frame == "ISO_8855" and not _unified_ok:
+        # the corner-based suspension section holds bare hardpoint vectors the frame converter does not know
+        log.append("⚠ Axes kept as SAE J670: ISO 8855 needs the unified suspension (spec 25)")
+        frame = "SAE_J670"
+    if frame == "ISO_8855":
+        svj = to_iso_frame(svj)
+        log.append("✓ Axes: ISO 8855 (X forward, Y left, Z up), SVJ 0.109")
+    elif frame != "SAE_J670":
+        raise ValueError(f"frame must be ISO_8855 or SAE_J670, not {frame!r}")
+
     log.append(f"✓ SVJ v{svj['_metadata'].get('version', SVJ_VERSION)} output built (converter v{CONV_VER})")
     return svj, log, bench_results
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
+
+def to_iso_frame(svj: dict) -> dict:
+    """The document (built in SAE J670 axes) in ISO 8855 axes, SVJ 0.109.
+
+    The standard's own lossless converter does the SVJ fields (``svj_migrate.frame``).  What is
+    ours is flipped here: the vehicle-frame vectors of ``x_assettocorsa`` and the side-view
+    instant centre; the KN5 model axes of the moving parts stay as they are.  The tyre sets this
+    converter writes already carry ISO signs (positive slip angle gives positive Fy, positive
+    camber pushes the tyre to the right), which an undeclared set in a 0.109 file means.
+    """
+    for b in (svj.get("chassis") or {}).get("mass_bodies", []):
+        b.pop("outboard_point", None)         # a look-alike of `outboard_mount` that readers ignore; the joints carry it
+    out, _ = frame_convert(svj, "ISO_8855")
+    ac = out.get("x_assettocorsa") or {}
+    if isinstance(ac.get("fuel_tank_position"), list):
+        ac["fuel_tank_position"] = frame_flip_vector(ac["fuel_tank_position"])
+    for part in (ac.get("moving_parts") or {}).get("parts", []):
+        for k in ("pivot_svj", "axis_svj"):
+            if isinstance(part.get(k), list) and len(part[k]) == 3:
+                part[k] = frame_flip_vector(part[k])
+
+    def side_view_ic(node):                   # [x, z]: the height changes sign
+        if isinstance(node, dict):
+            ic = node.get("side_view_ic")
+            if isinstance(ic, list) and len(ic) == 2:
+                node["side_view_ic"] = [ic[0], -ic[1] if ic[1] else ic[1]]
+            for v in node.values():
+                side_view_ic(v)
+        elif isinstance(node, list):
+            for v in node:
+                side_view_ic(v)
+    side_view_ic(out)
+    out["_metadata"]["version"] = "0.109"
+    return out
+
 
 def _clean(obj):
     """Recursively strip Nones and convert non-finite floats (NaN, inf) to

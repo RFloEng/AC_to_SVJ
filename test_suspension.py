@@ -432,8 +432,10 @@ def test_unified_suspension_output():
     assert "joint" in kinds and ("spring" in kinds or "damper" in kinds)
     assert any("Suspension written as bodies" in l for l in log)
     # same tyre/brake data as the corner section carried
-    co, cn = _clean(old), _clean(new)
-    assert all(cn[k] == co[k] for k in ("tires", "powertrain", "brakes", "aerodynamics"))
+    from svj_migrate.frame import convert
+    co, cn = _clean(old), convert(_clean(new), "SAE_J670")[0]      # the new file is ISO 8855: back to SAE to compare
+    assert all(cn[k] == co[k] for k in ("powertrain", "brakes", "aerodynamics"))
+    assert {n: s["pacejka"] for n, s in cn["tires"]["sets"].items()} == {n: s["pacejka"] for n, s in co["tires"]["sets"].items()}
 
 NL = chr(10)
 

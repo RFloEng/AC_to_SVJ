@@ -514,7 +514,7 @@ def test_converter_can_write_usd_meshes():
         assert usd.is_file() and not list((out / "meshes").glob("*.glb")), log
         entry = svj["assets"]["meshes"][0]
         assert entry["uri"] == "meshes/synthcar.usdz" and entry["format"] == "usd"
-        assert svj["_metadata"]["version"] == "0.105"
+        assert svj["_metadata"]["version"] == "0.109" and svj["_metadata"]["physics_frame"] == "ISO_8855"
         assert svj["_metadata"]["coordinate_system"]["up"] == "Y"
         stage = Usd.Stage.Open(str(usd))
         named = {p.GetAttribute("svj:node").Get() for p in stage.Traverse()
@@ -547,7 +547,7 @@ def test_converter_emits_v0992_bindings():
         glb = out / "meshes" / "synthcar.glb"
         assert glb.is_file(), log
         names = {n.name for n in pygltflib.GLTF2().load(str(glb)).nodes}
-    assert svj["_metadata"]["version"] == "0.100"
+    assert svj["_metadata"]["version"] == "0.109"
     assert svj["vehicle_info"]["drive_type"] in ("FWD", "RWD", "AWD", "4WD")
     assert "suspension" not in svj                       # unified model (spec 25)
     st = {w["id"]: w for w in svj["wheel_stations"]}
@@ -814,7 +814,7 @@ def test_tire_plots_can_be_skipped_without_changing_the_fit():
     from tire_lab import ACTyreParams, run_bench
     p = ACTyreParams()
     full, lean = run_bench(p), run_bench(p, plots=False)
-    assert full.lateral_png[:4] == bytes([137]) + b"PNG" and lean.lateral_png == b""
+    assert full.lateral_png[:3] == bytes([0xFF, 0xD8, 0xFF]) and lean.lateral_png == b""
     assert full.fit_lateral == lean.fit_lateral
     assert full.fit_longitudinal == lean.fit_longitudinal
 
@@ -1052,7 +1052,7 @@ def test_cg_height_and_position_are_derived():
     wb = svj["chassis"]["wheelbase"]
     # test_car: RADIUS 0.305 both axles, BASEY 0.095 / 0.100, REAR_BIAS 0.52
     # -> h = 0.48 * (0.305 - 0.095) + 0.52 * (0.305 - 0.100)
-    assert abs(cg[2] + (0.48 * 0.210 + 0.52 * 0.205)) < 1e-3, cg
+    assert abs(cg[2] - (0.48 * 0.210 + 0.52 * 0.205)) < 1e-3, cg
     assert abs(cg[0] + round(wb * 0.52, 3)) < 1e-9, (cg, wb)
     assert any("CG height" in l and "from tyre radius" in l for l in log), log
 
@@ -1063,7 +1063,7 @@ def test_explicit_cg_height_is_respected():
         car = _patched_car(Path(t), cg_height="0.55")
         ini, cm, ctrl, dd = read_car_directory(car)
         svj, log, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl)
-    assert abs(svj["chassis"]["center_of_gravity"][2] + 0.55) < 1e-9
+    assert abs(svj["chassis"]["center_of_gravity"][2] - 0.55) < 1e-9
     assert any("CG height 0.55 m from car.ini" in l for l in log), log
 
 
@@ -1085,7 +1085,7 @@ def test_converter_places_the_mesh_from_graphics_offset():
         ini, cm, ctrl, dd = read_car_directory(car)
         svj0, _, _ = build_svj(ini, cm, data_dir=dd, ctrl_files=ctrl)       # no KN5 yet
         wb, cg = svj0["chassis"]["wheelbase"], svj0["chassis"]["center_of_gravity"]
-        h_cg, d_f, R = -cg[2], -cg[0], 0.305
+        h_cg, d_f, R = cg[2], -cg[0], 0.305
         ty, tz = -0.50 + h_cg, -0.19 - d_f
         y_model = R - ty                                   # where the model's wheels must be
         zf, zr = 0.0 - tz, -wb - tz

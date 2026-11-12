@@ -4,6 +4,27 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### SVJ 0.109: ISO 8855 axes (X forward, Y left, Z up)
+
+- `converter.py` writes ISO 8855 by default (`frame="ISO_8855"` parameter; `"SAE_J670"` still available). The model is
+  built in SAE and converted at the end by `to_iso_frame()` using the standard's rule: vectors `[x, -y, -z]`,
+  quaternions left-multiplied by `(1, 0, 0, 0)`, `Ixy`/`Ixz` negated. `_metadata.physics_frame` declares the frame.
+  If the suspension cannot be written in unified form the file falls back to SAE, so it is never mislabelled.
+- Tyres: Pacejka sets declare `axis_system` and carry `reference_load_N` so the standard's MF 6.2 evaluator
+  (`svj.tiremodel`) runs them. AC's additive camber thrust is reproduced by `pKy6 = pVy3 = -CAMBER_GAIN`.
+- Vendored from the standard: `svj_migrate/frame.py`, `tiremodel.py`, `mesh_check.py`, updated `migrate_suspension.py`.
+- `svj_to_ac` normalises either frame to SAE when loading, so ISO and SAE files give identical AC output
+  (`svj_to_ac/tests/test_frames.py`).
+- Checked in the standard's viewer (v4.8): Sera and Murcielago in ISO load upright with wheels, axles and CG aligned to
+  the mesh; the SAE variant of the same car loads to the same result.
+
+### Batch output: AC thumbnail, JPEG tyre plots
+
+- The batch writer copies the car's AC thumbnail (`preview.jpg` of the first skin, the one the game loads by default;
+  the first skin that has one otherwise) to `<model>.thumbnail.jpg` next to the SVJ. New GUI option "Include AC
+  thumbnail" (on by default); archives extract the `preview.jpg` files even without the skins.
+- The tyre comparison plots are JPEG (`.jpg`, quality 85) instead of PNG: about a quarter smaller on the Murcielago.
+
 ### USD meshes keep their transparency
 
 - Images of materials that do not read their alpha (opaque materials, normal maps) are written without the alpha channel.

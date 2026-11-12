@@ -77,6 +77,9 @@ class ACTyreParams:
     source: str = "defaults"     # "defaults"|"tyres.ini"|"mixed"|"csp_extended"|"csp_mixed"|"csp_lut"
 
 
+#: the tyre plots are written as JPEG (a fraction of the size of a PNG, and they are only looked at)
+_JPG = {"quality": 85, "optimize": True}
+
 def _f(raw, default: Optional[float]) -> Optional[float]:
     try:
         return float(raw)
@@ -505,7 +508,7 @@ def plot_lateral_png(data, fit_y, p: ACTyreParams) -> bytes:
     ax.grid(alpha=0.3); ax.axhline(0, color="k", lw=0.5)
     plt.colorbar(sc, ax=ax, label="Fz [kN]")
     fig.tight_layout()
-    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=140); plt.close(fig)
+    buf = io.BytesIO(); fig.savefig(buf, format="jpg", dpi=140, pil_kwargs=_JPG); plt.close(fig)
     return buf.getvalue()
 
 
@@ -538,7 +541,7 @@ def plot_longitudinal_png(data, fit_x, p: ACTyreParams) -> bytes:
     ax.grid(alpha=0.3); ax.axhline(0, color="k", lw=0.5)
     plt.colorbar(sc, ax=ax, label="Fz [kN]")
     fig.tight_layout()
-    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=140); plt.close(fig)
+    buf = io.BytesIO(); fig.savefig(buf, format="jpg", dpi=140, pil_kwargs=_JPG); plt.close(fig)
     return buf.getvalue()
 
 
@@ -562,7 +565,7 @@ def plot_mu_vs_fz_png(fit_y, fit_x, p: ACTyreParams) -> bytes:
     ax.set_xlabel("Vertical load Fz [kN]"); ax.set_ylabel("Peak friction μ [-]")
     ax.set_title("Load sensitivity — peak μ vs Fz"); ax.grid(alpha=0.3); ax.legend()
     fig.tight_layout()
-    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=140); plt.close(fig)
+    buf = io.BytesIO(); fig.savefig(buf, format="jpg", dpi=140, pil_kwargs=_JPG); plt.close(fig)
     return buf.getvalue()
 
 
@@ -632,7 +635,7 @@ def plot_mf62_camber_png(fit_y: dict, p: ACTyreParams) -> bytes:
 
     fig.tight_layout()
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=140)
+    fig.savefig(buf, format="jpg", dpi=140, pil_kwargs=_JPG)
     plt.close(fig)
     return buf.getvalue()
 
@@ -705,7 +708,7 @@ def plot_mf62_lateral_png(data, fit_y: dict, p: ACTyreParams) -> bytes:
 
     fig.tight_layout()
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=140)
+    fig.savefig(buf, format="jpg", dpi=140, pil_kwargs=_JPG)
     plt.close(fig)
     return buf.getvalue()
 
@@ -776,6 +779,7 @@ def build_svj_pacejka_block(result: BenchResult) -> dict:
     p = result.params
     return {
         "model": "MF52",
+        "reference_load_N": round(float(p.FZ0), 1),          # Fz0 of the coefficients (spec 11.13.1)
         "lateral":      {**result.fit_lateral["params"]},
         "longitudinal": {**result.fit_longitudinal["params"]},
         "_source":       "virtual_bench (AC forward model → MF5.2 pure-slip fit)",
@@ -798,7 +802,8 @@ def build_svj_mf62_block(result: BenchResult) -> dict:
     Key path in the SVJ: tires.sets.<name>.pacejka  (schema-standard key)
 
     Extra params beyond MF52 are derived from the AC forward-model parameters:
-      pVy3 = −CAMBER_GAIN   (AC camber thrust → MF62 lateral vertical shift)
+      pVy3 = pKy6 = −CAMBER_GAIN   (AC camber thrust: the vertical shift, and the camber stiffness
+                                    that, being equal, cancels MF 6.2's horizontal camber shift)
       pKy4 = 2.0            (Fz-dependency of camber stiffness, standard default)
       All pressure (pPy*, pPx*), horizontal shift (pHy*, pHx*, pVx*), and
       camber-peak-D (pDy3, pDx3) terms are zero — AC uses a scalar multiplier.
@@ -824,8 +829,8 @@ def build_svj_mf62_block(result: BenchResult) -> dict:
         "pKy3":  0.0,                   # no camber effect on cornering stiffness
         "pKy4":  2.0,                   # Fz-shape of camber stiffness (standard)
         "pKy5":  0.0,
-        "pKy6":  0.0,
-        "pKy7":  0.0,
+        "pKy6":  round(-p.CAMBER_GAIN, 5),   # camber stiffness per load; equal to pVy3, so the thrust is
+        "pKy7":  0.0,                        # a plain additive shift as in AC (no horizontal shift left over)
         # ── Horizontal / vertical shifts ─────────────────────────────────────
         "pHy1":  0.0,
         "pHy2":  0.0,
@@ -878,6 +883,7 @@ def build_svj_mf62_block(result: BenchResult) -> dict:
 
     return {
         "model":       "MF62",
+        "reference_load_N": round(float(p.FZ0), 1),          # Fz0 of the coefficients (spec 11.13.1)
         "lateral":      lateral_mf62,
         "longitudinal": longitudinal_mf62,
         "combined":     combined_mf62,
@@ -889,7 +895,7 @@ def build_svj_mf62_block(result: BenchResult) -> dict:
         "_source_params": asdict(p),
         "_note": (
             "Lateral/longitudinal pure-slip coefficients fitted from synthetic sweep. "
-            "pVy3 = -CAMBER_GAIN maps AC camber thrust to MF62 vertical shift. "
+            "pVy3 = pKy6 = -CAMBER_GAIN maps AC camber thrust (ISO signs: lean right pushes the tyre right). "
             "Pressure terms (pPy*, pPx*), horizontal shifts, and pDy3/pDx3 are zero "
             "because AC uses a scalar pressure multiplier without per-coefficient sensitivity. "
             "Combined-slip coefficients are typical radial-tyre defaults, not fitted."
@@ -915,8 +921,8 @@ if __name__ == "__main__":
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("./tire_lab_out")
     out.mkdir(parents=True, exist_ok=True)
     res = run_bench(ACTyreParams())
-    (out / "longitudinal.png").write_bytes(res.longitudinal_png)
-    (out / "mu_vs_fz.png").write_bytes(res.mu_vs_fz_png)
+    (out / "longitudinal.jpg").write_bytes(res.longitudinal_png)
+    (out / "mu_vs_fz.jpg").write_bytes(res.mu_vs_fz_png)
     (out / "pacejka_fit.json").write_text(json.dumps(build_svj_pacejka_block(res), indent=2))
     print(f"lateral R2 = {res.fit_lateral['r2']:.4f}  longitudinal R2 = {res.fit_longitudinal['r2']:.4f}")
     print(f"outputs in {out}")
