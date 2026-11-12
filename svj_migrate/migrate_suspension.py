@@ -264,7 +264,7 @@ def migrate(doc):
                 wb["visual"] = wvis
             add_body(wb)
         if wc:
-            joint(f"hinge_{wheel_id}", "revolute", carrier, wheel_id, wc, [0.0, 1.0, 0.0])
+            joint(f"hinge_{wheel_id}", "revolute", carrier, wheel_id, wc, [0.0, -1.0, 0.0])   # +Z to the vehicle left (SAE -Y): positive = forward rolling (spec 24.4, v0.111)
         else:
             notes_here.append("no wheel_center hardpoint: the wheel is not connected to its carrier")
 

@@ -1115,6 +1115,11 @@ def build_corner(corner_id: str, susp_axle: dict,
     wm = susp_axle.get("unsprung_mass")
     if wm:
         corner["wheel"]["mass"] = round(wm / 2, 2)
+        # AC gives no wheel inertia; the standard needs a tensor for every body with mass (spec 7.2.3).
+        # Solid-disc estimate about the spin axis, flagged as an estimate.
+        _r = corner["wheel"].get("loaded_radius") or 0.3
+        corner["wheel"]["rotational_inertia"] = round(0.5 * corner["wheel"]["mass"] * _r ** 2, 4)
+        corner["wheel"]["_est_rotational_inertia"] = True
     if susp_axle.get("tyre_offset"):
         corner["static_setup"]["track_offset"] = susp_axle["tyre_offset"]
     return corner

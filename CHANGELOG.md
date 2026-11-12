@@ -15,6 +15,10 @@ All notable changes are documented here.
 - Vendored from the standard: `svj_migrate/frame.py`, `tiremodel.py`, `mesh_check.py`, updated `migrate_suspension.py`.
 - `svj_to_ac` normalises either frame to SAE when loading, so ISO and SAE files give identical AC output
   (`svj_to_ac/tests/test_frames.py`).
+- Checked against the standard at v0.111 (reference pose, spring law, steering wheel checks): our files pass its validator once the
+  version is read as 0.111, after two fixes. The wheel hinge axis now points to the vehicle left, so a positive coordinate is
+  forward rolling (spec 24.4); wheels carry an estimated spin inertia (solid disc, flagged `_est_rotational_inertia`) because every
+  body with mass needs a tensor. Files are still stamped 0.109; vendored `frame.py` updated for the `column_axis` key.
 - Checked in the standard's viewer (v4.8): Sera and Murcielago in ISO load upright with wheels, axles and CG aligned to
   the mesh; the SAE variant of the same car loads to the same result.
 

@@ -143,7 +143,7 @@ def expand_suspension(doc):
             inertia = {"Ixx": spin / 2, "Iyy": spin, "Izz": spin / 2, "Ixy": 0.0, "Ixz": 0.0, "Iyz": 0.0} if isinstance(spin, (int, float)) else None
             add_body({"id": wid, "name": f"Wheel {st}", "category": "structural", "mass": wh.get("mass", 0.0), "position": wc,
                       **({"inertia": inertia} if inertia else {}), "x_derived": True})
-            add_joint(f"hinge_{wid}", "revolute", carrier_id, wid, wc, [0.0, 1.0, 0.0])
+            add_joint(f"hinge_{wid}", "revolute", carrier_id, wid, wc, [0.0, -1.0, 0.0])   # +Z to the vehicle left (SAE -Y): positive = forward rolling (spec 24.4)
             if inertia:
                 notes.append(f"{st}: the wheel tensor is a disc approximation of its spin inertia (Iyy = rotational_inertia, Ixx = Izz = half)")
 
