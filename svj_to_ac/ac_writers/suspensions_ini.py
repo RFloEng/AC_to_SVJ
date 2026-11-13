@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from coords import svj_to_ac_point
+import wheel_rates
 from svj_loader import SvjDoc
 
 from . import (
@@ -225,7 +226,7 @@ def _canonical_scalar_default(doc: SvjDoc, axle: str, key: str, ctx: AxleContext
         return _mean([float(a["bar_rate"]) for a in _corner_blocks(doc, axle, "arb")
                       if a.get("bar_rate") is not None])
     if key == "SPRING_RATE":
-        return _mean([float(sp["rate"]) for sp in springs if sp.get("rate") is not None])
+        return _mean([k for k in (wheel_rates.legacy_spring_wheel_rate(sp)[0] for sp in springs) if k])
     if key == "ROD_LENGTH":
         return _mean([float(sp["rod_length"]) for sp in springs if sp.get("rod_length")])
     if key == "PROGRESSIVE_SPRING_RATE":

@@ -60,12 +60,13 @@ class ConversionResult:
 # --------------------------------------------------------------------------- #
 
 
-def convert_one(svj_path: str | Path, out_dir: Path) -> ConversionResult:
+def convert_one(svj_path: str | Path, out_dir: Path, include_mesh: bool = True) -> ConversionResult:
     """Convert a single SVJ -> AC content folder + zip.
 
     All paths are normalised through :class:`pathlib.Path` before use.
     Returns a :class:`ConversionResult` regardless of success; on
     failure ``zip_path`` is ``None`` and ``log`` carries the traceback.
+    ``include_mesh``: write ``<model>.kn5`` from the glTF / USD mesh next to the SVJ file.
     """
     log = io.StringIO()
     src = Path(svj_path)
@@ -82,7 +83,7 @@ def convert_one(svj_path: str | Path, out_dir: Path) -> ConversionResult:
 
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        zip_path = pack_car.convert(doc, out_dir)
+        zip_path = pack_car.convert(doc, out_dir, include_mesh=include_mesh)
         log.write(f"OK: wrote {zip_path.name} ({zip_path.stat().st_size} bytes)\n")
     except Exception as exc:  # noqa: BLE001 (we want UI to surface anything)
         log.write("FAIL:\n" + traceback.format_exc())
@@ -103,7 +104,7 @@ def convert_one(svj_path: str | Path, out_dir: Path) -> ConversionResult:
     )
 
 
-def convert_batch(folder: str | Path, out_dir: Path) -> ConversionResult:
+def convert_batch(folder: str | Path, out_dir: Path, include_mesh: bool = True) -> ConversionResult:
     """Convert every ``*.svj.json`` under ``folder`` into one combined zip.
 
     Output filename is
@@ -132,7 +133,7 @@ def convert_batch(folder: str | Path, out_dir: Path) -> ConversionResult:
         log.write(f"--- {path.relative_to(src)} ---\n")
         per_car_dir = batch_root / path.stem
         per_car_dir.mkdir(parents=True, exist_ok=True)
-        result = convert_one(path, per_car_dir)
+        result = convert_one(path, per_car_dir, include_mesh=include_mesh)
         log.write(result.log)
         row = {"input": str(path.relative_to(src)), "success": result.success}
         row.update(result.summary)
@@ -235,11 +236,12 @@ def build_ui():  # type: ignore[no-untyped-def]
     with gr.Blocks(title=APP_TITLE) as ui:
         gr.Markdown(f"# {APP_TITLE}")
         gr.Markdown(
-            "Inverse of AC_to_SVJ. Drop an SVJ v0.95 file (or a folder of "
+            "Inverse of AC_to_SVJ. Drop an SVJ file (v0.95 to v0.111) (or a folder of "
             "them) and get a Content Manager-ready car zip back."
         )
 
         with gr.Tab("1 - Upload SVJ"):
+            gr.Markdown("A single uploaded file has no mesh next to it, so no 3D model is written: use tab 2 or 3 for that.")
             upload_file = gr.File(label="SVJ file (.svj.json)", file_types=[".json"])
             upload_btn = gr.Button("Convert", variant="primary")
             upload_log = gr.Textbox(label="Log", lines=10, interactive=False)
@@ -249,7 +251,7 @@ def build_ui():  # type: ignore[no-untyped-def]
                 if uploaded is None:
                     return "Drop an .svj.json file first.", None
                 with tempfile.TemporaryDirectory() as td:
-                    result = convert_one(uploaded.name, Path(td))
+                    result = convert_one(uploaded.name, Path(td), include_mesh=False)
                     if result.zip_path:
                         # Copy out of the tmpdir so Gradio can serve it.
                         persistent = Path(tempfile.mkdtemp()) / result.zip_path.name
@@ -261,41 +263,43 @@ def build_ui():  # type: ignore[no-untyped-def]
 
         with gr.Tab("2 - Single SVJ (path)"):
             single_path = gr.Textbox(label="Path to .svj.json on disk")
+            single_mesh = gr.Checkbox(value=True, label="Write the 3D model (car.kn5) from the glTF / USD mesh next to the SVJ")
             single_btn = gr.Button("Convert", variant="primary")
             single_log = gr.Textbox(label="Log", lines=10, interactive=False)
             single_zip = gr.File(label="Download AC zip", interactive=False)
 
-            def _on_single(path_str):  # noqa: ANN001
+            def _on_single(path_str, mesh):  # noqa: ANN001
                 if not path_str:
                     return "Type a path first.", None
                 with tempfile.TemporaryDirectory() as td:
-                    result = convert_one(path_str, Path(td))
+                    result = convert_one(path_str, Path(td), include_mesh=bool(mesh))
                     if result.zip_path:
                         persistent = Path(tempfile.mkdtemp()) / result.zip_path.name
                         persistent.write_bytes(result.zip_path.read_bytes())
                         return result.log, str(persistent)
                     return result.log, None
 
-            single_btn.click(_on_single, inputs=[single_path], outputs=[single_log, single_zip])
+            single_btn.click(_on_single, inputs=[single_path, single_mesh], outputs=[single_log, single_zip])
 
         with gr.Tab("3 - Batch SVJ folder"):
             batch_folder = gr.Textbox(label="Folder containing .svj.json files")
+            batch_mesh = gr.Checkbox(value=True, label="Write the 3D model (car.kn5) of each car from its glTF / USD mesh")
             batch_btn = gr.Button("Convert all", variant="primary")
             batch_log = gr.Textbox(label="Log", lines=14, interactive=False)
             batch_zip = gr.File(label="Download batch zip", interactive=False)
 
-            def _on_batch(folder_str):  # noqa: ANN001
+            def _on_batch(folder_str, mesh):  # noqa: ANN001
                 if not folder_str:
                     return "Type a folder path first.", None
                 with tempfile.TemporaryDirectory() as td:
-                    result = convert_batch(folder_str, Path(td))
+                    result = convert_batch(folder_str, Path(td), include_mesh=bool(mesh))
                     if result.zip_path:
                         persistent = Path(tempfile.mkdtemp()) / result.zip_path.name
                         persistent.write_bytes(result.zip_path.read_bytes())
                         return result.log, str(persistent)
                     return result.log, None
 
-            batch_btn.click(_on_batch, inputs=[batch_folder], outputs=[batch_log, batch_zip])
+            batch_btn.click(_on_batch, inputs=[batch_folder, batch_mesh], outputs=[batch_log, batch_zip])
 
         with gr.Tab("4 - FBX Lab"):
             gr.Markdown(

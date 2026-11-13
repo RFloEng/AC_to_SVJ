@@ -28,6 +28,8 @@ import copy
 import re
 from typing import Any
 
+import wheel_rates as wr
+
 CORNERS = ("FL", "FR", "RL", "RR")
 _SIDE = re.compile(r"_(fl|fr|rl|rr|a\d+[lrc]|[lr])(_\w+)?$")
 
@@ -75,6 +77,9 @@ class _Doc:
         self.elements = [c for c in data.get("constraints", [])
                          if c.get("type") in ("spring", "damper")]
         self.root_names = {"chassis", "ground"}
+        self.data = data
+        self.stations = data.get("wheel_stations") or []
+        self.other_uprights = {x for st in self.stations for x in (st.get("upright_body"), st.get("wheel_body"))}
 
     def marker(self, body: str, name: str):
         mk = (self.chassis_markers if body == "chassis"
@@ -180,17 +185,40 @@ def _station_corner(doc: _Doc, st: dict, notes: list) -> dict | None:
     return corner
 
 
-_AUX = ("bump_stop", "rebound_stop", "helper", "packer")
+def _reach(doc: _Doc, up: str, wheel_body, depth: int = 3) -> set:
+    """Bodies that move with one wheel's suspension: joined to the upright, to those, and so on, up to
+    ``depth`` joints; the chassis, the wheel and any other station's upright or wheel are borders."""
+    seen, frontier = {up}, {up}
+    stop = doc.root_names | {wheel_body} | (doc.other_uprights - {up})
+    for _ in range(depth):
+        nxt = set()
+        for j in doc.joints:
+            a, b = j.get("body_a"), j.get("body_b")
+            for x, y in ((a, b), (b, a)):
+                if x in frontier and y not in seen and y not in stop and y in doc.bodies:
+                    nxt.add(y)
+        seen |= nxt
+        frontier = nxt
+    return seen
 
 
-def _wheel_side(doc: _Doc, up: str, kind: str):
-    """The main spring / damper element on an upright: not a stop, helper spring or packer;
-    the one with a rate (spring) or a curve (damper) first."""
-    cands = [e for e in doc.elements
-             if e.get("type") == kind and up in (e.get("body_a"), e.get("body_b"))
-             and not str(e.get("id", "")).startswith(_AUX)]
-    key = "rate" if kind == "spring" else "bump_curve"
-    return next((e for e in cands if e.get(key)), cands[0] if cands else None)
+def _station_elements(doc: _Doc, st: dict, kind: str, main_only: bool = True) -> list:
+    """The spring / damper elements of one wheel: one end on a body that moves with it, the other on the
+    chassis or on another such body.  Stops, helper springs and packers are left out of ``main_only``."""
+    up = st["upright_body"]
+    moving = _reach(doc, up, st.get("wheel_body"))
+    out = []
+    for e in doc.elements:
+        if e.get("type") != kind:
+            continue
+        a, b = e.get("body_a"), e.get("body_b")
+        if not ((a in moving or b in moving) and (a in moving or a in doc.root_names)
+                and (b in moving or b in doc.root_names)):
+            continue
+        if main_only and wr.is_auxiliary(e):
+            continue
+        out.append(e)
+    return out
 
 
 def _length(e: dict, doc: _Doc | None = None) -> float | None:
@@ -200,39 +228,59 @@ def _length(e: dict, doc: _Doc | None = None) -> float | None:
     return None
 
 
-def _motion_ratio(e: dict, doc: _Doc | None = None, strut: bool = False) -> tuple:
-    """(motion ratio, guessed): element travel / wheel travel.  An element converted from a
-    value quoted at the wheel carries the ratio it was converted with; a strut's is the
-    vertical share of its axis; anything else is taken as 1."""
+def _motion_ratio(e: dict, doc: _Doc, st: dict, strut: bool, wc=None) -> tuple[float | None, str]:
+    """Motion ratio of one element: ``(value, source)``; the value is None when nothing could be found.
+    A ratio the file gives wins, then the loop solver (the spec's estimate, 25.8), then a strut's vertical
+    share of its axis."""
     conv = e.get("x_converted_from_wheel_rate") or {}
     if isinstance(conv.get("motion_ratio"), (int, float)) and conv["motion_ratio"] > 0:
-        return float(conv["motion_ratio"]), False
+        return float(conv["motion_ratio"]), "file"
     if e.get("reference") == "wheel":
-        return 1.0, False
+        return 1.0, "wheel"
     mr = e.get("motion_ratio")
     if isinstance(mr, (int, float)) and mr > 0:
-        return float(mr), False
-    if strut and doc is not None:
+        return float(mr), "file"
+    if e.get("kind") == "torsional":
+        a = doc.frame(e, "a")
+        axis = _z_axis((e.get("frame_a") or {}).get("orientation"))
+        if a and wc:
+            from svj_migrate.frame import frame_of
+            up = [0.0, 0.0, 1.0 if frame_of(doc.data) == "ISO_8855" else -1.0]
+            v = wr.torsional_motion_ratio(a, axis, wc, up)
+            if v:
+                return v, "torsion"
+        return None, "none"
+    v = wr.geometric_motion_ratio(doc.data, st.get("id"), e.get("id"))
+    if v:
+        return v, "solver"
+    if strut:
         a, b = doc.frame(e, "a"), doc.frame(e, "b")
         n = _length(e, doc)
         if a and b and n and n > 0.05:
-            return max(0.4, min(1.0, abs(b[2] - a[2]) / n)), True
-    return 1.0, True
+            return max(0.4, min(1.0, abs(b[2] - a[2]) / n)), "strut"
+    return None, "none"
 
 
-def _stops(doc: _Doc, up: str, mr: float = 1.0) -> dict:
-    """Bump and rebound stops of a corner, as AC states them: {"up": travel at which the
-    bump stop engages, "down": the rebound stop's, "rate": N/m}.  An engagement travel is the
-    element's length at the reference pose against the free length of the stop, at the wheel."""
+def _stops(doc: _Doc, st: dict, strut: bool, notes: list) -> dict:
+    """Bump and rebound stops of a corner, as AC states them: {"up": travel at which the bump stop engages,
+    "down": the rebound stop's, "rate": N/m}, at the wheel."""
     out: dict = {}
-    for e in doc.elements:
-        eid = str(e.get("id", ""))
-        kind = "up" if eid.startswith("bump_stop") else "down" if eid.startswith("rebound_stop") else None
-        if kind is None or up not in (e.get("body_a"), e.get("body_b")):
+    for e in _station_elements(doc, st, "spring", main_only=False):
+        eid = str(e.get("id", "")).lower()
+        if not wr.is_auxiliary(e) or eid.startswith(("helper", "packer")):
             continue
-        free, ref = e.get("free_length"), _length(e, doc)
-        if isinstance(free, (int, float)) and ref is not None:
-            gap = (ref - free) if kind == "up" else (free - ref)
+        mr, _ = _motion_ratio(e, doc, st, strut)
+        mr = mr or 1.0
+        length = _length(e, doc)
+        kind = "up" if eid.startswith("bump_stop") else "down" if eid.startswith("rebound_stop") else None
+        if kind is None:                                # one element that is both stops (a force-length curve)
+            got = wr.stop_from_curve(e.get("rate_curve"), length, mr)
+            for k, v in (got or {}).items():
+                out.setdefault(k, v)
+            continue
+        free = e.get("free_length")
+        if isinstance(free, (int, float)) and length is not None:
+            gap = (length - free) if kind == "up" else (free - length)
             out[kind] = round(max(gap, 0.0) / mr, 5)
         pts = [p for p in (e.get("rate_curve") or []) if abs(p[0]) > 1e-9 and p[1]]
         if pts and "rate" not in out:
@@ -262,33 +310,44 @@ def normalize(data: dict) -> tuple[dict, list]:
         if corner is None:
             continue
         up = st["upright_body"]
-        sp, dp = _wheel_side(doc, up, "spring"), _wheel_side(doc, up, "damper")
         strut = str(st.get("topology_hint") or "") == "macpherson"
-        mr_s = _motion_ratio(sp, doc, strut)[0] if sp else 1.0
-        stops = _stops(doc, up, mr_s)
-        if sp:
-            mr, guessed = _motion_ratio(sp, doc, strut)
-            conv = sp.get("x_converted_from_wheel_rate") or {}
-            rate = conv.get("wheel_rate") or (sp.get("rate") or 0.0) * mr * mr
-            corner["spring"] = {"rate": rate, **({"rod_length": sp["rod_length"]}
-                                                  if "rod_length" in sp else {})}
-            if guessed:
-                notes.append(f"{key}: spring {sp.get('id')} is referenced to the element and "
-                             "has no motion ratio: its rate is used as the wheel rate")
-        if dp:
-            mr, _ = _motion_ratio(dp, doc, strut)
-            d: dict = {}
-            for name in ("bump_curve", "rebound_curve"):
-                if dp.get(name):                        # element -> wheel: v / MR, F * MR
-                    d[name] = [[v / mr, f * mr] for v, f in dp[name]]
+        wc = ((corner.get("topology") or {}).get("upright") or {}).get("hardpoints", {}).get("wheel_center")
+        stops = _stops(doc, st, strut, notes)
+        total, used = 0.0, []
+        for sp in _station_elements(doc, st, "spring"):
+            mr, src = _motion_ratio(sp, doc, st, strut, wc)
+            if src in ("solver", "strut", "torsion"):
+                notes.append(f"{key}: {sp.get('id')} motion ratio {mr:.3f} " + {
+                    "solver": "measured on the mechanism with the loop solver",
+                    "strut": "estimated from the strut's inclination",
+                    "torsion": "from the torsion bar's lever"}[src])
+            k, nn = wr.spring_wheel_rate(sp, mr=mr, length=_length(sp, doc))
+            notes.extend(f"{key}: {n}" for n in nn)
+            if k:
+                total += k
+                used.append(sp)
+        if used:
+            corner["spring"] = {"rate": round(total, 3),
+                                **({"rod_length": used[0]["rod_length"]} if "rod_length" in used[0] else {})}
+            if len(used) > 1:
+                notes.append(f"{key}: {len(used)} springs in parallel on the wheel: their wheel rates are added")
+        dampers = _station_elements(doc, st, "damper")
+        if dampers:
+            mr, _ = _motion_ratio(dampers[0], doc, st, strut, wc)
+            curves, nn = wr.damper_wheel_curves(dampers[0], mr)
+            notes.extend(f"{key}: {n}" for n in nn)
+            d: dict = dict(curves)
             if stops:
                 d["bumpstops"] = stops
             corner["damper"] = d
-        if stops and "damper" not in corner:
+        elif stops:
             corner["damper"] = {"bumpstops": stops}
         bar = arb_by_station.get(st.get("id"))
-        if bar and bar.get("bar_rate"):
-            corner["arb"] = {"bar_rate": bar["bar_rate"]}
+        if bar:
+            rate, nn = wr.arb_wheel_rate(bar, ac_origin="x_assettocorsa" in data)
+            notes.extend(nn)
+            if rate:
+                corner["arb"] = {"bar_rate": round(rate, 3)}
         susp[key] = corner
     out = dict(data)
     out["suspension"] = susp

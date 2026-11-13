@@ -4,6 +4,25 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### SVJ -> AC: current SVJ, other simulators' springs, 3D models
+
+- `svj_to_ac` reads SVJ 0.95 to 0.111 (the version warning is only for files newer than 0.111).
+- Springs, dampers and anti-roll bars of other simulators are brought to AC's wheel-level values (`svj_to_ac/wheel_rates.py`):
+  a wheel-referenced rate as it is; an element rate times MR squared, with MR the file's own `motion_ratio`, else measured with the
+  standard's loop-closure solver (vendored as `svj_migrate/loop_solver.py`; on the RBR files it reproduces the ratio their own files
+  state), else a strut's vertical share; torsion bars through the lever of the bar; force-length curves through their slope at the
+  reference pose; springs in parallel on a wheel are added, helper springs, stops and packers are not the main spring; a damper's scalar
+  `damping` becomes a bump and rebound curve; bars use `wheel_rate_equiv`, else `bar_rate` over a lever squared (a `bar_rate` too stiff to
+  be N*m/rad is read as a wheel rate). Stops given as one force-length curve give both gaps.
+- 3D models: `car.kn5` is written from the mesh the SVJ points at (`assets.meshes`: glTF / GLB or OpenUSD / USDZ, `mesh_scene.py`,
+  `kn5_writer.py`), with a default skin. Parts named `SVJ::wheel::wheel_fl`, `SVJ::brake::disc_fl`, `SVJ::steering::wheel` become `WHEEL_LF`,
+  `DISC_LF`, `STEER_HR`; materials become `ksPerPixel`, `ksPerPixelNM`, `ksPerPixelAT` or `ksPerPixelAlpha` with the specular power from the
+  roughness. The placement is the exact inverse of the KN5 reader (same bounds after going back through it; wheel x equals the original
+  Murcielago's). Written for each of AMS2, Project CARS 1 and 2, RBR, Race 07, Chrono and AC cars; not tried in the game itself.
+  New option "Write the 3D model" in the single and batch tabs; a file uploaded on its own has no mesh beside it.
+- The forward converter now writes an AC anti-roll bar as `wheel_rate_equiv` (N/m at the wheel, the spec's field) and declares its damper
+  curves as wheel-level, so a round trip through SVJ gives AC the values it started with.
+
 ### SVJ 0.109: ISO 8855 axes (X forward, Y left, Z up)
 
 - `converter.py` writes ISO 8855 by default (`frame="ISO_8855"` parameter; `"SAE_J670"` still available). The model is

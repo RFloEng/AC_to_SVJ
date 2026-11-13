@@ -41,6 +41,7 @@ zip (pitfalls doc §"Reproducible zips").
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import zipfile
 from dataclasses import dataclass
@@ -100,13 +101,16 @@ def model_id(doc: SvjDoc) -> str:
 
 
 def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None,
-             model_name: str | None = None, donor_car: Path | None = None) -> AssembleResult:
+             model_name: str | None = None, donor_car: Path | None = None,
+             include_mesh: bool = True) -> AssembleResult:
     """Write the full ``content/cars/<model>/`` tree under ``base_dir``.
 
     ``base_dir`` is the parent of the eventual ``content/`` directory.
     ``model_name`` is the folder name (default: from the file); ``donor_car`` is the folder of an
     installed AC car whose 3D model (`*.kn5`, skins, textures, animations) is copied in, so the car
     can be driven before it has a model of its own: the physics are the SVJ's, the looks the donor's.
+    ``include_mesh`` writes ``<model>.kn5`` from the glTF/GLB or USD/USDZ mesh the SVJ points at
+    (``assets.meshes``), with a default skin, unless a ``donor_car`` supplies the model.
     ``tyre_choice`` takes the tyres from cars of an installed AC (see
     :func:`ac_writers.tyres_ini.write`) instead of fitting them.
     Returns an :class:`AssembleResult` enumerating every file written
@@ -156,6 +160,9 @@ def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None,
         _note_to_log(car_dir, f"3D model borrowed from the installed car {Path(donor_car).name}: "
                               "the physics are this SVJ's, the looks and the wheel positions are not")
 
+    elif include_mesh:
+        files.extend(write_mesh(doc, car_dir, name))
+
     if doc.notes:                              # what the loader filled in or found odd
         log = car_dir / "conversion_log.txt"
         with log.open("a", encoding="utf-8") as f:
@@ -169,6 +176,72 @@ def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None,
         sfx_dir=sfx_dir,
         files=tuple(sorted({f.resolve() for f in files})),
     )
+
+
+_MESH_EXT = (".glb", ".gltf", ".usd", ".usda", ".usdc", ".usdz")
+
+
+def _mesh_candidates(doc: SvjDoc) -> list[Path]:
+    """Mesh files the SVJ points at (``assets.meshes[].uri``, then ``preview``), the one the chassis is
+    bound to first; only files that exist next to the SVJ file."""
+    base = doc.source_path.parent if doc.source_path else Path.cwd()
+    meshes = ((doc.raw.get("assets") or {}).get("meshes") or [])
+    bound = {b.get("visual", {}).get("mesh_ref") for b in (doc.raw.get("chassis") or {}).get("mass_bodies", [])
+             if isinstance(b, dict) and b.get("visual")}
+    meshes = sorted((m for m in meshes if isinstance(m, dict)), key=lambda m: 0 if m.get("id") in bound else 1)
+    out: list[Path] = []
+    for m in meshes:
+        for key in ("uri", "preview"):
+            u = m.get(key)
+            if isinstance(u, str) and u.lower().endswith(_MESH_EXT) and not u.startswith(("http:", "https:", "data:")):
+                p = (base / u)
+                if p.is_file() and p not in out:
+                    out.append(p)
+    return out
+
+
+def write_mesh(doc: SvjDoc, car_dir: Path, name: str) -> list[Path]:
+    """``<name>.kn5`` and ``skins/default`` from the SVJ's mesh asset; nothing (and a note in the log)
+    when there is none or it cannot be read."""
+    import mesh_scene
+    import kn5_writer
+
+    cands = _mesh_candidates(doc)
+    if not cands:
+        if (doc.raw.get("assets") or {}).get("meshes"):
+            _note_to_log(car_dir, "the SVJ lists a mesh but no glTF / USD file was found next to it: no 3D model written", "mesh")
+        return []
+    cg = doc.chassis.center_of_gravity
+    if not (cg and len(cg) == 3):
+        _note_to_log(car_dir, "no centre of gravity in the SVJ: the mesh cannot be placed, no 3D model written", "mesh")
+        return []
+    h_cg, d_f = -float(cg[2]), -float(cg[0])             # the loader's frame: SAE, origin under the front axle
+    last_err = None
+    for path in cands:
+        try:
+            scene = mesh_scene.load_scene(path)
+            data, rep = kn5_writer.build_kn5(scene, name, h_cg, d_f)
+        except Exception as exc:                          # a bad file: try the next candidate
+            last_err = f"{path.name}: {type(exc).__name__}: {exc}"
+            continue
+        kn5 = car_dir / f"{name}.kn5"
+        kn5.write_bytes(data)
+        files = [kn5]
+        skin = car_dir / "skins" / "default"
+        skin.mkdir(parents=True, exist_ok=True)
+        files.append(_copy_placeholder(PREVIEW_PLACEHOLDER, skin / "preview.jpg"))
+        ui_skin = skin / "ui_skin.json"
+        ui_skin.write_text(json.dumps({"skinname": "default", "drivername": "", "country": "", "team": "",
+                                       "number": "0", "priority": 1}, indent=2) + chr(10),
+                           encoding="utf-8", newline=chr(10))
+        files.append(ui_skin)
+        _note_to_log(car_dir, f"3D model from {path.name}: {rep.meshes} meshes, {rep.triangles} triangles, "
+                              f"{rep.materials} materials, {rep.textures} textures; wheels {', '.join(rep.wheels) or 'none'}", "mesh")
+        for n in rep.notes:
+            _note_to_log(car_dir, n, "mesh")
+        return files
+    _note_to_log(car_dir, f"no 3D model written: {last_err}", "mesh")
+    return []
 
 
 _DONOR_SKIP = {"data", "data.acd", "ui", "unencrypted", "extension", "_setup", "setups",
@@ -194,9 +267,9 @@ def copy_donor_model(donor: Path, car_dir: Path) -> list[Path]:
     return copied
 
 
-def _note_to_log(car_dir: Path, text: str) -> None:
+def _note_to_log(car_dir: Path, text: str, tag: str = "donor") -> None:
     with (car_dir / "conversion_log.txt").open("a", encoding="utf-8") as f:
-        f.write(f"NOTE [donor]: {text}" + chr(10))
+        f.write(f"NOTE [{tag}]: {text}" + chr(10))
 
 
 def zip_folder(
@@ -233,11 +306,11 @@ def zip_folder(
     return out_zip
 
 
-def convert(doc: SvjDoc, out_dir: Path, *, zip_name: str | None = None) -> Path:
+def convert(doc: SvjDoc, out_dir: Path, *, zip_name: str | None = None, include_mesh: bool = True) -> Path:
     """High-level wrapper: assemble + zip in one call. Returns the zip path."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    result = assemble(doc, out_dir)
+    result = assemble(doc, out_dir, include_mesh=include_mesh)
     name = zip_name or f"{model_id(doc)}.zip"
     return zip_folder(result.car_dir, out_dir / name, arcname_base=model_id(doc))
 

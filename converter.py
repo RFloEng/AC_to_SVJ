@@ -937,6 +937,8 @@ def build_corner(corner_id: str, susp_axle: dict,
         "rebound_curve":  _reb_c,
         "motion_ratio":   strut_mr or 1.0,
         "axis":           "strut" if strut_mr else "vertical",
+        # AC damps at the wheel: with no strut conversion the curves are wheel-level and say so (spec 9.4)
+        **({} if strut_mr else {"reference": "wheel"}),
         "inboard_mount":  spring_inboard,
         "outboard_mount": spring_outboard,
         "_est":           True,
@@ -1022,6 +1024,8 @@ def build_corner(corner_id: str, susp_axle: dict,
     _arb = {"bar_id": "arb_front" if is_front else "arb_rear",
             "bar_rate": round(arb_k, 1)}
     if susp_axle.get("arb_rate"):
+        # AC's value is N/m at the wheel: the spec's field for that is wheel_rate_equiv (bar_rate is N*m/rad)
+        _arb["wheel_rate_equiv"] = round(arb_k, 1)
         _arb["_note"] = ("Stiffness as written in the [ARB] section of suspensions.ini "
                          "(AC / CSP document it in N/m); not converted to Nm/rad")
         if susp_axle.get("arb_motion_ratio"):

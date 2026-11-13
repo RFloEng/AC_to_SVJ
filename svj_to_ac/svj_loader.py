@@ -1,7 +1,7 @@
-"""SVJ v0.95 JSON loader and schema validation.
+"""SVJ JSON loader (spec 0.95 to 0.111) and soft validation.
 
 Loads a Standard Vehicle JSON (SAE J670 axes, SI units) into a typed
-``SvjDoc`` tree and validates the contents against the v0.95 schema. The
+``SvjDoc`` tree and validates the contents against what the AC writers need. The
 public API is:
 
 * :func:`load`     -- read a file, raise on missing required sections.
@@ -46,7 +46,7 @@ FILLED_SECTIONS: tuple[tuple[str, dict, str], ...] = (
     ("brakes", {}, "no brakes: generic brakes"),
 )
 OPTIONAL_SECTIONS: tuple[str, ...] = ("_metadata", "aerodynamics", "x_assettocorsa")
-SUPPORTED_VERSION = "0.95"
+SUPPORTED_VERSION = "0.111"   # newest SVJ spec this loader knows; older files (0.95 ..) load too
 EXPECTED_COORDS = "SAE_J670"
 EXPECTED_UNITS = "SI"
 CORNERS: tuple[str, ...] = ("FL", "FR", "RL", "RR")
@@ -303,16 +303,24 @@ def _plausibility(data: dict[str, Any]) -> list[str]:
     return out
 
 
+def _vkey(v: str) -> tuple:
+    """Sort key of a spec version: the parts are integers ("0.95" < "0.100" < "0.111")."""
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except ValueError:
+        return (0,)
+
+
 def validate(doc: SvjDoc) -> list[SvjError]:
     """Soft validation. Returns a list of findings (empty = clean)."""
     errors: list[SvjError] = []
 
     if doc.metadata is not None:
-        if doc.metadata.version and doc.metadata.version != SUPPORTED_VERSION:
+        if doc.metadata.version and _vkey(doc.metadata.version) > _vkey(SUPPORTED_VERSION):
             errors.append(
                 SvjError(
                     "_metadata.version",
-                    f"unexpected SVJ version {doc.metadata.version!r} (loader targets {SUPPORTED_VERSION!r})",
+                    f"SVJ version {doc.metadata.version!r} is newer than this loader knows ({SUPPORTED_VERSION!r}): new fields are ignored",
                     "warning",
                 )
             )
