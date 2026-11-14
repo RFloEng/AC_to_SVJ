@@ -7,8 +7,8 @@
 > **Repository:** https://github.com/RFloEng/AC_to_SVJ
 
 Converts **Assetto Corsa** car data into the
-[SVJ v0.97 standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
-— SAE J670 axes, SI units — runs a virtual Pacejka MF 6.2 bench on every
+[SVJ standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
+(v0.109 and later: ISO 8855 axes, SI units; SAE J670 files are still read) — runs a virtual Pacejka MF 6.2 bench on every
 tyre section, and exports all KN5 mesh LODs as OpenUSD (`.usdz`, SVJ 0.105, with the movement of doors and wipers and
 the textures; needs `usd-core`), optionally with a glTF preview, or as plain `.glb`.
 
@@ -23,11 +23,16 @@ Opens a native desktop window. No browser required.
 
 ## SVJ → AC (`svj_to_ac/`)
 
-The inverse converter lives in [`svj_to_ac/`](svj_to_ac/README.md): it takes an SVJ file and
-writes an Assetto Corsa `content/cars/<model>/` folder (`data/*.ini`, `power.lut`, `ui`),
-plus an FBX skeleton for KsEditor. It reads SVJ 0.100+ unified suspensions
-(`svj_to_ac/unified_view.py`) as well as the older corner blocks. Its tests run with
-`cd svj_to_ac && python -m pytest` and `python svj_to_ac/smoke_test.py`.
+The inverse converter lives in [`svj_to_ac/`](svj_to_ac/README.md): it takes an SVJ file
+(v0.95 to v0.111, ISO 8855 or SAE J670 axes) and writes an Assetto Corsa `content/cars/<model>/`
+folder (`data/*.ini`, `power.lut`, `ui`, and `<model>.kn5` with a default skin built from the
+glTF / GLB or OpenUSD / USDZ mesh the SVJ points at), plus an optional FBX skeleton for KsEditor.
+It reads the unified suspension of SVJ 0.100+ (`svj_to_ac/unified_view.py`) and the older corner
+blocks, and brings the springs, dampers and anti-roll bars that other simulators define at the
+element, as torsion bars or as force-length curves to AC's wheel-level values
+(`svj_to_ac/wheel_rates.py`). It has been run on cars from Automobilista 2, Project CARS 1 and 2,
+RBR, Race 07, Chrono and AC. The KN5 has not been tried in the game itself. Its tests run with
+`python -m pytest svj_to_ac` from this folder, and `python svj_to_ac/smoke_test.py`.
 
 ## Desktop GUI
 
@@ -277,8 +282,12 @@ part of the Pacejka model the SVJ carries.
 
 ## Coordinate system
 
-AC uses `(X-right, Y-up, Z-forward)`. SVJ / SAE J670 uses
-`(X-forward, Y-right, Z-down)`. Transform: `svj = (ac.z, ac.x, -ac.y)`.
+AC uses `(X-right, Y-up, Z-forward)`. The converter writes SVJ 0.109 files in **ISO 8855**
+(`X` forward, `Y` left, `Z` up, `_metadata.physics_frame: "ISO_8855"`): the model is built in SAE J670
+`(X-forward, Y-right, Z-down)`, `svj = (ac.z, ac.x, -ac.y)`, and converted at the end with the
+standard's rule (`[x, -y, -z]`, quaternions left-multiplied by `(1, 0, 0, 0)`, `Ixy`/`Ixz` negated).
+`converter.build_svj(..., frame="SAE_J670")` still writes the old frame. Tyre sets carry
+`pacejka.axis_system` and `reference_load_N`, so the standard's MF 6.2 evaluator runs them.
 
 All suspension pickup keys (`WBCAR_*`, `WBTYRE_*`, `LINK_*_CAR`,
 `PANHARD_CAR`, `WATTS_CAR`, `STRUT_CAR/TYRE`, `TRAIL_CAR`, `SEMI_TRAIL_CAR`)
@@ -305,10 +314,13 @@ Vertical shift: `chassis_z_offset = −rolling_radius`.
 | `gui.py` | Standalone desktop GUI (tkinter) — main entry point |
 | `converter.py` | SVJ assembly engine — pure conversion logic |
 | `kn5_reader.py` | KN5 mesh reader → multi-LOD GLB exporter with skin embedding |
+| `svj_migrate/` | Pieces vendored from the standard (axis frames, MF 6.2 evaluator, mesh check, suspension migration, loop-closure solver) and the USD writer |
+| `svj_to_ac/` | The inverse converter: SVJ → AC folder, spring / damper / bar conversion, KN5 writer (see its README) |
 | `tire_lab.py` | AC tyre forward model + MF 5.2 / MF 6.2 fitter + plots |
 | `ac_parsers.py` | All `.ini` / `.lut` parsers |
 | `acd_reader.py` | Car-data loader (`data/` or `data.acd` detection) |
 | `smoke_test.py` | 62-check regression suite against `test_car/` |
+| `test_*.py`, `svj_to_ac/tests/` | Converter tests (141) and SVJ → AC tests (218) |
 | `test_car/` | Synthetic MX-5 ND2 with every field populated |
 | `examples/` | Reference SVJ from real Kunos data (`ks_mazda_mx5_nd`) |
 | `DEVELOPMENT.md` | Coordinate conventions, data-source map, contributor notes |
@@ -325,7 +337,7 @@ Vertical shift: `chassis_z_offset = −rolling_radius`.
 ## Third-party notices
 
 No third-party source code is bundled. Runtime Python dependencies
-(`numpy`, `scipy`, `matplotlib`, `Pillow`, `pygltflib`) are installed via
+(`numpy`, `scipy`, `matplotlib`, `Pillow`, `pygltflib`, `usd-core`) are installed via
 `pip` and are all permissively licensed. `tkinter` is part of the Python
 standard library. See `THIRD_PARTY_NOTICES.md` for full credits.
 The Pacejka MF 5.2 / MF 6.2 formulas are mathematical facts and not

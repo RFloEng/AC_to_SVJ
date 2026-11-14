@@ -5,10 +5,11 @@
 > folder up (`ac_parsers`, `tire_lab`, ...) for its tests.
 
 Inverse of [AC_to_SVJ](https://github.com/RFloEng/AC_to_SVJ). Takes an
-[SVJ v0.95 standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
--- SAE J670 axes, SI units -- and produces a complete Assetto Corsa
-`content/cars/<model>/` folder that Content Manager can install, plus an
-optional FBX skeleton that KsEditor can compile to `.kn5`.
+[SVJ standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
+(v0.95 to v0.111; ISO 8855 or SAE J670 axes, SI units) and produces a complete Assetto Corsa
+`content/cars/<model>/` folder that Content Manager can install, including `<model>.kn5` with a
+default skin when the SVJ has a glTF / GLB or OpenUSD / USDZ mesh, plus an optional FBX skeleton
+for KsEditor.
 
 ## Install
 
@@ -25,7 +26,8 @@ Opens the Gradio UI at `http://127.0.0.1:7860`.
 Manager-ready zip.
 
 **2 - Single SVJ** -- point at an SVJ file on disk; useful while
-iterating on a hand-edited fixture.
+iterating on a hand-edited fixture. The "Write the 3D model" box (on by default) writes
+`car.kn5` from the mesh next to the file; a file uploaded in tab 1 has no mesh beside it.
 
 **3 - Batch SVJ folder** -- point at a folder of `.svj.json` files,
 get a single zip named `svj_ac_batch_<YYYYMMDD>_conv0_1.zip` containing
@@ -37,7 +39,44 @@ L*W*H / tyre width), with the dummies KsEditor needs (`WHEEL_LF/RF/LR/RR`,
 `SUSP_LF/RF/LR/RR`, `COCKPIT_HR`, `STEER_HR`, `BODY` cube, four wheel
 cylinders).
 
+## Springs, dampers and bars of other simulators
+
+AC wants everything at the wheel. SVJ files from other simulators state springs differently, and
+`wheel_rates.py` brings each form to a wheel rate (and says what it assumed in the log):
+
+| In the SVJ | Becomes |
+|---|---|
+| `reference: "wheel"`, or a v0.95-0.99 `spring.rate` | used as it is |
+| element rate (`reference: "element"`) | rate x MR^2; MR is the file's `motion_ratio`, else measured with the standard's loop-closure solver (`svj_migrate/loop_solver.py`), else a strut's vertical share |
+| `kind: "torsional"` (torsion bar) | rate over (axis x lever . up)^2; v0.95 `torsional_rate` / `arm_length^2` |
+| `rate_curve` (force-length) | its slope at the reference pose |
+| several springs on a wheel | added; helper springs, stops and packers are not the main spring |
+| damper `damping` scalar | a bump and rebound curve, x MR^2 when at the element |
+| anti-roll bar | `wheel_rate_equiv`, else `bar_rate` over a lever squared (a `bar_rate` too stiff for N*m/rad is read as N/m) |
+| stop as one force-length curve | bump and rebound gaps plus the rate beyond them |
+
+## 3D model (`car.kn5`)
+
+`mesh_scene.py` reads the mesh the SVJ points at (`assets.meshes`: glTF / GLB, or OpenUSD / USDZ,
+which needs `usd-core`) into one node tree; `kn5_writer.py` writes the KN5 (version 5) from it. It is
+the inverse of the forward converter's KN5 reader: same axis flip and origin, so a car that went AC ->
+SVJ -> AC comes back where it was (checked: same bounds after reading it back, wheel positions equal
+the original). `GRAPHICS_OFFSET` is written as 0, 0, 0 and the model is placed from the SVJ's centre of
+gravity.
+
+- `SVJ::wheel::wheel_fl` becomes `WHEEL_LF` (and `RF`, `LR`, `RR`), `SVJ::brake::disc_fl` `DISC_LF`,
+  `SVJ::steering::wheel` `STEER_HR`; their origin is the wheel centre. A mesh without wheel parts gives a car
+  whose wheels do not turn (the conversion log says so).
+- Materials: `ksPerPixel`, `ksPerPixelNM` (normal map), `ksPerPixelAT` (cut-out) or `ksPerPixelAlpha`
+  (blend); specular power from the roughness, intensity from the metallic factor; a base-colour factor is
+  multiplied into the texture. Textures are embedded as PNG / JPEG / DDS as they come.
+- Not written: doors and other animations, LODs, the collider, cockpit and driver nodes.
+- Not tried in the game; the file is read back with the forward converter's reader in the tests.
+
 ## Coordinate system
+
+The loader converts an ISO 8855 file (SVJ 0.109+) to SAE J670 on load, so the writers work in one frame
+and ISO and SAE files give the same AC output.
 
 Forward (per AC_to_SVJ): `svj = (ac.z, ac.x, -ac.y)`.
 Inverse (this project): `ac = (svj.y, -svj.z, svj.x)`.
