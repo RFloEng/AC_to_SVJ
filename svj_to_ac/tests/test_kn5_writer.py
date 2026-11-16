@@ -61,27 +61,62 @@ def test_parts_are_named_for_ac_and_the_wheel_sits_at_its_centre(tmp_path) -> No
     assert np.array(top["WHEEL_LF"].matrix).reshape(4, 4)[3, :3] == pytest.approx([0.8, -0.1, 1.5], abs=1e-5)
 
 
+def _world(model, node) -> np.ndarray:
+    """The mesh node's vertices in the model's space (the chain of node matrices applied)."""
+    chain = []
+
+    def find(n, path):
+        if n is node:
+            chain.extend(path)
+            return True
+        return any(find(c, path + [n]) for c in n.children)
+    find(model.root, [])
+    P = np.array(node.positions, dtype="f8")
+    for n in reversed(chain):
+        if n.node_type == 1 and n.matrix:
+            M = np.array(n.matrix, dtype="f8").reshape(4, 4)
+            P = P @ M[:3, :3] + M[3, :3]                      # row vectors, translation in the last row
+    return P
+
+
 def test_vertices_follow_the_forward_converters_axes(tmp_path) -> None:
     sc = ms.SceneNode("root", meshes=[_quad(1.0, 2.0, 3.0, 1.0)])
     data, _ = kw.build_kn5(sc, "car", cg_height=0.0, cg_behind_front_axle=0.0)
     m = _read(tmp_path, data)
     node = m.root.children[0].children[0]
-    # kn5 = (-X, Y, -Z), the node matrix holds the (zero) shift: the quad's corners (1,2,3) .. (2,3,3)
-    got = {tuple(np.round(v, 5)) for v in node.positions}
+    # kn5 = (-X, Y, -Z): the quad's corners (1,2,3) .. (2,3,3) in the model's space
+    got = {tuple(np.round(v, 5)) for v in _world(m, node)}
     assert got == {(-1.0, 2.0, -3.0), (-2.0, 2.0, -3.0), (-2.0, 3.0, -3.0), (-1.0, 3.0, -3.0)}
-    n = node.normals[0]
-    assert abs(n[2]) == pytest.approx(1.0, abs=1e-5)                      # a quad in the XY plane
 
 
 def test_winding_is_kept(tmp_path) -> None:
     sc = ms.SceneNode("root", meshes=[_quad(size=1.0)])
     data, _ = kw.build_kn5(sc, "car", 0.0, 0.0)
-    node = _read(tmp_path, data).root.children[0].children[0]
-    a, b, c = (node.positions[i] for i in node.indices[:3])
+    m = _read(tmp_path, data)
+    node = m.root.children[0].children[0]
+    P = _world(m, node)
+    a, b, c = (P[i] for i in node.indices[:3])
     src = np.cross(np.array([1, 0, 0]), np.array([1, 1, 0]))              # +Z for the source triangle
     got = np.cross(b - a, c - a)
     # the map (-X, Y, -Z) is a rotation: the face normal is rotated with it, not mirrored
     assert got == pytest.approx(np.array([-src[0], src[1], -src[2]]), abs=1e-5)
+
+
+def test_a_part_keeps_the_forward_converters_frame(tmp_path) -> None:
+    """A wheel turns about its own X and a needle about its Z: round-tripped frames are the AC ones."""
+    D = np.diag([1.0, -1.0, -1.0])
+    L = np.diag([-1.0, 1.0, -1.0])
+    wheel = ms.SceneNode("SVJ::wheel::wheel_fl", matrix=_t(-0.8, 0.3, 0.0), meshes=[_quad(-0.1, -0.1, -0.1, 0.2)])
+    wheel.matrix[:3, :3] = L @ D                    # what the forward converter writes for an AC identity frame
+    needle = ms.SceneNode("SVJ::body::geo_arrow_rpm", matrix=_t(0.4, 0.7, 0.3), meshes=[_quad()])
+    needle.matrix[:3, :3] = L @ D
+    root = ms.SceneNode("root", children=[wheel, needle])
+    data, rep = kw.build_kn5(root, "car", 0.0, 0.0, names={"SVJ::body::geo_arrow_rpm": "GEO_ARROW_RPM"})
+    top = {c.name: c for c in _read(tmp_path, data).root.children}
+    assert rep.gauges == ["GEO_ARROW_RPM"] and "GEO_ARROW_RPM" in top
+    for name in ("WHEEL_LF", "GEO_ARROW_RPM"):
+        R = np.array(top[name].matrix).reshape(4, 4)[:3, :3]
+        assert R == pytest.approx(np.eye(3), abs=1e-6)
 
 
 def test_materials_pick_ac_shaders(tmp_path) -> None:

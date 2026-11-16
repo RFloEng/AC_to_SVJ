@@ -1,4 +1,4 @@
-"""SVJ JSON loader (spec 0.95 to 0.111) and soft validation.
+"""SVJ JSON loader (spec 0.95 to 0.112) and soft validation.
 
 Loads a Standard Vehicle JSON (SAE J670 axes, SI units) into a typed
 ``SvjDoc`` tree and validates the contents against what the AC writers need. The
@@ -32,6 +32,7 @@ except ImportError:                                  # run from inside svj_to_ac
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from svj_migrate.frame import convert as _convert_frame, frame_of, tyres_to_iso
 from unified_view import normalize as normalize_unified
+from svj_migrate import variants as variants_mod
 
 REQUIRED_SECTIONS: tuple[str, ...] = (
     "chassis",
@@ -46,7 +47,7 @@ FILLED_SECTIONS: tuple[tuple[str, dict, str], ...] = (
     ("brakes", {}, "no brakes: generic brakes"),
 )
 OPTIONAL_SECTIONS: tuple[str, ...] = ("_metadata", "aerodynamics", "x_assettocorsa")
-SUPPORTED_VERSION = "0.111"   # newest SVJ spec this loader knows; older files (0.95 ..) load too
+SUPPORTED_VERSION = "0.112"   # newest SVJ spec this loader knows; older files (0.95 ..) load too
 EXPECTED_COORDS = "SAE_J670"
 EXPECTED_UNITS = "SI"
 CORNERS: tuple[str, ...] = ("FL", "FR", "RL", "RR")
@@ -197,8 +198,22 @@ class SvjDoc:
         return self.aerodynamics
 
 
-def load(path: str | Path) -> SvjDoc:
+def variant_ids(path: str | Path) -> list[str]:
+    """Ids of the ``variants[]`` of an SVJ file (spec 29.5, v0.112); empty when it has none or cannot be read."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    vs = data.get("variants") if isinstance(data, dict) else None
+    return [str(v.get("id")) for v in vs if isinstance(v, dict) and v.get("id")] if isinstance(vs, list) else []
+
+
+def load(path: str | Path, variant: str | None = None) -> SvjDoc:
     """Read ``path``, parse JSON, build :class:`SvjDoc`.
+
+    ``variant``: the id of one of the file's ``variants[]`` (v0.112): its edits are applied to the base before
+    anything else, as the standard's ``apply_variant`` does. Without it the base car is read and the variants
+    are named in the notes.
 
     Raises
     ------
@@ -222,6 +237,17 @@ def load(path: str | Path) -> SvjDoc:
         raise SvjLoadError(f"SVJ root must be an object, got {type(data).__name__}")
 
     notes: list[str] = []
+    ids = [str(v.get("id")) for v in (data.get("variants") or []) if isinstance(v, dict)]
+    if variant is not None:
+        if variant not in ids:
+            raise SvjLoadError(f"variant {variant!r} not found in {p.name} (variants: {', '.join(ids) or 'none'})")
+        try:
+            data = variants_mod.apply_variant(data, variant)
+        except (KeyError, ValueError, TypeError) as exc:
+            raise SvjLoadError(f"variant {variant!r} cannot be applied to {p.name}: {exc}") from exc
+        notes.append(f"variant {variant!r} applied to the base car")
+    elif ids:
+        notes.append(f"the file has {len(ids)} variant(s) ({', '.join(ids)}): this is the base car")
     data, rewritten = tyres_to_iso(data)           # a tyre set in SAE signs: ISO signs, what pacejka_inverse reads
     if rewritten:
         notes.append(f"tyre sets rewritten from SAE to ISO signs: {', '.join(rewritten)}")

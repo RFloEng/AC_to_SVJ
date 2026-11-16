@@ -33,6 +33,7 @@ import io
 import sys
 import tempfile
 import traceback
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -60,19 +61,24 @@ class ConversionResult:
 # --------------------------------------------------------------------------- #
 
 
-def convert_one(svj_path: str | Path, out_dir: Path, include_mesh: bool = True) -> ConversionResult:
+def convert_one(svj_path: str | Path, out_dir: Path, include_mesh: bool = True,
+                variant: str | None = None) -> ConversionResult:
     """Convert a single SVJ -> AC content folder + zip.
 
     All paths are normalised through :class:`pathlib.Path` before use.
     Returns a :class:`ConversionResult` regardless of success; on
     failure ``zip_path`` is ``None`` and ``log`` carries the traceback.
     ``include_mesh``: write ``<model>.kn5`` from the glTF / USD mesh next to the SVJ file.
+    ``variant`` (SVJ 0.112, ``variants[]``): an id converts that variant of the car (folder ``<model>_<id>``);
+    ``"all"`` converts the base car and every variant, one folder and zip each.
     """
+    if variant == "all":
+        return _convert_all_variants(Path(svj_path), out_dir, include_mesh)
     log = io.StringIO()
     src = Path(svj_path)
-    log.write(f"Loading SVJ: {src.name}\n")
+    log.write(f"Loading SVJ: {src.name}" + (f" (variant {variant})" if variant else "") + "\n")
     try:
-        doc = svj_loader.load(src)
+        doc = svj_loader.load(src, variant=variant)
     except svj_loader.SvjLoadError as exc:
         log.write(f"FAIL: {exc}\n")
         return ConversionResult(False, None, log.getvalue(), {"error": str(exc)})
@@ -102,6 +108,17 @@ def convert_one(svj_path: str | Path, out_dir: Path, include_mesh: bool = True) 
             "bytes": zip_path.stat().st_size,
         },
     )
+
+
+def _convert_all_variants(src: Path, out_dir: Path, include_mesh: bool) -> ConversionResult:
+    """The base car and each of the file's variants, one after the other."""
+    ids = [None] + svj_loader.variant_ids(src)
+    results = [convert_one(src, out_dir, include_mesh, variant=v) for v in ids]
+    ok = all(r.success for r in results)
+    return ConversionResult(ok, results[0].zip_path, "".join(r.log for r in results),
+                            {"variants": [v or "base" for v in ids],
+                             "zips": [str(r.zip_path) for r in results if r.zip_path],
+                             "model": results[0].summary.get("model")})
 
 
 def convert_batch(folder: str | Path, out_dir: Path, include_mesh: bool = True) -> ConversionResult:
@@ -264,22 +281,35 @@ def build_ui():  # type: ignore[no-untyped-def]
         with gr.Tab("2 - Single SVJ (path)"):
             single_path = gr.Textbox(label="Path to .svj.json on disk")
             single_mesh = gr.Checkbox(value=True, label="Write the 3D model (car.kn5) from the glTF / USD mesh next to the SVJ")
+            single_variant = gr.Textbox(
+                label="Variant (SVJ 0.112)", value="",
+                placeholder="empty = the base car, a variant id, or 'all' (the base and every variant in one zip)")
             single_btn = gr.Button("Convert", variant="primary")
             single_log = gr.Textbox(label="Log", lines=10, interactive=False)
             single_zip = gr.File(label="Download AC zip", interactive=False)
 
-            def _on_single(path_str, mesh):  # noqa: ANN001
+            def _on_single(path_str, mesh, variant):  # noqa: ANN001
                 if not path_str:
                     return "Type a path first.", None
                 with tempfile.TemporaryDirectory() as td:
-                    result = convert_one(path_str, Path(td), include_mesh=bool(mesh))
+                    result = convert_one(path_str, Path(td), include_mesh=bool(mesh),
+                                         variant=(variant or "").strip() or None)
                     if result.zip_path:
                         persistent = Path(tempfile.mkdtemp()) / result.zip_path.name
-                        persistent.write_bytes(result.zip_path.read_bytes())
+                        zips = result.summary.get("zips")
+                        if zips and len(zips) > 1:             # "all": one zip with every car
+                            persistent = persistent.with_name(f"{Path(path_str).name.split('.')[0]}_variants.zip")
+                            with zipfile.ZipFile(persistent, "w", zipfile.ZIP_DEFLATED) as out:
+                                for zp in zips:
+                                    with zipfile.ZipFile(zp) as zin:
+                                        for item in zin.infolist():
+                                            out.writestr(item, zin.read(item.filename))
+                        else:
+                            persistent.write_bytes(result.zip_path.read_bytes())
                         return result.log, str(persistent)
                     return result.log, None
 
-            single_btn.click(_on_single, inputs=[single_path, single_mesh], outputs=[single_log, single_zip])
+            single_btn.click(_on_single, inputs=[single_path, single_mesh, single_variant], outputs=[single_log, single_zip])
 
         with gr.Tab("3 - Batch SVJ folder"):
             batch_folder = gr.Textbox(label="Folder containing .svj.json files")

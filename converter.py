@@ -2093,6 +2093,8 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                     try:
                         _moving = describe_moving_parts(kn5_path, car_path,
                                                         placement=_placement)
+                        _gauges = _describe_gauges(kn5_path, data_dir, _placement, log)
+                        _moving = list(_moving) + _gauges
                         if _moving:
                             svj.setdefault("x_assettocorsa", {})["moving_parts"] = {
                                 "frame": "kn5_model",
@@ -2416,6 +2418,64 @@ def _member_id(node: str, main_node: str, main_pid: str, taken: set) -> str:
     return pid
 
 
+def _gauge_max_values(data_dir) -> dict:
+    """Top reading of each dashboard signal, from the car's data files."""
+    out: dict = {}
+    try:
+        eng = parse_ini((Path(data_dir) / "engine.ini").read_text(errors="replace"))
+        lim = _f((eng.get("ENGINE_DATA") or {}).get("LIMITER"), 0.0)
+        if lim > 0:
+            out["rpm"] = lim
+    except OSError:
+        pass
+    try:
+        car = parse_ini((Path(data_dir) / "car.ini").read_text(errors="replace"))
+        mf = _f((car.get("FUEL") or {}).get("MAX_FUEL"), 0.0)
+        if mf > 0:
+            out["fuel"] = mf
+    except OSError:
+        pass
+    return out
+
+
+def _describe_gauges(kn5_path, data_dir, placement, log: list) -> list:
+    """The dashboard needles of data/analog_instruments.ini as revolute parts."""
+    from ac_parsers import parse_analog_instruments
+    from kn5_reader import describe_instruments
+    f = Path(data_dir) / "analog_instruments.ini" if data_dir else None
+    if not f or not f.is_file():
+        return []
+    ins = [i for i in parse_analog_instruments(f.read_text(errors="replace"), Path(data_dir))
+           if i["signal"]]
+    mv = _gauge_max_values(data_dir)
+    for i in ins:                                    # a speed table ends at the dial's top
+        if i["signal"] == "speed" and i.get("lut"):
+            mv.setdefault("speed", max(p[0] for p in i["lut"]))
+    parts = describe_instruments(kn5_path, ins, placement=placement, max_values=mv)
+    guessed = [p["node"] for p in parts if p["max_value_guessed"]]
+    log.append(f"✓ Dashboard needles: {len(parts)} of {len(ins)} gauge(s) found in the model"
+               + (f"; top reading of {', '.join(guessed)} not in the data (a 270° sweep is assumed)"
+                  if guessed else ""))
+    return parts
+
+
+def _instrument_meta(m: dict) -> dict:
+    """What AC needs to drive a needle again: the signal, the mapping and the node name."""
+    i = m["instrument"]
+    out = {"signal": i["signal"], "ac_section": i["section"], "ac_object": i["object_name"],
+           "zero_deg": i["zero_deg"], "step_deg_per_unit": i["step_deg"],
+           "min_value": i["min_value"], "max_value": m["max_value"],
+           "joint_unit": "rad", "sense": "positive = clockwise from the driver's seat"}
+    if m.get("max_value_guessed"):
+        out["max_value_est"] = True
+    if i.get("object_name_max"):
+        out["ac_object_max"] = i["object_name_max"]
+    if i.get("lut"):
+        out["lut_file"] = i.get("lut_file")
+        out["lut_value_to_deg"] = [[float(a), float(b)] for a, b in i["lut"]]
+    return out
+
+
 def movable_parts_to_svj(svj: dict, parts: list, mesh_id: str,
                          bound: Optional[set] = None) -> tuple:
     """Write doors, flaps, wipers ... as SVJ 24 movable parts.
@@ -2498,6 +2558,9 @@ def movable_parts_to_svj(svj: dict, parts: list, mesh_id: str,
             taken.add(jid)
             frame = {"position": list(piv), "orientation": _z_to_quat(ax)}
             markers[f"{pid}_hinge"] = dict(frame)
+            rng = m.get("range_rad")
+            lo_, hi_ = ((round(min(rng), 5), round(max(rng), 5)) if rng
+                        else (0.0, round(float(extent), 5)))
             glb_node = f"SVJ::body::{pid}"
             bodies.append({
                 "id": pid, "name": m["node"], "category": "attachment",
@@ -2507,12 +2570,17 @@ def movable_parts_to_svj(svj: dict, parts: list, mesh_id: str,
                 "markers": {"hinge": dict(frame)},
                 "visual": {"mesh_ref": mesh_id, "node": glb_node},
             })
+            if m.get("instrument"):
+                bodies[-1]["description"] = (
+                    f"Dashboard needle {m['node']} ({m['instrument']['section']}); turns about "
+                    f"the hinge axis, clockwise from the driver's seat for a rising reading.")
+                bodies[-1]["x_instrument"] = _instrument_meta(m)
             cons.append({
                 "id": jid, "type": "joint",
                 "joint_type": "revolute" if rev else "translational",
                 "body_a": "chassis", "marker_a": f"{pid}_hinge",
                 "body_b": pid, "marker_b": "hinge",
-                "range": {"min": 0.0, "max": round(float(extent), 5)},
+                "range": {"min": lo_, "max": hi_},
             })
             poses.setdefault(m["animation"], []).append((pid, jid, round(float(extent), 5)))
             rename[m["node"]] = glb_node

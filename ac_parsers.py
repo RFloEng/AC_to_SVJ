@@ -926,3 +926,48 @@ def parse_setup_ranges(text: str) -> dict:
     parsed = parse_ini(text)
     return {sec_name.lower(): dict(sec) for sec_name, sec in parsed.items()
             if any(k in sec for k in ("MIN", "MAX", "STEP", "DEFAULT"))}
+
+
+# --- analog_instruments.ini: the needles of the dashboard ----------------------
+
+_GAUGE_SIGNALS = (("RPM", "rpm"), ("SPEED", "speed"), ("FUEL", "fuel"), ("WATER", "water_temp"),
+                  ("OIL_TEMP", "oil_temp"), ("OIL_PRES", "oil_pressure"), ("TURBO", "boost"),
+                  ("BOOST", "boost"), ("TEMP", "water_temp"), ("OIL", "oil_temp"))
+
+
+def gauge_signal(section: str) -> Optional[str]:
+    """The quantity a ``[SECTION]`` of analog_instruments.ini shows (``rpm``, ``speed``,
+    ``fuel``, ``water_temp``, ``oil_temp``, ``oil_pressure``, ``boost``) or None."""
+    s = section.upper()
+    if s.startswith("PLACE_HOLDER"):
+        return None
+    for key, sig in _GAUGE_SIGNALS:
+        if key in s:
+            return sig
+    return None
+
+
+def parse_analog_instruments(text: str, data_dir: Optional[Path] = None) -> list[dict]:
+    """The needles of ``data/analog_instruments.ini``.
+
+    One dict per section with an ``OBJECT_NAME``: ``section``, ``signal`` (None when the
+    section is not a known gauge), ``object_name`` (the KN5 node that turns),
+    ``object_name_max`` (the node of the max-value marker, or ''), ``zero_deg``,
+    ``step_deg`` (degrees per unit of the signal), ``min_value`` and ``lut`` (the
+    value -> degrees table, or None).  Numbers an ini leaves out are 0 (STEP 1).
+    """
+    out: list[dict] = []
+    for sec, kv in parse_ini(text).items():
+        name = (kv.get("OBJECT_NAME") or "").strip()
+        if not name:
+            continue
+        lut_ref = (kv.get("LUT") or "").strip()
+        out.append({
+            "section": sec, "signal": gauge_signal(sec), "object_name": name,
+            "object_name_max": (kv.get("OBJECT_NAME_MAX") or kv.get("OBJECT_NAME_RPM_MAX") or "").strip(),
+            "zero_deg": _f(kv.get("ZERO"), 0.0), "step_deg": _f(kv.get("STEP"), 1.0),
+            "min_value": _f(kv.get("MIN_VALUE"), 0.0),
+            "lut_file": lut_ref or None,
+            "lut": (_resolve_lut(data_dir, lut_ref) if lut_ref and data_dir else None),
+        })
+    return out

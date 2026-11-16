@@ -101,7 +101,9 @@ def _screen_name(doc: SvjDoc) -> str:
     ext = doc.assetto
     if ext and ext.info and ext.info.get("screen_name"):
         return str(ext.info["screen_name"])
-    return doc.vehicle_info.model or "Unnamed"
+    name = doc.vehicle_info.model or "Unnamed"
+    var = doc.metadata.raw.get("variant") if doc.metadata and doc.metadata.raw else None
+    return f"{name} ({var})" if var else name        # a variant of the file (v0.112)
 
 
 def _infer_class(variant: str | None) -> str:

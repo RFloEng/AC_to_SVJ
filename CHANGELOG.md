@@ -4,6 +4,34 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### SVJ 0.112: variants
+
+- `svj_to_ac` reads SVJ 0.112. A file's `variants[]` (alternative engines, parts, geometries: spec 29.5) are named in the log;
+  `convert_one(path, out, variant="<id>")` applies one to the base before anything else (the standard's `variant_check.py` and
+  `setup_check.py`, vendored in `svj_migrate/`) and writes it as its own car, folder `<model>_<id>` and name `<name> (<id>)`;
+  `variant="all"` writes the base and every variant. The GUI's tab 2 has a "Variant" box for both. Checked on the standard's MX-5
+  template: `turbo_kit` gives 266.5 N*m peak against 205 N*m, and `high_front_roll_centre` moves the upper front pivot 12 mm in
+  `suspensions.ini`. A variant that does not apply is a load error naming the reason.
+- AC -> SVJ writes no variants (AC has none); its output is unchanged and validates with the 0.112 tools (checked on the Murcielago, with its needles).
+
+### Dashboard needles, both ways
+
+- **AC -> SVJ.** `data/analog_instruments.ini` is read (`ac_parsers.parse_analog_instruments`) and each needle that exists in the
+  KN5 becomes a hinged body like a door: the pivot is the node's origin, the axis its local Z (the normal of the flat pointer, signed
+  to point into the dash, so a positive angle is clockwise from the driver's seat), the joint range runs from the angle at the
+  signal's minimum to the one at its top reading (rpm limiter, `MAX_FUEL`, the speed LUT's last speed; 120 / 150 degrees C for water /
+  oil temperature; 270 degrees when the data gives none, flagged `max_value_est`). The body carries `x_instrument` with the signal,
+  the AC section and node name, ZERO / STEP / MIN_VALUE and the value-to-degrees table, and each needle has a pose `gauge_<signal>`.
+  Tested on the Murcielago (rpm, speed, fuel, water). A table is read as degrees (a 0-270 dial), as Kunos' cars use it: inferred, not
+  documented.
+- **SVJ -> AC.** The bodies with `x_instrument` are written back as `data/analog_instruments.ini` (and their LUT files), and their KN5
+  nodes get the AC names so the game finds them. Needles of an SVJ from another simulator have no such block and are not written.
+- **KN5 node frames.** `car.kn5` now gives every part the frame the forward converter's files have for it (turned 180 degrees about X
+  in the glTF, undone on the way back): a car that goes AC -> SVJ -> AC has its original wheel, steering and needle frames, which the
+  game turns by. Before, they came back rotated 180 degrees about Z, so a wheel would have spun the wrong way. World positions are
+  unchanged. Still not tried in the game; meshes made elsewhere are assumed to follow the same convention.
+- Tests: 146 converter, 226 SVJ -> AC.
+
 ### SVJ -> AC: current SVJ, other simulators' springs, 3D models
 
 - `svj_to_ac` reads SVJ 0.95 to 0.111 (the version warning is only for files newer than 0.111).

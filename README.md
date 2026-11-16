@@ -9,7 +9,7 @@
 Converts **Assetto Corsa** car data into the
 [SVJ standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
 (v0.109 and later: ISO 8855 axes, SI units; SAE J670 files are still read) — runs a virtual Pacejka MF 6.2 bench on every
-tyre section, and exports all KN5 mesh LODs as OpenUSD (`.usdz`, SVJ 0.105, with the movement of doors and wipers and
+tyre section, and exports all KN5 mesh LODs as OpenUSD (`.usdz`, SVJ 0.105, with the movement of doors and wipers, the dashboard needles (`analog_instruments.ini`) and
 the textures; needs `usd-core`), optionally with a glTF preview, or as plain `.glb`.
 
 ## Install
@@ -24,7 +24,7 @@ Opens a native desktop window. No browser required.
 ## SVJ → AC (`svj_to_ac/`)
 
 The inverse converter lives in [`svj_to_ac/`](svj_to_ac/README.md): it takes an SVJ file
-(v0.95 to v0.111, ISO 8855 or SAE J670 axes) and writes an Assetto Corsa `content/cars/<model>/`
+(v0.95 to v0.112, ISO 8855 or SAE J670 axes; a file's variants convert as cars of their own) and writes an Assetto Corsa `content/cars/<model>/`
 folder (`data/*.ini`, `power.lut`, `ui`, and `<model>.kn5` with a default skin built from the
 glTF / GLB or OpenUSD / USDZ mesh the SVJ points at), plus an optional FBX skeleton for KsEditor.
 It reads the unified suspension of SVJ 0.100+ (`svj_to_ac/unified_view.py`) and the older corner
@@ -320,7 +320,7 @@ Vertical shift: `chassis_z_offset = −rolling_radius`.
 | `ac_parsers.py` | All `.ini` / `.lut` parsers |
 | `acd_reader.py` | Car-data loader (`data/` or `data.acd` detection) |
 | `smoke_test.py` | 62-check regression suite against `test_car/` |
-| `test_*.py`, `svj_to_ac/tests/` | Converter tests (141) and SVJ → AC tests (218) |
+| `test_*.py`, `svj_to_ac/tests/` | Converter tests (146) and SVJ → AC tests (226) |
 | `test_car/` | Synthetic MX-5 ND2 with every field populated |
 | `examples/` | Reference SVJ from real Kunos data (`ks_mazda_mx5_nd`) |
 | `DEVELOPMENT.md` | Coordinate conventions, data-source map, contributor notes |

@@ -8,10 +8,13 @@ The KN5 model space has its origin at the centre of gravity (``GRAPHICS_OFFSET``
 
     kn5 = (-X, Y - h_cg, -Z + d_f)        h_cg: height of the CG, d_f: distance of the CG behind the front axle
 
-a 180 degree turn about Y plus a shift, which keeps the triangle winding.  Node matrices follow as
-``L M L`` with ``L = diag(-1, 1, -1)``, vertices as ``L v``, and each part sits at the model's top level with its
-full world matrix, so the wheels are direct children of the root whose origin is the wheel centre, as the game
-expects.
+a 180 degree turn about Y plus a shift, which keeps the triangle winding.  That fixes where everything is.  How
+a node is oriented follows the forward converter, which writes every node frame turned 180 degrees about X
+(``D = diag(1, -1, -1)``): node matrices come back as ``D M D``, vertices as ``D v``, and a part's frame is
+``L . world . D``.  A car that went AC -> SVJ -> AC then has its original frames again, which is what the game
+turns a wheel (about its X), a steering wheel or a dashboard needle (about its Z) by.  Each part sits at the
+model's top level with its full world matrix, so the wheels are direct children of the root whose origin is the
+wheel centre, as the game expects.
 
 Parts.  A node named ``SVJ::<category>::<id>`` is one part: ``SVJ::wheel::wheel_fl`` is ``WHEEL_LF``,
 ``SVJ::brake::disc_fl`` is ``DISC_LF``, ``SVJ::steering::wheel`` is ``STEER_HR``; the others keep their id.
@@ -39,7 +42,8 @@ from mesh_scene import SceneMaterial, SceneMesh, SceneNode, SceneTexture
 
 KN5_VERSION = 5
 MAX_VERTS = 65535
-_L = np.diag([-1.0, 1.0, -1.0])
+_L = np.diag([-1.0, 1.0, -1.0])      # the world map of the model (positions)
+_D = np.diag([1.0, -1.0, -1.0])      # the frame of a node: the forward converter turns every node frame by this about X
 
 _WHEEL = {"fl": "LF", "fr": "RF", "rl": "LR", "rr": "RR"}
 _SVJ_NAME = re.compile(r"^SVJ::([^:]+)::(.+)$")
@@ -196,6 +200,7 @@ class Report:
     textures: int = 0
     wheels: list = field(default_factory=list)
     parts: list = field(default_factory=list)
+    gauges: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     split: int = 0
 
@@ -334,15 +339,19 @@ def _node_bytes(name: str, matrix: np.ndarray, children: list[bytes]) -> bytes:
 
 
 def build_kn5(scene: SceneNode, model_name: str, cg_height: float, cg_behind_front_axle: float,
-              ) -> tuple[bytes, Report]:
-    """The KN5 bytes of ``scene`` placed with ``kn5 = (-X, Y - h_cg, -Z + d_f)`` (see the module docstring)."""
+              names: dict | None = None) -> tuple[bytes, Report]:
+    """The KN5 bytes of ``scene`` placed with ``kn5 = (-X, Y - h_cg, -Z + d_f)`` (see the module docstring).
+
+    ``names`` maps an ``SVJ::...`` node name to the AC name it must have (the dashboard needles, which
+    AC finds by name in analog_instruments.ini); those nodes keep their own frame, whose Z is the axis.
+    """
     b = _Builder(model_name)
     rep = b.report
     A = np.eye(4)
     A[:3, :3] = _L
     A[:3, 3] = (0.0, -float(cg_height), float(cg_behind_front_axle))       # world: kn5 = A . svj
     L4 = np.eye(4)
-    L4[:3, :3] = _L
+    L4[:3, :3] = _D
     used: dict = {}
 
     def unique(name: str) -> str:
@@ -353,34 +362,42 @@ def build_kn5(scene: SceneNode, model_name: str, cg_height: float, cg_behind_fro
     def sub(node: SceneNode) -> bytes:
         """A subtree below a part: local matrices conjugated by L, meshes as children."""
         kids = []
+        gauge = bool(names and node.name in names)
+        own = unique(names[node.name]) if gauge else None     # a needle's name is taken before its meshes'
+        if gauge:
+            rep.gauges.append(own)
         for m in node.meshes:
             mid = b.material(m.material)
-            kids += _mesh_record(unique(m.name or node.name), m, mid, b.materials[mid].transparent, _L, rep)
+            kids += _mesh_record(unique(m.name or node.name), m, mid, b.materials[mid].transparent, _D, rep)
         kids += [sub(c) for c in node.children]
-        return _node_bytes(unique(node.name), L4 @ node.matrix @ L4, kids)
+        return _node_bytes(own if gauge else unique(node.name), L4 @ node.matrix @ L4, kids)
 
     parts: list[bytes] = []
 
     def top(node: SceneNode, world: np.ndarray, role_seen: bool) -> None:
         name, role = ac_name(node.name)
+        if names and node.name in names:
+            name, role = names[node.name], "gauge"
         is_part = bool(_SVJ_NAME.match(node.name))
         if is_part:
             kids = []
             for m in node.meshes:
                 mid = b.material(m.material)
-                kids += _mesh_record(unique(m.name or name), m, mid, b.materials[mid].transparent, _L, rep)
+                kids += _mesh_record(unique(m.name or name), m, mid, b.materials[mid].transparent, _D, rep)
             kids += [sub(c) for c in node.children]
             M = A @ world @ L4
             parts.append(_node_bytes(unique(name), M, kids))
             rep.parts.append(name)
             if role == "wheel":
                 rep.wheels.append(name)
+            elif role == "gauge":
+                rep.gauges.append(name)
             return
         if node.meshes:
             kids = []
             for m in node.meshes:
                 mid = b.material(m.material)
-                kids += _mesh_record(unique(m.name or name), m, mid, b.materials[mid].transparent, _L, rep)
+                kids += _mesh_record(unique(m.name or name), m, mid, b.materials[mid].transparent, _D, rep)
             parts.append(_node_bytes(unique(name), A @ world @ L4, kids))
         for c in node.children:
             top(c, world @ c.matrix, role_seen)

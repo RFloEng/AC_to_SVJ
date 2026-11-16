@@ -6,7 +6,7 @@
 
 Inverse of [AC_to_SVJ](https://github.com/RFloEng/AC_to_SVJ). Takes an
 [SVJ standard vehicle JSON](https://github.com/RFloEng/SVJ-standard-vehicle-json)
-(v0.95 to v0.111; ISO 8855 or SAE J670 axes, SI units) and produces a complete Assetto Corsa
+(v0.95 to v0.112; ISO 8855 or SAE J670 axes, SI units) and produces a complete Assetto Corsa
 `content/cars/<model>/` folder that Content Manager can install, including `<model>.kn5` with a
 default skin when the SVJ has a glTF / GLB or OpenUSD / USDZ mesh, plus an optional FBX skeleton
 for KsEditor.
@@ -70,8 +70,20 @@ gravity.
 - Materials: `ksPerPixel`, `ksPerPixelNM` (normal map), `ksPerPixelAT` (cut-out) or `ksPerPixelAlpha`
   (blend); specular power from the roughness, intensity from the metallic factor; a base-colour factor is
   multiplied into the texture. Textures are embedded as PNG / JPEG / DDS as they come.
+- Dashboard needles: a body with the `x_instrument` block the AC -> SVJ converter writes goes back as
+  `data/analog_instruments.ini` (and its LUTs), and its node is named as AC expects (`GEO_ARROW_RPM`). Needles from other
+  simulators' SVJs carry no such block and are not written.
+- Node frames follow the forward converter's convention (a wheel turns about its X, a needle about its Z), so an AC car keeps its
+  original frames; a mesh made elsewhere is assumed to use the same one.
 - Not written: doors and other animations, LODs, the collider, cockpit and driver nodes.
 - Not tried in the game; the file is read back with the forward converter's reader in the tests.
+
+## Variants (SVJ 0.112)
+
+A file may carry `variants[]`: another engine, other parts, a different geometry, each an edit of the base car. The base is
+converted unless you name one: in tab 2 type its id in "Variant" (or `all` for the base and every variant in one zip), or call
+`convert_one(path, out, variant="<id>")`. A variant is a car of its own in AC: folder `<model>_<id>`, name `<name> (<id>)`. It is
+applied with the standard's own code (`svj_migrate/variants.py`, vendored) before the file is read, so every writer sees the edited car.
 
 ## Coordinate system
 

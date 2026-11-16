@@ -1994,6 +1994,115 @@ def describe_moving_parts(kn5_path: Path, car_path: Path,
     return out
 
 
+_GAUGE_DEFAULT_MAX = {"water_temp": 120.0, "oil_temp": 150.0}   # when the data gives no top reading
+
+
+def gauge_angle_deg(inst: dict, value: float) -> float:
+    """Degrees a needle has turned at ``value`` of its signal.  With a LUT the table gives
+    the angle (a 0..270 dial), else ``STEP`` degrees per unit above ``MIN_VALUE``; ``ZERO``
+    is added.  The LUT-as-degrees reading is inferred from Kunos' own cars."""
+    lut = inst.get("lut")
+    if lut:
+        xs = [p[0] for p in lut]
+        ys = [p[1] for p in lut]
+        a = float(np.interp(value, xs, ys))
+        if value > xs[-1] and len(xs) > 1 and xs[-1] != xs[-2]:
+            a = ys[-1] + (value - xs[-1]) * (ys[-1] - ys[-2]) / (xs[-1] - xs[-2])
+    else:
+        a = inst.get("step_deg", 1.0) * (value - inst.get("min_value", 0.0))
+    return inst.get("zero_deg", 0.0) + a
+
+
+def describe_instruments(kn5_path: Path, instruments: list, placement: Optional[dict] = None,
+                         max_values: Optional[dict] = None) -> list[dict]:
+    """The needles of ``data/analog_instruments.ini`` as revolute parts.
+
+    ``instruments`` is ``ac_parsers.parse_analog_instruments`` output.  Each needle that
+    exists in the KN5 becomes a dict shaped like ``describe_moving_parts``' (node, parent,
+    ``joint: revolute``, ``pivot`` / ``pivot_model`` / ``axis_model``, and with a placement
+    ``pivot_svj`` / ``axis_svj``) plus ``instrument`` (the ini entry) and ``range_rad``
+    (the joint coordinate at the signal's minimum and maximum).  The pivot is the node's
+    origin and the axis its local Z, the normal of the flat pointer, signed to point away
+    from the driver so that a positive angle is clockwise from the driver's seat (the
+    sense of a rising reading).  ``max_values`` gives the top reading per signal; a
+    signal without one sweeps 270 degrees.  Both the axis and the sense are inferred from
+    the geometry of Kunos' cars, not read from a spec.
+    """
+    model = parse_kn5(kn5_path)
+    if model.root is None or not instruments:
+        return []
+    info: dict[str, tuple] = {}
+
+    def walk(n, parent, parent_world):
+        info.setdefault(n.name, (n, parent, parent_world))
+        w = parent_world
+        if n.node_type == 1 and n.matrix:
+            w = parent_world @ np.array(n.matrix, dtype="f8").reshape(4, 4).T
+        for c in n.children:
+            walk(c, n, w)
+    walk(model.root, None, np.eye(4))
+
+    T = None
+    th = 0.0
+    if placement is not None:
+        T = placement.get("translation")
+        if T is None:
+            T = _translation_from_wheels(model.root, placement.get("wheel_centers") or {})
+        else:
+            th = math.radians(float(placement.get("pitch_deg", 0.0)))
+    cth, sth = math.cos(th), math.sin(th)
+
+    def _dir_svj(d):
+        x, y, z = (float(v) for v in d)
+        y, z = y * cth - z * sth, z * cth + y * sth
+        return np.array([z, -x, -y])
+
+    out: list[dict] = []
+    seen: set = set()
+    for inst in instruments:
+        name = inst.get("object_name")
+        hit = info.get(name)
+        if hit is None or name in seen:
+            continue
+        node, parent, pw = hit
+        if node.node_type != 1 or not node.matrix:
+            continue
+        seen.add(name)
+        loc = np.array(node.matrix, dtype="f8").reshape(4, 4).T
+        pivot = loc[:3, 3]
+        ax_local = loc[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        ax_local = ax_local / np.linalg.norm(ax_local)
+        c = pw @ np.array([*pivot, 1.0])
+        a = pw[:3, :3] @ ax_local
+        a = a / np.linalg.norm(a)
+        if a[2] < 0:                       # KN5 Z is forward: the axis points into the dash
+            a = -a
+            ax_local = -ax_local
+        sig = inst.get("signal")
+        vmin = float(inst.get("min_value", 0.0))
+        vmax = (max_values or {}).get(sig)
+        guessed = vmax is None
+        if guessed:
+            vmax = _GAUGE_DEFAULT_MAX.get(sig) or vmin + 270.0 / (abs(inst.get("step_deg", 1.0)) or 1.0)
+        lo = math.radians(gauge_angle_deg(inst, vmin))
+        hi = math.radians(gauge_angle_deg(inst, float(vmax)))
+        part = {"node": name, "parent": parent.name if parent is not None else None,
+                "animation": f"gauge_{sig or inst['section'].lower()}", "joint": "revolute",
+                "pivot": [round(float(v), 5) for v in pivot],
+                "axis": [round(float(v), 5) for v in ax_local],
+                "pivot_model": [round(float(v), 5) for v in c[:3]],
+                "axis_model": [round(float(v), 5) for v in a],
+                "angle_rad": round(hi - lo, 6), "range_rad": [round(lo, 6), round(hi, 6)],
+                "max_value": float(vmax), "max_value_guessed": guessed,
+                "instrument": {k: v for k, v in inst.items()}}
+        if T is not None:
+            d = _dir_svj(c[:3]) + np.array([T[2], 0.0, -T[1]])
+            part["pivot_svj"] = [round(float(v), 5) for v in d]
+            part["axis_svj"] = [round(float(v), 5) for v in _dir_svj(a)]
+        out.append(part)
+    return out
+
+
 # --- Convenience: find the main KN5 / all LODs in an AC car folder -----------
 
 _EFFECT_PREFIXES = ("3d", "smoke", "particle", "collider", "blur_", "tyre_")

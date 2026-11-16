@@ -52,6 +52,7 @@ from svj_loader import SvjDoc
 
 from ac_writers import (
     aero_ini,
+    analog_instruments_ini,
     brakes_ini,
     car_ini,
     ctrl_files,
@@ -86,7 +87,13 @@ class AssembleResult:
 
 
 def model_id(doc: SvjDoc) -> str:
-    """Return the slug used as the ``content/cars/<model>/`` folder name."""
+    """Return the slug used as the ``content/cars/<model>/`` folder name; a variant (v0.112) adds its id."""
+    base = _model_id(doc)
+    var = (doc.metadata.raw.get("variant") if doc.metadata and doc.metadata.raw else None)
+    return f"{base}_{_slugify(str(var))}" if var else base
+
+
+def _model_id(doc: SvjDoc) -> str:
     ext = doc.assetto
     if ext and ext.info and ext.info.get("model_id"):
         return _slugify(str(ext.info["model_id"]))
@@ -141,6 +148,7 @@ def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None,
     files.append(aero_ini.write(doc, data_dir))
     files.append(brakes_ini.write(doc, data_dir))
     files.append(electronics_ini.write(doc, data_dir))
+    files.extend(analog_instruments_ini.write(doc, data_dir))
     files.append(setup_ini.write(doc, data_dir))
     files.extend(ctrl_files.write(doc, data_dir))
 
@@ -220,7 +228,8 @@ def write_mesh(doc: SvjDoc, car_dir: Path, name: str) -> list[Path]:
     for path in cands:
         try:
             scene = mesh_scene.load_scene(path)
-            data, rep = kn5_writer.build_kn5(scene, name, h_cg, d_f)
+            data, rep = kn5_writer.build_kn5(scene, name, h_cg, d_f,
+                                             names=analog_instruments_ini.ac_object_names(doc))
         except Exception as exc:                          # a bad file: try the next candidate
             last_err = f"{path.name}: {type(exc).__name__}: {exc}"
             continue
@@ -236,7 +245,8 @@ def write_mesh(doc: SvjDoc, car_dir: Path, name: str) -> list[Path]:
                            encoding="utf-8", newline=chr(10))
         files.append(ui_skin)
         _note_to_log(car_dir, f"3D model from {path.name}: {rep.meshes} meshes, {rep.triangles} triangles, "
-                              f"{rep.materials} materials, {rep.textures} textures; wheels {', '.join(rep.wheels) or 'none'}", "mesh")
+                              f"{rep.materials} materials, {rep.textures} textures; wheels {', '.join(rep.wheels) or 'none'}" +
+                              (f"; needles {', '.join(rep.gauges)}" if rep.gauges else ""), "mesh")
         for n in rep.notes:
             _note_to_log(car_dir, n, "mesh")
         return files
