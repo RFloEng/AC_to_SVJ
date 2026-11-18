@@ -213,6 +213,7 @@ def write_mesh(doc: SvjDoc, car_dir: Path, name: str) -> list[Path]:
     when there is none or it cannot be read."""
     import mesh_scene
     import kn5_writer
+    import ksanim_writer
 
     cands = _mesh_candidates(doc)
     if not cands:
@@ -228,8 +229,11 @@ def write_mesh(doc: SvjDoc, car_dir: Path, name: str) -> list[Path]:
     for path in cands:
         try:
             scene = mesh_scene.load_scene(path)
+            gauges = analog_instruments_ini.ac_object_names(doc)
+            moving = ksanim_writer.movable_parts(doc)
             data, rep = kn5_writer.build_kn5(scene, name, h_cg, d_f,
-                                             names=analog_instruments_ini.ac_object_names(doc))
+                                             names={**ksanim_writer.node_names(doc), **gauges},
+                                             gauge_nodes=set(gauges), record={p["node"] for p in moving})
         except Exception as exc:                          # a bad file: try the next candidate
             last_err = f"{path.name}: {type(exc).__name__}: {exc}"
             continue
@@ -249,6 +253,11 @@ def write_mesh(doc: SvjDoc, car_dir: Path, name: str) -> list[Path]:
                               (f"; needles {', '.join(rep.gauges)}" if rep.gauges else ""), "mesh")
         for n in rep.notes:
             _note_to_log(car_dir, n, "mesh")
+        if moving:
+            anims, anim_notes = ksanim_writer.write(doc, rep.frames, car_dir / "animations", (-d_f, 0.0, -h_cg))
+            files.extend(anims)
+            for n in anim_notes:
+                _note_to_log(car_dir, n, "animation")
         return files
     _note_to_log(car_dir, f"no 3D model written: {last_err}", "mesh")
     return []

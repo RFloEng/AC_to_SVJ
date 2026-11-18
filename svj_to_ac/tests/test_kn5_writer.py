@@ -111,7 +111,8 @@ def test_a_part_keeps_the_forward_converters_frame(tmp_path) -> None:
     needle = ms.SceneNode("SVJ::body::geo_arrow_rpm", matrix=_t(0.4, 0.7, 0.3), meshes=[_quad()])
     needle.matrix[:3, :3] = L @ D
     root = ms.SceneNode("root", children=[wheel, needle])
-    data, rep = kw.build_kn5(root, "car", 0.0, 0.0, names={"SVJ::body::geo_arrow_rpm": "GEO_ARROW_RPM"})
+    data, rep = kw.build_kn5(root, "car", 0.0, 0.0, names={"SVJ::body::geo_arrow_rpm": "GEO_ARROW_RPM"},
+                            gauge_nodes={"SVJ::body::geo_arrow_rpm"})
     top = {c.name: c for c in _read(tmp_path, data).root.children}
     assert rep.gauges == ["GEO_ARROW_RPM"] and "GEO_ARROW_RPM" in top
     for name in ("WHEEL_LF", "GEO_ARROW_RPM"):

@@ -4,6 +4,18 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### SVJ -> AC: door, bonnet, boot and wiper animations
+
+- `svj_to_ac/ksanim_writer.py` writes `animations/*.ksanim` for the movable parts of the SVJ (a `revolute` / `translational` joint from the
+  chassis to an `attachment` body that is not a needle, with the pose values): each frame turns the node's world matrix about the joint's
+  axis through its pivot (any pivot, not only one at the node's origin) and gives the local transform below the parent. A part that came
+  from AC keeps its node name and its animation name (`x_assettocorsa.moving_parts`), else the file is `car_<pose id>.ksanim`. An
+  animation called `*wiper*` goes there and back. Checked on the Murcielago: the door and engine-bay animations end at the same
+  quaternion and position as the originals (20 and 18 frames instead of 100, linear in angle); the wiper loop matches the rest pose.
+- Still missing: which names the game itself looks for is unconfirmed (an animation under another name will not play from its triggers),
+  nothing was run in the game, and the suspension travel (`SUSP_xx`), steering-wheel rotation, shifter and driver animations are not written.
+- Tests: 146 converter, 230 SVJ -> AC.
+
 ### SVJ 0.112: variants
 
 - `svj_to_ac` reads SVJ 0.112. A file's `variants[]` (alternative engines, parts, geometries: spec 29.5) are named in the log;
@@ -30,7 +42,7 @@ All notable changes are documented here.
   in the glTF, undone on the way back): a car that goes AC -> SVJ -> AC has its original wheel, steering and needle frames, which the
   game turns by. Before, they came back rotated 180 degrees about Z, so a wheel would have spun the wrong way. World positions are
   unchanged. Still not tried in the game; meshes made elsewhere are assumed to follow the same convention.
-- Tests: 146 converter, 226 SVJ -> AC.
+- Tests: 146 converter, 226 SVJ -> AC (230 with the animations).
 
 ### SVJ -> AC: current SVJ, other simulators' springs, 3D models
 

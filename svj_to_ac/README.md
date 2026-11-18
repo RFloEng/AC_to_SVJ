@@ -75,7 +75,10 @@ gravity.
   simulators' SVJs carry no such block and are not written.
 - Node frames follow the forward converter's convention (a wheel turns about its X, a needle about its Z), so an AC car keeps its
   original frames; a mesh made elsewhere is assumed to use the same one.
-- Not written: doors and other animations, LODs, the collider, cockpit and driver nodes.
+- Moving parts: the doors, bonnet, boot and wipers of the SVJ (a hinge or slide to the chassis, with pose values) are written as
+  `animations/*.ksanim` (`ksanim_writer.py`): rest to the pose in steps of about 3 degrees, a wiper there and back. A part from AC keeps
+  its node and animation names; others get `car_<pose id>`. Which names the game's own triggers look for is not confirmed.
+- Not written: suspension travel (`SUSP_xx`), steering-wheel and shifter animations, LODs, the collider, cockpit and driver nodes.
 - Not tried in the game; the file is read back with the forward converter's reader in the tests.
 
 ## Variants (SVJ 0.112)

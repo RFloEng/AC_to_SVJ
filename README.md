@@ -320,7 +320,7 @@ Vertical shift: `chassis_z_offset = −rolling_radius`.
 | `ac_parsers.py` | All `.ini` / `.lut` parsers |
 | `acd_reader.py` | Car-data loader (`data/` or `data.acd` detection) |
 | `smoke_test.py` | 62-check regression suite against `test_car/` |
-| `test_*.py`, `svj_to_ac/tests/` | Converter tests (146) and SVJ → AC tests (226) |
+| `test_*.py`, `svj_to_ac/tests/` | Converter tests (146) and SVJ → AC tests (230) |
 | `test_car/` | Synthetic MX-5 ND2 with every field populated |
 | `examples/` | Reference SVJ from real Kunos data (`ks_mazda_mx5_nd`) |
 | `DEVELOPMENT.md` | Coordinate conventions, data-source map, contributor notes |

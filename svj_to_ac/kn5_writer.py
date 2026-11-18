@@ -201,6 +201,7 @@ class Report:
     wheels: list = field(default_factory=list)
     parts: list = field(default_factory=list)
     gauges: list = field(default_factory=list)
+    frames: dict = field(default_factory=dict)      # SVJ node name -> {name, world, local, parent} (4x4, column vectors)
     notes: list = field(default_factory=list)
     split: int = 0
 
@@ -339,11 +340,15 @@ def _node_bytes(name: str, matrix: np.ndarray, children: list[bytes]) -> bytes:
 
 
 def build_kn5(scene: SceneNode, model_name: str, cg_height: float, cg_behind_front_axle: float,
-              names: dict | None = None) -> tuple[bytes, Report]:
+              names: dict | None = None, gauge_nodes: set | None = None,
+              record: set | None = None) -> tuple[bytes, Report]:
     """The KN5 bytes of ``scene`` placed with ``kn5 = (-X, Y - h_cg, -Z + d_f)`` (see the module docstring).
 
     ``names`` maps an ``SVJ::...`` node name to the AC name it must have (the dashboard needles, which
-    AC finds by name in analog_instruments.ini); those nodes keep their own frame, whose Z is the axis.
+    AC finds by name in analog_instruments.ini, and the moving parts, which a ``.ksanim`` addresses by name);
+    ``gauge_nodes`` are the ones of those that are needles (their own frame is kept, Z is the axis).
+    ``record`` names nodes whose frames go to ``Report.frames``: the node's matrix as written (``local``), its
+    ``parent`` and its ``world`` matrix in the model's space, which the animation writer needs.
     """
     b = _Builder(model_name)
     rep = b.report
@@ -359,33 +364,39 @@ def build_kn5(scene: SceneNode, model_name: str, cg_height: float, cg_behind_fro
         used[name] = n + 1
         return name if n == 0 else f"{name}_{n}"
 
-    def sub(node: SceneNode) -> bytes:
+    def sub(node: SceneNode, pw: np.ndarray) -> bytes:
         """A subtree below a part: local matrices conjugated by L, meshes as children."""
         kids = []
-        gauge = bool(names and node.name in names)
-        own = unique(names[node.name]) if gauge else None     # a needle's name is taken before its meshes'
-        if gauge:
+        renamed = bool(names and node.name in names)
+        own = unique(names[node.name]) if renamed else None   # a renamed node's name is taken before its meshes'
+        if renamed and gauge_nodes and node.name in gauge_nodes:
             rep.gauges.append(own)
+        local = L4 @ node.matrix @ L4
+        world = pw @ local
+        if record and node.name in record:
+            rep.frames[node.name] = {"name": own or node.name, "local": local, "world": world, "parent": pw}
         for m in node.meshes:
             mid = b.material(m.material)
             kids += _mesh_record(unique(m.name or node.name), m, mid, b.materials[mid].transparent, _D, rep)
-        kids += [sub(c) for c in node.children]
-        return _node_bytes(own if gauge else unique(node.name), L4 @ node.matrix @ L4, kids)
+        kids += [sub(c, world) for c in node.children]
+        return _node_bytes(own if renamed else unique(node.name), local, kids)
 
     parts: list[bytes] = []
 
     def top(node: SceneNode, world: np.ndarray, role_seen: bool) -> None:
         name, role = ac_name(node.name)
         if names and node.name in names:
-            name, role = names[node.name], "gauge"
+            name, role = names[node.name], ("gauge" if gauge_nodes and node.name in gauge_nodes else "part")
         is_part = bool(_SVJ_NAME.match(node.name))
         if is_part:
             kids = []
             for m in node.meshes:
                 mid = b.material(m.material)
                 kids += _mesh_record(unique(m.name or name), m, mid, b.materials[mid].transparent, _D, rep)
-            kids += [sub(c) for c in node.children]
             M = A @ world @ L4
+            if record and node.name in record:
+                rep.frames[node.name] = {"name": name, "local": M, "world": M, "parent": np.eye(4)}
+            kids += [sub(c, M) for c in node.children]
             parts.append(_node_bytes(unique(name), M, kids))
             rep.parts.append(name)
             if role == "wheel":
