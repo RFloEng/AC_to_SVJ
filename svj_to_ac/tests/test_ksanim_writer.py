@@ -94,3 +94,46 @@ def test_a_wiper_goes_there_and_back(tmp_path) -> None:
 def test_a_part_without_a_mesh_node_is_reported(tmp_path) -> None:
     files, notes = W.write(_doc(), {}, tmp_path, CG)
     assert files == [] and any("no mesh node" in n for n in notes)
+
+
+# ---- suspension travel ---------------------------------------------------- #
+
+
+def _susp_doc():
+    return SimpleNamespace(raw={
+        "chassis": {"mass_bodies": [
+            {"id": "upright_fl", "category": "suspension", "visual": {"node": "SVJ::suspension::upright_fl"}},
+            {"id": "arm_fl", "category": "suspension", "visual": {"node": "SVJ::suspension::arm_fl"}},
+            {"id": "upright_zz", "category": "suspension"}]},
+        "wheel_stations": [{"id": "FL", "upright_body": "upright_fl", "wheel_body": "wheel_fl"}]})
+
+
+def test_suspension_parts_and_names() -> None:
+    parts = W.suspension_parts(_susp_doc())
+    assert {p["node"] for p in parts} == {"SVJ::suspension::upright_fl", "SVJ::suspension::arm_fl"}
+    assert W.suspension_node_names(_susp_doc()) == {"SVJ::suspension::upright_fl": "SUSP_LF"}
+
+
+def test_suspension_animation_moves_up_with_the_wheel(tmp_path, monkeypatch) -> None:
+    def poses(raw, sid, ts):                          # the wheel rises: SAE z is down, so z decreases
+        return {i: {b: (np.eye(3), (0.0, 0.0, -float(t))) for b in ("upright_fl", "arm_fl")} for i, t in enumerate(ts)}
+    monkeypatch.setattr(W, "_susp_poses", poses)
+    eye = np.eye(4)
+    frames = {n: {"name": nm, "world": eye, "parent": eye}
+              for n, nm in (("SVJ::suspension::upright_fl", "SUSP_LF"), ("SVJ::suspension::arm_fl", "ARM_LF"))}
+    files, notes = W.write_suspension(_susp_doc(), frames, tmp_path, CG)
+    assert [f.name for f in files] == ["car_SUSP_LF.ksanim"] and notes
+    tracks = KA.read_ksanim(files[0])
+    y = np.asarray(tracks["SUSP_LF"].pos)[:, 1]
+    assert len(y) == W.SUSP_FRAMES and y[0] == pytest.approx(-W.SUSP_TRAVEL_M, abs=1e-5)
+    assert y[-1] == pytest.approx(W.SUSP_TRAVEL_M, abs=1e-5) and set(tracks) == {"SUSP_LF", "ARM_LF"}
+
+
+def test_a_corner_that_does_not_close_is_skipped(tmp_path, monkeypatch) -> None:
+    def boom(raw, sid, ts):
+        raise ValueError("no closure")
+    monkeypatch.setattr(W, "_susp_poses", boom)
+    eye = np.eye(4)
+    frames = {"SVJ::suspension::upright_fl": {"name": "SUSP_LF", "world": eye, "parent": eye}}
+    files, notes = W.write_suspension(_susp_doc(), frames, tmp_path, CG)
+    assert files == [] and "skipped" in notes[0]

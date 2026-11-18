@@ -53,6 +53,7 @@ from svj_loader import SvjDoc
 from ac_writers import (
     aero_ini,
     analog_instruments_ini,
+    native_files_ini,
     brakes_ini,
     car_ini,
     ctrl_files,
@@ -149,6 +150,7 @@ def assemble(doc: SvjDoc, base_dir: Path, tyre_choice: dict | None = None,
     files.append(brakes_ini.write(doc, data_dir))
     files.append(electronics_ini.write(doc, data_dir))
     files.extend(analog_instruments_ini.write(doc, data_dir))
+    files.extend(native_files_ini.write(doc, data_dir))
     files.append(setup_ini.write(doc, data_dir))
     files.extend(ctrl_files.write(doc, data_dir))
 
@@ -232,8 +234,11 @@ def write_mesh(doc: SvjDoc, car_dir: Path, name: str) -> list[Path]:
             gauges = analog_instruments_ini.ac_object_names(doc)
             moving = ksanim_writer.movable_parts(doc)
             data, rep = kn5_writer.build_kn5(scene, name, h_cg, d_f,
-                                             names={**ksanim_writer.node_names(doc), **gauges},
-                                             gauge_nodes=set(gauges), record={p["node"] for p in moving})
+                                             names={**ksanim_writer.suspension_node_names(doc),
+                                                    **ksanim_writer.node_names(doc), **gauges},
+                                             gauge_nodes=set(gauges),
+                                             record={p["node"] for p in moving}
+                                             | {p["node"] for p in ksanim_writer.suspension_parts(doc)})
         except Exception as exc:                          # a bad file: try the next candidate
             last_err = f"{path.name}: {type(exc).__name__}: {exc}"
             continue
@@ -258,6 +263,13 @@ def write_mesh(doc: SvjDoc, car_dir: Path, name: str) -> list[Path]:
             files.extend(anims)
             for n in anim_notes:
                 _note_to_log(car_dir, n, "animation")
+        try:
+            susp, susp_notes = ksanim_writer.write_suspension(doc, rep.frames, car_dir / "animations", (-d_f, 0.0, -h_cg))
+        except Exception as exc:                          # noqa: BLE001 (the model must not fail for an animation)
+            susp, susp_notes = [], [f"suspension animation skipped: {type(exc).__name__}: {exc}"]
+        files.extend(susp)
+        for n in susp_notes:
+            _note_to_log(car_dir, n, "animation")
         return files
     _note_to_log(car_dir, f"no 3D model written: {last_err}", "mesh")
     return []

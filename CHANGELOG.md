@@ -4,6 +4,19 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### SVJ -> AC: suspension travel (`SUSP_xx`), native AC files, gltf2usd parity
+
+- `ksanim_writer.write_suspension` names each wheel station's upright node `SUSP_LF/RF/LR/RR` and writes
+  `animations/car_SUSP_<corner>.ksanim`: 100 frames, droop to bump over +-40 mm around the static pose (as Kunos' cars), solved with
+  `svj_migrate/loop_solver.py` outward from the static pose; arms/links bound to a mesh node move too. A corner whose mechanism does not
+  close is skipped with a log note. On the Murcielago all four corners are written (the node rises 80 mm over the frames). The travel
+  range and node set are assumed, not read from AC; not run in the game.
+- AC -> SVJ keeps `lights.ini`, `cameras.ini`, `damage.ini`, `ai.ini` in `x_assettocorsa.native_files` (`ac_native_files.py`; camera
+  vectors converted to ISO 8855), and SVJ -> AC writes them back (`ac_writers/native_files_ini.py`).
+- `svj_migrate/gltf2usd.py`: sampler wrap modes, metallicRoughness and emissive textures; KHR_texture_transform / texCoord are noted.
+- Still not carried: `lights.ksanim`, flames/mirrors/colliders/dash_cam/driver3d/ambient_shadows positions.
+- Tests: 147 converter, 237 SVJ -> AC.
+
 ### SVJ -> AC: door, bonnet, boot and wiper animations
 
 - `svj_to_ac/ksanim_writer.py` writes `animations/*.ksanim` for the movable parts of the SVJ (a `revolute` / `translational` joint from the

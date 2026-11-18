@@ -115,3 +115,24 @@ def test_opaque_materials_get_images_without_alpha(tmp_path):
     src.write_text(json.dumps(g))
     gltf2usd.convert(str(src), str(tmp_path / "b.usda"), "Car")
     assert all(Image.open(f).mode == "RGBA" for f in (tmp_path / "b_tex").glob("*.png"))
+
+
+def test_metallic_roughness_and_emissive_textures_and_wrap(tmp_path):
+    g = _gltf("OPAQUE")
+    g["materials"][0].update({"emissiveTexture": {"index": 0}, "emissiveFactor": [1, 0.5, 0]})
+    g["materials"][0]["pbrMetallicRoughness"].update({"metallicRoughnessTexture": {"index": 0}, "roughnessFactor": 0.4, "metallicFactor": 0.9})
+    g["samplers"] = [{"wrapS": 33071, "wrapT": 33648}]
+    g["textures"] = [{"source": 0, "sampler": 0}]
+    src = tmp_path / "mr.gltf"
+    src.write_text(json.dumps(g))
+    dst = str(tmp_path / "mr.usda")
+    gltf2usd.convert(str(src), dst, "Car")
+    stage = Usd.Stage.Open(dst)
+    _STAGES.append(stage)
+    sh = UsdShade.Shader(next(p for p in stage.Traverse() if p.GetName() == "Surface"))
+    assert sh.GetInput("roughness").HasConnectedSource() and sh.GetInput("metallic").HasConnectedSource()
+    assert sh.GetInput("emissiveColor").HasConnectedSource()
+    tex = {p.GetName(): UsdShade.Shader(p) for p in stage.Traverse() if p.GetName().startswith("tex_")}
+    import pytest
+    assert list(tex["tex_roughness"].GetInput("scale").Get())[1:3] == pytest.approx([0.4, 0.9])
+    assert tex["tex_roughness"].GetInput("wrapS").Get() == "clamp" and tex["tex_roughness"].GetInput("wrapT").Get() == "mirror"

@@ -2071,6 +2071,18 @@ def build_svj(ini_files: dict, cm_meta: Optional[dict] = None,
                 _pitch = (_gfx_pitch if apply_graphics_pitch and abs(_gfx_pitch) <= 6.0
                           else 0.0)
                 _placement = _visual_placement(svj, _gfx_off, cg_derived, _pitch)
+                try:
+                    from ac_native_files import collect as _collect_native
+                    _nat = _collect_native(data_dir, (_placement or {}).get("translation"), _pitch)
+                    if _nat:
+                        svj.setdefault("x_assettocorsa", {})["native_files"] = _nat
+                        log.append(f"✓ Game files carried in x_assettocorsa.native_files: {', '.join(_nat)}"
+                                   + ("" if all(v.get("frame", "ISO_8855") == "ISO_8855" for v in _nat.values())
+                                      else " (camera positions kept in the KN5's space: no placement)"))
+                        if any("FILE" in kv for kv in (_nat.get("lights.ini", {}).get("sections") or {}).values()):
+                            log.append("ℹ lights.ini names a light animation file (lights.ksanim): it is not carried")
+                except Exception as _nat_err:                   # noqa: BLE001
+                    log.append(f"⚠ Game files (lights, cameras, damage, ai) skipped: {_nat_err}")
                 if _placement and _placement["translation"] is not None:
                     log.append(f"✓ Mesh placement: GRAPHICS_OFFSET {_gfx_off} + derived CG "
                                f"(physics frame)")

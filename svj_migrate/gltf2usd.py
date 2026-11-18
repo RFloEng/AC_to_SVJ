@@ -1,5 +1,5 @@
 # Vendored from RFloEng/SVJ-standard-vehicle-json, tools/gltf2usd.py (commit af68666, Apache-2.0).
-# Changed: the import of mesh_check; textures are converted; animation of the nodes the caller names (derived from the SVJ joints, spec 22.10 rule 8).
+# Changed: the import of mesh_check; textures are converted (base colour, normal, metallic-roughness, emissive, sampler wrap, as the standard's gltf2usd at a286bbd; its occlusion map is left out on purpose); animation of the nodes the caller names (derived from the SVJ joints, spec 22.10 rule 8).
 #!/usr/bin/env python3
 """
 glTF / GLB -> OpenUSD converter for SVJ assets (spec §22.10).
@@ -216,8 +216,12 @@ def convert(src, dst, root_name="Root", animate=None):
         tx.CreateIdAttr("UsdUVTexture")
         tx.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath(path))
         tx.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("sRGB" if srgb else "raw")
-        tx.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
-        tx.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
+        tex_ = (gltf.get("textures") or [])[tex_index]
+        samplers = gltf.get("samplers") or []
+        smp = samplers[tex_["sampler"]] if isinstance(tex_.get("sampler"), int) and tex_["sampler"] < len(samplers) else {}
+        wrap = {33071: "clamp", 33648: "mirror"}
+        tx.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set(wrap.get(smp.get("wrapS"), "repeat"))
+        tx.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set(wrap.get(smp.get("wrapT"), "repeat"))
         tx.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st.ConnectableAPI(), "result")
         if factor is not None and any(abs(c - 1.0) > 1e-6 for c in factor):
             tx.CreateInput("scale", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(*[float(c) for c in factor]))   # glTF: colour = texture x factor
@@ -269,6 +273,22 @@ def convert(src, dst, root_name="Root", animate=None):
         nt = (m.get("normalTexture") or {}).get("index")
         if nt is not None:
             texture_network(mat, sh, "normal", nt, False, normal=True)
+        mrt = (pbr.get("metallicRoughnessTexture") or {}).get("index")
+        if mrt is not None:                         # glTF packs roughness in G and metallic in B, each times its factor
+            tx = texture_network(mat, sh, "roughness", mrt, False, channel="g")
+            if tx:
+                tx.CreateInput("scale", Sdf.ValueTypeNames.Float4).Set(
+                    Gf.Vec4f(1.0, float(pbr.get("roughnessFactor", 1.0)), float(pbr.get("metallicFactor", 1.0)), 1.0))
+                sh.CreateInput("metallic", Sdf.ValueTypeNames.Float).ConnectToSource(tx.CreateOutput("b", Sdf.ValueTypeNames.Float))
+        et = (m.get("emissiveTexture") or {}).get("index")
+        if et is not None:
+            texture_network(mat, sh, "emissiveColor", et, True, factor=[*(m.get("emissiveFactor") or [1.0, 1.0, 1.0])[:3], 1.0])
+        for slot, info in (("baseColor", pbr.get("baseColorTexture")), ("normal", m.get("normalTexture")),
+                           ("metallicRoughness", pbr.get("metallicRoughnessTexture")), ("emissive", m.get("emissiveTexture"))):
+            if info and (info.get("extensions") or {}).get("KHR_texture_transform"):
+                notes.append(f"texture '{slot}': KHR_texture_transform is not converted")
+            if info and info.get("texCoord", 0):
+                notes.append(f"texture '{slot}' uses TEXCOORD_{info['texCoord']}; only the first UV set is converted")
         materials[index] = (mat, col)
         return materials[index]
 

@@ -187,3 +187,120 @@ def write(doc, frames: dict, out_dir: Path, cg) -> tuple[list[Path], list[str]]:
         notes.append(f"{len(files)} animation(s) written ({', '.join(f.stem for f in files)}); the game plays them by name, "
                      "and the names are those the part had in AC or car_<pose>")
     return files, notes
+
+
+# --------------------------------------------------------------------------- #
+# Suspension travel: SUSP_xx nodes and animations/car_SUSP_xx.ksanim           #
+# --------------------------------------------------------------------------- #
+#
+# Kunos' cars carry ``animations/car_SUSP_LF.ksanim``: 100 frames of the nodes that move with the wheel (hub, arms),
+# the first with the wheel at its lowest, the last at its highest, the middle one the static pose (about +-0.04 m).
+# Here the bodies of a corner's mechanism that are bound to a mesh node (the upright through the station's
+# ``visual``, arms and links through their own ``visual.node``) are moved by the loop-closure solver at 100 wheel
+# travels and each node's local transform is written.  The upright node is named ``SUSP_<corner>``.
+
+SUSP_TRAVEL_M = 0.04
+SUSP_FRAMES = 100
+_CORNER = {"fl": "LF", "fr": "RF", "rl": "LR", "rr": "RR"}
+
+
+def _pose_kn5(R, t, cg) -> np.ndarray:
+    """The rigid motion ``p' = R p + t`` of the loader's SAE axes as a 4x4 in the KN5's space."""
+    c = np.array([0.0, cg[2], -cg[0]])
+    Rk = _DIR @ np.array(R, dtype="f8") @ _DIR.T
+    M = np.eye(4)
+    M[:3, :3] = Rk
+    M[:3, 3] = c - Rk @ c + _DIR @ np.array(t, dtype="f8")
+    return M
+
+
+def suspension_parts(doc) -> list[dict]:
+    """Mesh nodes that follow a wheel station: ``station``, ``corner`` (LF/RF/LR/RR), ``body``, ``node`` (``SVJ::...``)
+    and ``name`` (``SUSP_<corner>`` for the upright, else None)."""
+    raw = doc.raw or {}
+    bodies = {b.get("id"): b for b in (raw.get("chassis") or {}).get("mass_bodies") or [] if isinstance(b, dict)}
+    out = []
+    for st in raw.get("wheel_stations") or []:
+        sid = str(st.get("id") or "")
+        corner = _CORNER.get(sid.lower())
+        up = st.get("upright_body")
+        if not corner or up not in bodies:
+            continue
+        node = (st.get("visual") or {}).get("node") or (bodies[up].get("visual") or {}).get("node")
+        if node:
+            out.append({"station": sid, "corner": corner, "body": up, "node": node, "name": f"SUSP_{corner}"})
+        for bid, b in bodies.items():
+            n2 = (b.get("visual") or {}).get("node")
+            if (bid != up and n2 and b.get("category") in ("suspension", "structural")
+                    and str(bid).lower().endswith("_" + sid.lower())):
+                out.append({"station": sid, "corner": corner, "body": bid, "node": n2, "name": None})
+    return out
+
+
+def suspension_node_names(doc) -> dict[str, str]:
+    return {p["node"]: p["name"] for p in suspension_parts(doc) if p["name"]}
+
+
+def _susp_poses(raw, sid: str, ts) -> dict:
+    """``{frame index: transforms}`` for travels ``ts`` (sorted), solved outward from the static pose."""
+    from svj_migrate import loop_solver as ls
+
+    poses: dict = {}
+    for idxs in ([i for i, t in enumerate(ts) if t >= 0], [i for i, t in enumerate(ts) if t < 0][::-1]):
+        prev = None
+        for i in idxs:
+            r = ls.solve(raw, travel={sid: float(ts[i])}, start=prev)
+            if not r["converged"]:
+                raise ls.SolveError(f"travel {ts[i]:+.3f} m does not close (residual {r['residual']:.1e})")
+            prev = r["transforms"]
+            poses[i] = prev
+    return poses
+
+
+def write_suspension(doc, frames: dict, out_dir: Path, cg, travel: float = SUSP_TRAVEL_M, n: int = SUSP_FRAMES
+                     ) -> tuple[list[Path], list[str]]:
+    """``car_SUSP_<corner>.ksanim`` per corner whose mechanism the solver closes (``frames`` is ``Report.frames``)."""
+    notes: list[str] = []
+    files: list[Path] = []
+    by_station: dict = {}
+    for p in suspension_parts(doc):
+        if p["node"] in frames:
+            by_station.setdefault((p["station"], p["corner"]), []).append(p)
+    ts = np.linspace(-travel, travel, n)
+    for (sid, corner), items in by_station.items():
+        try:
+            poses = _susp_poses(doc.raw, sid, ts)
+        except Exception as exc:                # noqa: BLE001 (SolveError, a missing joint, an odd file)
+            notes.append(f"{sid}: suspension animation skipped: {exc}")
+            continue
+        tracks = []
+        for p in items:
+            fr = frames[p["node"]]
+            inv_pw = np.linalg.inv(fr["parent"])
+            rows, prev = [], None
+            for i in range(n):
+                tr = poses[i].get(p["body"])
+                if tr is None:
+                    break
+                loc = inv_pw @ _pose_kn5(tr[0], tr[1], cg) @ fr["world"]
+                q = _rot_to_quat(loc[:3, :3] / np.cbrt(abs(np.linalg.det(loc[:3, :3])) or 1.0))
+                if prev is not None and float(q @ prev) < 0:
+                    q = -q
+                prev = q
+                rows.append([*q, *loc[:3, 3], *[float(np.linalg.norm(loc[:3, k])) for k in range(3)]])
+            if len(rows) == n:
+                tracks.append((fr["name"], np.array(rows, dtype="<f4")))
+        if not tracks:
+            continue
+        blob = struct.pack("<ii", 2, len(tracks))
+        for name, arr in tracks:
+            nm = name.encode("utf-8")
+            blob += struct.pack("<i", len(nm)) + nm + struct.pack("<i", len(arr)) + arr.tobytes()
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        path = Path(out_dir) / f"car_SUSP_{corner}.ksanim"
+        path.write_bytes(blob)
+        files.append(path)
+    if files:
+        notes.append(f"suspension travel written for {len(files)} corner(s) ({n} frames, droop to bump, +-{travel * 1000:.0f} mm "
+                     "around the static pose, as Kunos' cars); travel range and node set are assumed, not read from AC")
+    return files, notes
